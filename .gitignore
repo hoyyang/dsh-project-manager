@@ -1,5 +1,5 @@
 node_modules/
-lib/
+lib/*.map
 *.tsbuildinfo
 *.tgz
 src/client/style.gen.ts
