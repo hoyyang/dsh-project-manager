@@ -1,0 +1,5 @@
+# dsh-project-manager bundle 装配清单。
+# 列入 profile bundles 时由官方 boot 层按此清单装配；package.json 的 dsh.bundle.patch 指向它。
+- insert:
+    - id: dsh-project-manager
+      name: 'dsh-project-manager'

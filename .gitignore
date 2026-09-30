@@ -1,0 +1,7 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+src/client/style.gen.ts
+prototype/
+.sanitize-allow.json

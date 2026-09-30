@@ -1,0 +1,86 @@
+{
+  "name": "dsh-project-manager",
+  "version": "0.4.0",
+  "description": "Project board for DeepSeek Harness: kanban card groups, cards linked to landfill-project memory, mounted repos, a pinned 项目区 workspace, and project sessions that auto-load card memory.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "kanban",
+    "project-management",
+    "session",
+    "landfill-project"
+  ],
+  "license": "MIT",
+  "author": "hoyyang",
+  "homepage": "https://github.com/hoyyang/dsh-project-manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hoyyang/dsh-project-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hoyyang/dsh-project-manager/issues"
+  },
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "assets"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc <2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc <2"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsdown": "0.22.14",
+    "unrun": "0.3.1",
+    "typescript": "5.7.3"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
+    "build:client": "node scripts/gen-css.mjs && tsdown",
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm run build:client && npm test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
