@@ -7,7 +7,8 @@ import * as M from '../lib/model.js'
 import { StateCatalog, parseState } from '../lib/states.js'
 import { memoryText } from '../lib/memory.js'
 import { BoardStore } from '../lib/store.js'
-import { syncHub, agentsMd } from '../lib/hub.js'
+import { syncHub, agentsMd, groupDir, groupAgentsMd } from '../lib/hub.js'
+import { readlinkSync, readdirSync, symlinkSync } from 'node:fs'
 
 const seed = () => {
   const b = M.emptyBoard()
@@ -17,6 +18,33 @@ const seed = () => {
   const d = M.addCard(b, g.id, 'C')
   return { b, g, a, c, d }
 }
+
+test('moveGroup reorders groups (before target / to end), rejects unknown ids', () => {
+  const b = M.emptyBoard()
+  const [x, y, z] = ['X', 'Y', 'Z'].map((n) => M.addGroup(b, n))
+  const names = () => b.groups.map((g) => g.name).join('')
+  M.moveGroup(b, z.id, x.id); assert.equal(names(), 'ZXY')
+  M.moveGroup(b, z.id, null); assert.equal(names(), 'XYZ')
+  M.moveGroup(b, x.id, z.id); assert.equal(names(), 'YXZ')
+  M.moveGroup(b, y.id, y.id); assert.equal(names(), 'YXZ')
+  assert.throws(() => M.moveGroup(b, 'nope', null), /nope|NOT_FOUND|不存在/)
+  assert.throws(() => M.moveGroup(b, x.id, 'nope'), /nope|NOT_FOUND|不存在/)
+  assert.equal(names(), 'YXZ')
+})
+
+test('sameNameState: suggests a STATE whose slug appears in the title only when the card has no memory', () => {
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'bugs')
+  const c = M.addCard(b, g.id, '登录验证码不填（ISS-2026-0042A）')
+  const states = [{ key: 'p/iss-2026-0042a', slug: 'iss-2026-0042a' }, { key: 'p/iss', slug: 'iss' }, { key: 'p/other-thing', slug: 'other-thing' }]
+  assert.equal(M.sameNameState(b, c, states)?.key, 'p/iss-2026-0042a')
+  assert.equal(M.sameNameState(b, M.addCard(b, g.id, 'unrelated'), states), null)
+  M.updateCard(b, c.id, { links: ['p/other-thing'] })
+  assert.equal(M.sameNameState(b, c, states), null, 'card already has memory')
+  const c2 = M.addCard(b, g.id, 'ISS-2026-0042A follow-up')
+  M.setGroupLinks(b, g.id, ['p/x'])
+  assert.equal(M.sameNameState(b, c2, states), null, 'group memory counts as memory')
+})
 
 test('addCard orders cards within a status', () => {
   const { b, g } = seed()
@@ -357,4 +385,208 @@ test('syncHub never creates links outside repos/ for dotted names', () => {
   const root = syncHub(dir, b, cat)
   assert.ok(existsSync(join(root, 'repos', 'x', 'x')))
   assert.ok(!existsSync(join(dir, '..', 'x')) || !lstatSync(join(dir, '..', 'x')).isSymbolicLink())
+})
+
+
+test('setNotes keeps text verbatim, normalizes CRLF, blank clears; survives parseBoard', () => {
+  const { b, a } = seed()
+  M.setNotes(b, a.id, '第一行\r\n  https://x.test/a  \n')
+  assert.equal(a.notes, '第一行\n  https://x.test/a  \n')
+  M.setNotes(b, a.id, '   \n ')
+  assert.equal('notes' in a, false)
+  assert.throws(() => M.setNotes(b, a.id, 42), { code: 'BAD_ARG' })
+  M.setNotes(b, a.id, 'x'.repeat(200000))
+  assert.equal(M.parseBoard(JSON.parse(JSON.stringify(b))).cards[0].notes.length, 200000)
+})
+
+test('addFiles/removeFile: absolute paths only, dedupe, all-or-nothing, unlink never touches disk', () => {
+  const { b, a } = seed()
+  assert.deepEqual(M.addFiles(b, a.id, ['/tmp/a.md', '/tmp/b.pdf/', '/tmp/a.md']), { added: 2, skipped: 1 })
+  assert.deepEqual(a.files, ['/tmp/a.md', '/tmp/b.pdf'])
+  assert.throws(() => M.addFiles(b, a.id, ['/tmp/c', 'rel/x']), { code: 'BAD_ARG' })
+  assert.deepEqual(a.files, ['/tmp/a.md', '/tmp/b.pdf'])
+  assert.throws(() => M.addFiles(b, a.id, []), { code: 'BAD_ARG' })
+  assert.throws(() => M.addFiles(b, a.id, ['/tmp/x\ny']), { code: 'BAD_ARG' })
+  M.removeFile(b, a.id, '/tmp/a.md')
+  assert.deepEqual(a.files, ['/tmp/b.pdf'])
+  assert.throws(() => M.removeFile(b, a.id, '/tmp/a.md'), { code: 'NOT_LINKED' })
+  M.removeFile(b, a.id, '/tmp/b.pdf')
+  assert.equal('files' in a, false)
+})
+
+test('parsePicked splits osascript POSIX output', () => {
+  assert.deepEqual(M.parsePicked('/srv/demo/a b.md\n/srv/demo/dir/\n\n'), ['/srv/demo/a b.md', '/srv/demo/dir'])
+  assert.deepEqual(M.parsePicked(''), [])
+})
+
+test('fileStatus reports existing vs deleted files', async () => {
+  const { fileStatus } = await import('../lib/routes.js')
+  const dir = mkdtempSync(join(tmpdir(), 'dpm-files-'))
+  writeFileSync(join(dir, 'here.txt'), 'x')
+  const { b, a } = seed()
+  M.addFiles(b, a.id, [join(dir, 'here.txt'), join(dir, 'gone.txt')])
+  assert.deepEqual(fileStatus(b), { [join(dir, 'here.txt')]: true, [join(dir, 'gone.txt')]: false })
+})
+
+test('archiveCard: leaves the column (peers renumbered), keeps g/col, sessions untouched, idempotent', () => {
+  const { b, g, a, c, d } = seed()
+  M.bindSession(b, 's1', c.id)
+  M.archiveCard(b, c.id, '2026-10-10T00:00:00.000Z')
+  assert.equal(c.archivedAt, '2026-10-10T00:00:00.000Z')
+  assert.deepEqual(M.cellCards(b, g.id, a.col).map((x) => [x.t, x.order]), [['A', 0], ['C', 1]])
+  assert.equal(c.col, a.col)
+  assert.equal(M.cardOfSession(b, 's1')?.id, c.id)
+  M.archiveCard(b, c.id, '2026-10-11T00:00:00.000Z')
+  assert.equal(c.archivedAt, '2026-10-10T00:00:00.000Z')
+  assert.equal(d.order, 1)
+})
+
+test('archived card is read-only: every content mutation refuses with CARD_ARCHIVED', () => {
+  const { b, g, c } = seed()
+  M.archiveCard(b, c.id)
+  const ro = (fn) => assert.throws(fn, (e) => e.code === 'CARD_ARCHIVED' && /B/.test(e.message))
+  ro(() => M.updateCard(b, c.id, { t: 'x' }))
+  ro(() => M.moveCard(b, c.id, { col: 'done' }, 'user'))
+  ro(() => M.setTasks(b, c.id, [{ text: 't', done: false }]))
+  ro(() => M.setNotes(b, c.id, 'n'))
+  ro(() => M.addFiles(b, c.id, ['/tmp/a']))
+  ro(() => M.removeFile(b, c.id, '/tmp/a'))
+  ro(() => M.bindSession(b, 's9', c.id))
+  ro(() => M.bindMany(b, c.id, [{ sessionId: 's9' }]))
+  assert.equal(M.card(b, c.id).t, 'B')
+  M.removeCard(b, c.id)
+  assert.equal(b.cards.some((x) => x.id === c.id), false)
+  assert.equal(M.cellCards(b, g.id, 'research').length, 2)
+})
+
+test('unarchiveCard: back to the end of its original stage; lost stage falls back to the first', () => {
+  const { b, g, a, c } = seed()
+  M.archiveCard(b, a.id)
+  M.unarchiveCard(b, a.id)
+  assert.equal(a.archivedAt, undefined)
+  assert.deepEqual(M.cellCards(b, g.id, 'research').map((x) => x.t), ['B', 'C', 'A'])
+  M.moveCard(b, c.id, { col: 'verify' }, 'user')
+  M.archiveCard(b, c.id)
+  M.setStatuses(b, g.id, g.statuses.filter((s) => s.id !== 'verify'))
+  M.unarchiveCard(b, c.id)
+  assert.equal(c.col, 'research')
+  assert.equal(c.order, M.cellCards(b, g.id, 'research').length - 1)
+  M.unarchiveCard(b, c.id)
+  assert.equal(c.archivedAt, undefined)
+})
+
+test('archived cards do not block deleting their stage; addCard order ignores archived', () => {
+  const { b, g, a } = seed()
+  M.moveCard(b, a.id, { col: 'plan' }, 'user')
+  M.archiveCard(b, a.id)
+  const n = M.addCard(b, g.id, 'N', [], 'plan')
+  assert.equal(n.order, 0)
+  assert.throws(() => M.setStatuses(b, g.id, g.statuses.filter((s) => s.id !== 'plan')), (e) => e.code === 'STATUS_IN_USE' && /N/.test(e.message))
+  M.removeCard(b, n.id)
+  M.setStatuses(b, g.id, g.statuses.filter((s) => s.id !== 'plan'))
+  M.unarchiveCard(b, a.id)
+  assert.equal(a.col, 'research')
+})
+
+test('0.9 syncHub: each card group gets hub/groups/<id>/ with repos/<repo> links + its own AGENTS.md; rename keeps the dir; removed group keeps dir but loses links', () => {
+  const data = mkdtempSync(join(tmpdir(), 'dpm-g-'))
+  const repoA = mkdtempSync(join(tmpdir(), 'dpm-ra-')), repoB = mkdtempSync(join(tmpdir(), 'dpm-rb-'))
+  const states = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
+  const b = M.emptyBoard()
+  const g1 = M.addGroup(b, '密码 问题单'), g2 = M.addGroup(b, 'other')
+  M.setGroupRepos ? M.setGroupRepos(b, g1.id, [{ name: 'Passwords', role: '主仓', path: repoA }]) : (g1.repos = [{ name: 'Passwords', role: '主仓', path: repoA }])
+  g2.repos = [{ name: 'B', role: '仓库', path: repoB }]
+  syncHub(data, b, states)
+  const d1 = groupDir(data, g1.id)
+  assert.ok(d1.endsWith(join('hub', 'groups', g1.id)), 'dir named by group id, not name')
+  assert.equal(readlinkSync(join(d1, 'repos', 'Passwords')), repoA)
+  assert.equal(readdirSync(join(groupDir(data, g2.id), 'repos')).join(), 'B', 'only own repos')
+  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「密码 问题单」[\s\S]*repos\/Passwords\/ → /)
+  // rename: same dir, AGENTS.md title follows
+  M.renameGroup(b, g1.id, '密码问题单处理'); syncHub(data, b, states)
+  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「密码问题单处理」/)
+  assert.equal(readlinkSync(join(d1, 'repos', 'Passwords')), repoA)
+  // repo removed → link removed, target untouched
+  g1.repos = []; syncHub(data, b, states)
+  assert.equal(readdirSync(join(d1, 'repos')).length, 0)
+  assert.ok(existsSync(repoA))
+  // group removed → dir kept (old session cwd stays valid), links cleared
+  b.groups = b.groups.filter((g) => g.id !== g2.id); syncHub(data, b, states)
+  assert.ok(existsSync(groupDir(data, g2.id)))
+  assert.equal(readdirSync(join(groupDir(data, g2.id), 'repos')).length, 0)
+  assert.ok(existsSync(repoB))
+})
+
+test('0.9 groupAgentsMd: duplicate repo names are flagged, links listed, names cannot inject new lines', () => {
+  const states = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'x\n# injected')
+  g.repos = [{ name: 'A', role: 'r', path: '/a' }, { name: 'A', role: 'r', path: '/b' }]
+  g.links = ['p/missing']
+  const md = groupAgentsMd(g, states)
+  assert.ok(!/\n# injected/.test(md), 'group name is single-line')
+  assert.match(md, /未挂载（与本组其他仓库重名/)
+  assert.match(md, /p\/missing（未找到）/)
+})
+
+test('0.9 syncHub never follows a symlinked group dir', () => {
+  const data = mkdtempSync(join(tmpdir(), 'dpm-gl-'))
+  const victim = mkdtempSync(join(tmpdir(), 'dpm-victim-'))
+  writeFileSync(join(victim, 'keep.txt'), 'x')
+  const states = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
+  const b = M.emptyBoard()
+  syncHub(data, b, states)
+  symlinkSync(victim, join(data, 'hub', 'groups', 'gstale'), 'dir')
+  syncHub(data, b, states)
+  assert.ok(existsSync(join(victim, 'keep.txt')))
+  assert.ok(!existsSync(join(data, 'hub', 'groups', 'gstale')))
+})
+
+test('0.10 normUrl: http(s) only, bare domain gets https://, rejects spaces / other schemes / incomplete hosts', () => {
+  assert.equal(M.normUrl('example.com/a'), 'https://example.com/a')
+  assert.equal(M.normUrl(' https://foo.org/b?x=1 '), 'https://foo.org/b?x=1')
+  assert.equal(M.normUrl('localhost:3080/x'), 'https://localhost:3080/x')
+  assert.equal(M.normUrl('http://127.0.0.1:8080'), 'http://127.0.0.1:8080/')
+  for (const bad of ['', 'ftp://x.com', 'javascript:alert(1)', 'bad url', 'https://intranet', 'a\nb.com']) assert.throws(() => M.normUrl(bad), (e) => e.code === 'BAD_URL', bad)
+})
+
+test('0.10 setWebLinks: full replace keeps order, auto text, new types become global, all-or-nothing, empty clears', () => {
+  const { b, a, c } = seed()
+  assert.deepEqual(M.linkTypes(b), ['文档', '代码'])
+  M.setWebLinks(b, a.id, [{ text: '仓库', type: '代码', url: 'github.com/x/y' }, { text: '', type: '设计稿', url: 'https://www.figma.com/file/abc/' }])
+  assert.deepEqual(a.webLinks.map((l) => [l.text, l.type, l.url]), [['仓库', '代码', 'https://github.com/x/y'], ['figma.com/file/abc', '设计稿', 'https://www.figma.com/file/abc/']])
+  assert.deepEqual(M.linkTypes(b), ['文档', '代码', '设计稿'], 'new type is global')
+  M.setWebLinks(b, a.id, [a.webLinks[1], a.webLinks[0]])
+  assert.equal(a.webLinks[0].type, '设计稿', 'reorder')
+  const before = JSON.stringify(a.webLinks)
+  assert.throws(() => M.setWebLinks(b, a.id, [{ text: 'ok', type: '文档', url: 'https://a.com' }, { text: 'x', type: '文档', url: 'ftp://b.com' }]), /第 2 条/)
+  assert.equal(JSON.stringify(a.webLinks), before, 'invalid batch writes nothing')
+  M.setWebLinks(b, a.id, [])
+  assert.equal(a.webLinks, undefined)
+  assert.equal(M.addLinkType(b, '  设计稿 '), '设计稿')
+  assert.deepEqual(M.linkTypes(b), ['文档', '代码', '设计稿'], 'no duplicate type')
+  assert.throws(() => M.addLinkType(b, 'x'.repeat(21)), /20/)
+  M.archiveCard(b, c.id)
+  assert.throws(() => M.setWebLinks(b, c.id, []), (e) => e.code === 'CARD_ARCHIVED')
+})
+
+test('0.10 memoryText injects card materials (notes fenced, links markdown, file paths); none → memory only', () => {
+  const ai = mkdtempSync(join(tmpdir(), 'dpm-ai-'))
+  const states = new StateCatalog(ai)
+  const { b, a } = seed()
+  const plain = memoryText(b, a, states)
+  assert.ok(!/卡片「A」的资料/.test(plain), 'no materials → no section')
+  M.setNotes(b, a.id, '背景：\n## 不是标题\n```bash\nrm -rf /\n```')
+  M.setWebLinks(b, a.id, [{ text: '方案 [v2]', type: '文档', url: 'https://docs.example.com/abc' }])
+  M.addFiles(b, a.id, ['/srv/demo/a.md', '/srv/demo/b.png'])
+  const t = memoryText(b, a, states)
+  assert.match(t, /## dsh-project-manager：卡片「A」的资料/)
+  assert.match(t, /### 相关说明\n```text\n背景：\n## 不是标题/)
+  assert.equal((t.match(/```/g) || []).length, 2, 'user fences neutralized, only our fence remains')
+  assert.match(t, /- \[方案 v2\]\(https:\/\/docs\.example\.com\/abc\)（文档）/)
+  assert.match(t, /### 相关文件（绝对路径）\n- \/srv\/demo\/a\.md\n- \/srv\/demo\/b\.png/)
+  M.setNotes(b, a.id, '长'.repeat(4000))
+  const cut = memoryText(b, a, states, 6000, [], 3000)
+  assert.match(cut, /已截断/)
+  assert.ok(Buffer.byteLength(cut) < 6000)
 })

@@ -4,26 +4,32 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import * as M from './model.js'
 import type { Board } from './model.js'
 import type { BoardStore } from './store.js'
 import type { StateCatalog } from './states.js'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-project-manager'
-const MAX_BODY = 64 * 1024
+// 相关说明不限字数：体上限放到 2MB（仅本机同源请求）
+const MAX_BODY = 2 * 1024 * 1024
 
 export interface Services {
   store: BoardStore
   states: StateCatalog
-  hub(): { workspaceId: string | null; path: string; title: string }
-  prepareSession(cardId: string): Promise<{ workspaceId: string }>
-  bindSession(sessionId: string, cardId: string): Promise<{ title: string | null; permission: boolean }>
-  cleanup(): Promise<{ removedWorkspace: boolean }>
+  /** groups = 卡片组 id → 它的子工作区 id（侧栏按 data-row-key 找组行用）。 */
+  hub(): { workspaceId: string | null; path: string; title: string; groups: Record<string, string> }
+  prepareSession(cardId: string): Promise<{ workspaceId: string; workspaceTitle: string }>
+  /** tree = 用户当前是「按工作区树」分组：会话名只用卡片名。 */
+  bindSession(sessionId: string, cardId: string, tree: boolean): Promise<{ title: string | null; permission: boolean }>
+  cleanup(): Promise<{ removedWorkspace: boolean; removedGroupWorkspaces: number }>
   linkSessions(cardId: string, items: Array<{ sessionId: string; title?: string }>): Promise<{ linked: number; moved: number }>
   unlinkSession(sessionId: string): Promise<{ cardId: string }>
   unarchiveSession(sessionId: string): Promise<{ restored: boolean }>
   canUnarchive(): boolean
+  /** 弹系统选文件框（可多选）；取消返回 null；不支持的平台抛 BoardError('PICK_UNAVAILABLE')。 */
+  pickFiles(): Promise<string[] | null>
 }
 
 type Json = Record<string, unknown>
@@ -84,10 +90,20 @@ const str = (v: unknown, field: string): string => {
   return v
 }
 
-/** 给前端的完整快照：看板 + 落盘项目目录 + 枢纽工作区 + 最近事件。 */
+/** 所有卡片相关文件的存在状态（路径 → 是否存在）。ponytail: 每次轮询逐个 stat，文件上千时再改成按需检查。 */
+export function fileStatus(b: Board): Record<string, boolean> {
+  const out: Record<string, boolean> = {}
+  for (const c of b.cards) for (const p of c.files ?? []) if (!(p in out)) out[p] = existsSync(p)
+  return out
+}
+const fileSig = (m: Record<string, boolean>): string => { let n = 0; for (const k in m) if (!m[k]) n = (n * 31 + k.length + 1) >>> 0; return n.toString(36) }
+const expandHome = (p: unknown): unknown => (typeof p === 'string' && /^~(\/|$)/.test(p.trim()) ? homedir() + p.trim().slice(1) : p)
+
+/** 给前端的完整快照：看板 + 落盘项目目录 + 枢纽工作区 + 文件状态 + 最近事件。 */
 export function snapshot(s: Services, rev: string): Json {
   const b = s.store.get()
   return {
+    files: fileStatus(b),
     ok: true,
     rev,
     board: b,
@@ -114,11 +130,19 @@ const MUTATIONS: Record<string, Handler> = {
     return g
   },
   'group/remove': (x, b) => M.removeGroup(b, str(x.id, 'id')),
+  'group/move': (x, b) => M.moveGroup(b, str(x.id, 'id'), (x.beforeId as string | null | undefined) ?? null),
   'group/repos-add': (x, b) => M.addRepos(b, str(x.id, 'id'), x.repos, (p) => { try { return realpathSync(p) } catch { return p } }),
   'card/create': (x, b) => M.addCard(b, str(x.group, 'group'), str(x.title, 'title'), (x.links as string[] | undefined) ?? [], x.col as string | undefined),
   'card/update': (x, b) => M.updateCard(b, str(x.id, 'id'), { t: x.title as string | undefined, links: x.links as string[] | undefined }),
   'card/remove': (x, b) => M.removeCard(b, str(x.id, 'id')),
   'card/tasks': (x, b) => M.setTasks(b, str(x.id, 'id'), x.tasks as M.Task[]),
+  'card/notes': (x, b) => M.setNotes(b, str(x.id, 'id'), x.notes),
+  'card/weblinks': (x, b) => M.setWebLinks(b, str(x.id, 'id'), x.links),
+  'linktype/add': (x, b) => M.addLinkType(b, x.name),
+  'card/files-add': (x, b) => M.addFiles(b, str(x.id, 'id'), Array.isArray(x.paths) ? x.paths.map(expandHome) : x.paths),
+  'card/files-remove': (x, b) => M.removeFile(b, str(x.id, 'id'), x.path),
+  'card/archive': (x, b) => M.archiveCard(b, str(x.id, 'id')),
+  'card/unarchive': (x, b) => M.unarchiveCard(b, str(x.id, 'id')),
   'card/move': (x, b) => M.moveCard(b, str(x.id, 'id'), { g: x.group as string | undefined, col: str(x.col, 'col'), beforeId: (x.beforeId as string | null | undefined) ?? null }, 'user'),
 }
 
@@ -129,7 +153,8 @@ export function mountRoutes(
 ): () => void {
   // 版本号 = 启动标识 + 看板变更计数 + STATE 目录签名：插件重载或 STATE 改动都会让前端拉到新快照
   const boot = Date.now().toString(36)
-  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature()
+  // 文件被删/恢复也要让前端拉新快照 → 版本号带上「缺失文件」签名
+  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature() + '.' + fileSig(fileStatus(s.store.get()))
   return webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -154,6 +179,9 @@ export function mountRoutes(
             return send(res, 200, {
               ok: true,
               card: { id: c.id, title: c.t, group: g.name },
+              suggest: ((x) => (x ? { key: x.key, slug: x.slug } : null))(M.sameNameState(b, c, s.states.list())),
+              // 0.10：注入的卡片资料概要（会话界面提示用）
+              materials: { notes: (c.notes ?? '').trim().length, links: (c.webLinks ?? []).length, files: (c.files ?? []).length },
               memory: M.memoryOf(b, c).map((m) => { const st = s.states.get(m.key); return { key: m.key, from: m.from, slug: st?.slug ?? m.key, next: st?.next ?? '', found: st !== undefined, read: (M.sessionRef(b, id)?.readKeys ?? []).includes(m.key) } }),
             })
           }
@@ -162,10 +190,10 @@ export function mountRoutes(
         if (req.method !== 'POST') return fail(res, 405, 'METHOD', '只支持 GET/POST')
         if (!sameOrigin(req)) return fail(res, 403, 'CROSS_ORIGIN', '拒绝跨站请求')
         const body = await readBody(req)
-        if (body === null) return fail(res, 400, 'BAD_BODY', '请求体必须是 ≤64KB 的 JSON 对象')
+        if (body === null) return fail(res, 400, 'BAD_BODY', '请求体必须是 ≤2MB 的 JSON 对象')
         const key = sub.replace(/^\//, '')
         if (key === 'session/prepare') return send(res, 200, { ok: true, ...(await s.prepareSession(str(body.cardId, 'cardId'))) })
-        if (key === 'session/bind') return send(res, 200, { ok: true, ...(await s.bindSession(str(body.sessionId, 'sessionId'), str(body.cardId, 'cardId'))) })
+        if (key === 'session/bind') return send(res, 200, { ok: true, ...(await s.bindSession(str(body.sessionId, 'sessionId'), str(body.cardId, 'cardId'), body.tree === true)) })
         if (key === 'hub/cleanup') return send(res, 200, { ok: true, ...(await s.cleanup()) })
         if (key === 'session/link') {
           const items = Array.isArray(body.sessions) ? (body.sessions as Array<Record<string, unknown>>).map((x) => ({ sessionId: str(x?.sessionId, 'sessionId'), title: typeof x?.title === 'string' ? x.title : undefined })) : []
@@ -174,6 +202,14 @@ export function mountRoutes(
         }
         if (key === 'session/unlink') { const r = await s.unlinkSession(str(body.sessionId, 'sessionId')); return send(res, 200, { ok: true, result: r, ...snapshot(s, getRev()) }) }
         if (key === 'session/unarchive') { const r = await s.unarchiveSession(str(body.sessionId, 'sessionId')); return send(res, 200, { ok: true, result: r, ...snapshot(s, getRev()) }) }
+        if (key === 'card/files-pick') {
+          const id = str(body.id, 'id')
+          M.liveCard(s.store.get(), id)
+          const picked = await s.pickFiles()
+          if (picked === null) return send(res, 200, { ok: true, result: { cancelled: true, added: 0, skipped: 0 }, ...snapshot(s, getRev()) })
+          const r = await s.store.mutate((b) => M.addFiles(b, id, picked), () => [{ at: new Date().toISOString(), actor: 'user', kind: 'card/files-add', card: id }])
+          return send(res, 200, { ok: true, result: { cancelled: false, ...r }, ...snapshot(s, getRev()) })
+        }
         if (key === 'states/refresh') { s.states.invalidate(); return send(res, 200, snapshot(s, getRev())) }
         const fn = MUTATIONS[key]
         if (!fn) return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)

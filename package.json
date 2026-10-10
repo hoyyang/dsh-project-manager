@@ -1,6 +1,6 @@
 {
   "name": "dsh-project-manager",
-  "version": "0.4.0",
+  "version": "0.11.0",
   "description": "Project board for DeepSeek Harness: kanban card groups, cards linked to landfill-project memory, mounted repos, a pinned 项目区 workspace, and project sessions that auto-load card memory.",
   "keywords": [
     "dsh",

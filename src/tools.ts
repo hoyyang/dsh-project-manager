@@ -34,6 +34,8 @@ function summary(b: M.Board, states: StateCatalog): string {
       const cs = M.cellCards(b, g.id, s.id)
       lines.push('  ' + s.name + ' (' + s.id + '): ' + (cs.map((c) => c.t + '[' + c.id + '] ' + c.tasks.filter((t) => t.done).length + '/' + c.tasks.length + (c.links.length ? ' mem=' + c.links.join(',') : '')).join(' | ') || '—'))
     }
+    const arch = b.cards.filter((c) => c.g === g.id && c.archivedAt)
+    if (arch.length) lines.push('  已归档（只读）: ' + arch.map((c) => c.t + '[' + c.id + ']').join(' | '))
   }
   return lines.join('\n') || '(看板为空)'
 }

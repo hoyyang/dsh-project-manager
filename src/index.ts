@@ -1,17 +1,19 @@
 /**
  * dsh-project-manager — host 入口（hybrid：看板数据 + HTTP 面 + 4 工具 + 项目区工作区 + 会话记忆注入）。
  * 生命周期：apply 只登记 inject 回调，无 module 级副作用；每个贡献（路由/工具/监听/上下文）都在 dispose 中撤销。
- * 卸载不删用户数据（board.json/hub/会话），「项目区」工作区条目由界面「卸载前清理」或 POST hub/cleanup 撤销。
+ * 卸载不删用户数据（board.json/hub/会话），「项目区」及卡片组子工作区条目由界面「卸载前清理」或 POST hub/cleanup 撤销。
+ * 0.9：每个卡片组 = 「项目区」下的子工作区（hub/groups/<组 id>/，标题 = 组名）；dsh「按工作区树」分组下自然嵌套。
  */
 import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { realpathSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
+import { execFile } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import * as M from './model.js'
 import { BoardStore } from './store.js'
 import { StateCatalog } from './states.js'
-import { hubDir, syncHub } from './hub.js'
+import { groupDir, hubDir, syncHub } from './hub.js'
 import { memoryText } from './memory.js'
 import { mountRoutes, ROUTE_PREFIX } from './routes.js'
 import { registerTools } from './tools.js'
@@ -35,7 +37,7 @@ export const Config: z<Config> = z.object({
 }) as z<Config>
 
 type Session = { id: string; header: { cwd?: string; origin?: string } }
-type Workspace = { id: string; path: string; title: string }
+type Workspace = { id: string; path: string; title: string; setTitle?(title: string): Promise<void> }
 type HostCtx = Context & {
   webServer: { register(r: unknown): () => void }
   tools: { register(t: unknown): void }
@@ -65,6 +67,8 @@ export function apply(ctx: HostCtx, config: Config): void {
   ctx.effect(() => store.subscribe((b) => {
     rev++
     try { syncHub(dataDir, b, states) } catch (e) { log?.warn('同步项目区目录失败', e) }
+    // 组新建 / 改名 / 删除 / 排序 → 子工作区跟着变
+    void arrange().catch(() => undefined)
   }), 'dsh-project-manager: board subscription')
 
   /** 找到或创建「项目区」工作区并置顶；幂等（同路径 create 复用原条目）。 */
@@ -74,29 +78,64 @@ export function apply(ctx: HostCtx, config: Config): void {
     await pin()
     return hubWs
   }
-  const pin = async (): Promise<void> => {
-    if (!hubWs || !ctx.workspaceRegistry.get(hubWs.id)) return
-    const order = ctx.workspaceRegistry.list()
-    if (order.length > 0 && order[0].id !== hubWs.id) await ctx.workspaceRegistry.insertBefore(hubWs.id, order[0].id)
+  // ── 卡片组子工作区 ──
+  const groupsReal = join(hubReal, 'groups')
+  const groupReal = (gid: string): string => { const p = groupDir(dataDir, gid); try { return realpathSync(p) } catch { return join(groupsReal, p.slice(p.lastIndexOf('/') + 1)) } }
+  /** cwd（已 realpath）是否属于项目区：根目录或某个卡片组子目录。 */
+  const projectCwd = (cwd: string): boolean => cwd === hubReal || dirname(cwd) === groupsReal
+  const groupWsOf = (gid: string): Workspace | undefined => { const p = groupReal(gid); return ctx.workspaceRegistry.list().find((w) => w.path === p) }
+  /**
+   * 让登记与看板一致（幂等，串行）：每个卡片组一个子工作区、标题 = 组名；组已删 → 撤销登记（目录与会话保留）；
+   * 顺序 = 项目区第一，紧跟各卡片组（按看板顺序）。只在已有「项目区」工作区时生效（用户还没用过项目会话就不往侧栏加东西）。
+   */
+  let chain: Promise<void> = Promise.resolve()
+  const arrange = (): Promise<void> => {
+    const run = async (): Promise<void> => {
+      if (!hubWs || !ctx.workspaceRegistry.get(hubWs.id)) return
+      const reg = ctx.workspaceRegistry
+      const b = store.get()
+      const want: Workspace[] = []
+      for (const g of b.groups) {
+        const p = groupDir(dataDir, g.id)
+        if (!existsSync(p)) continue
+        let w = groupWsOf(g.id)
+        if (!w) w = await reg.create(p, g.name)
+        else if (w.title !== g.name && typeof w.setTitle === 'function') await w.setTitle(g.name)
+        want.push(w)
+      }
+      const keep = new Set(want.map((w) => w.id))
+      for (const w of reg.list()) if (dirname(w.path) === groupsReal && !keep.has(w.id)) await reg.delete(w.id)
+      const desired = [hubWs.id, ...want.map((w) => w.id)]
+      for (let i = 0; i < desired.length; i++) {
+        const order = reg.list().map((w) => w.id)
+        if (order[i] !== desired[i]) await reg.insertBefore(desired[i], order[i])
+      }
+    }
+    const p = chain.then(run, run)
+    chain = p.catch((e) => { log?.warn('同步卡片组子工作区失败', e) })
+    return p
   }
   hubWs = ctx.workspaceRegistry.list().find((w) => w.path === hubReal) ?? null
-  if (hubWs) void pin().catch((e) => log?.warn('置顶项目区失败', e))
+  if (hubWs) void arrange().catch(() => undefined)
+  const pin = arrange
 
-  // 别的工作区被新建/挪到最前时，把「项目区」放回第一位（首位已是自己时跳过，避免自触发）
+  // 别的工作区被新建/挪动时，把「项目区 + 卡片组」放回最前（已在位时 arrange 不写，避免自触发循环）
   ctx.on('domain/changed' as never, ((c: { domain?: string; table?: string; operation?: string; value?: { workspaceIds?: string[] } }) => {
     if (!hubWs || c.domain !== 'workspace' || c.table !== '' || c.operation !== 'put') return
-    const first = c.value?.workspaceIds?.[0]
-    if (first && first !== hubWs.id) void pin().catch((e) => log?.warn('置顶项目区失败', e))
+    const ids = c.value?.workspaceIds ?? []
+    const want = [hubWs.id, ...store.get().groups.map((g) => groupWsOf(g.id)?.id).filter((x): x is string => !!x)]
+    if (want.some((id, i) => ids[i] !== id)) void arrange().catch(() => undefined)
   }) as never)
 
   /** 绑定后同步设置权限与标题（session/bind 路由调用；会话必须在运行中）。 */
-  const applyToSession = (s: Session, cardId: string): { title: string | null; permission: boolean } => {
+  /** tree = 用户当前是 dsh「按工作区树」分组（组名已在树上）→ 会话名只用卡片名；否则「组名 · 卡片名」。 */
+  const applyToSession = (s: Session, cardId: string, tree: boolean): { title: string | null; permission: boolean } => {
     const b = store.get()
     const c = M.card(b, cardId)
     const g = M.group(b, c.g)
     let permission = false
     if (config.projectSessionMode === 'danger-full-access') { ctx.permissionPresets.set(s, 'danger-full-access'); permission = true }
-    const title = g.name + ' · ' + c.t
+    const title = tree ? c.t : g.name + ' · ' + c.t
     try { ctx.sessionTitle.rename(s, title) } catch (e) { log?.warn('会话改名失败', e); return { title: null, permission } }
     return { title, permission }
   }
@@ -105,7 +144,7 @@ export function apply(ctx: HostCtx, config: Config): void {
     if (s.header.origin === 'subagent' || !s.header.cwd) return
     let cwd = s.header.cwd
     try { cwd = realpathSync(cwd) } catch { /* 目录不存在时按原值比较 */ }
-    if (cwd !== hubReal) return
+    if (!projectCwd(cwd)) return
     // 会话恢复也会触发 created：只处理刚创建的会话（createdAt 在 60 秒内），不覆盖用户后来改过的权限
     const createdAt = (s.header as { createdAt?: number }).createdAt
     if (typeof createdAt === 'number' && Date.now() - createdAt > 60_000) return
@@ -121,20 +160,25 @@ export function apply(ctx: HostCtx, config: Config): void {
       states,
       hub: () => {
         const ws = hubWs ? ctx.workspaceRegistry.get(hubWs.id) : undefined
-        return { workspaceId: ws ? ws.id : null, path: hubReal, title: ws ? ws.title : config.hubTitle }
+        const groups: Record<string, string> = {}
+        for (const g of store.get().groups) { const w = groupWsOf(g.id); if (w) groups[g.id] = w.id }
+        return { workspaceId: ws ? ws.id : null, path: hubReal, title: ws ? ws.title : config.hubTitle, groups }
       },
       prepareSession: async (cardId) => {
-        M.card(store.get(), cardId)
-        const ws = await ensureHub()
-        return { workspaceId: ws.id }
+        const c = M.liveCard(store.get(), cardId)
+        const hub = await ensureHub()
+        const g = M.group(store.get(), c.g)
+        const w = groupWsOf(g.id)
+        if (!w) throw new M.BoardError('NO_GROUP_WORKSPACE', '卡片组「' + g.name + '」的子工作区没建好（目录 ' + groupDir(dataDir, g.id) + '），请重试')
+        return { workspaceId: w.id, workspaceTitle: hub.title + ' / ' + w.title }
       },
-      bindSession: async (sessionId, cardId) => {
+      bindSession: async (sessionId, cardId, tree) => {
         const s = ctx.sessions.get(sessionId)
         if (!s) throw new M.BoardError('NO_SESSION', '会话不在运行中：' + sessionId)
         let cwd = s.header.cwd ?? ''
         try { cwd = realpathSync(cwd) } catch { /* 按原值比较 */ }
-        if (cwd !== hubReal) throw new M.BoardError('NOT_HUB_SESSION', '会话不在「' + config.hubTitle + '」工作区里，拒绝绑定：' + sessionId)
-        const r = applyToSession(s, cardId)
+        if (!projectCwd(cwd)) throw new M.BoardError('NOT_HUB_SESSION', '会话不在「' + config.hubTitle + '」或它的卡片组子工作区里，拒绝绑定：' + sessionId)
+        const r = applyToSession(s, cardId, tree)
         await store.mutate((b) => M.bindSession(b, sessionId, cardId, r.title ?? undefined), () => [{ at: new Date().toISOString(), actor: 'user', kind: 'session/bind', card: cardId }])
         return r
       },
@@ -164,10 +208,24 @@ export function apply(ctx: HostCtx, config: Config): void {
         return { restored: true }
       },
       canUnarchive: () => typeof ctx.workspaceRegistry.unarchiveSession === 'function',
+      // DSH 只开放了「选文件夹」：选文件用 macOS 自带的 choose file（可多选），其他平台由界面改为手输路径
+      pickFiles: () => new Promise((resolve, reject) => {
+        if (process.platform !== 'darwin') return reject(new M.BoardError('PICK_UNAVAILABLE', '当前系统不支持弹出选文件对话框（仅 macOS），请手动输入路径'))
+        const script = ['activate', 'set fs to choose file with prompt "选择相关文件（可按住 ⌘ 多选）" with multiple selections allowed', 'set out to ""', 'repeat with f in fs', 'set out to out & POSIX path of f & linefeed', 'end repeat', 'return out']
+        execFile('osascript', script.flatMap((l) => ['-e', l]), { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (!err) return resolve(M.parsePicked(String(stdout)))
+          if (/-128/.test(String(stderr))) return resolve(null) // 用户点了取消
+          reject(new M.BoardError('PICK_FAILED', '打开系统选文件对话框失败：' + (String(stderr).trim() || err.message)))
+        })
+      }),
       cleanup: async () => {
-        const ws = ctx.workspaceRegistry.list().find((w) => w.path === hubReal)
         hubWs = null
-        return { removedWorkspace: ws ? await ctx.workspaceRegistry.delete(ws.id) : false }
+        await chain
+        const reg = ctx.workspaceRegistry
+        let groups = 0
+        for (const w of reg.list()) if (dirname(w.path) === groupsReal && await reg.delete(w.id)) groups++
+        const ws = reg.list().find((w) => w.path === hubReal)
+        return { removedWorkspace: ws ? await reg.delete(ws.id) : false, removedGroupWorkspaces: groups }
       },
     }, () => rev)
     return off

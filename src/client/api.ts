@@ -9,11 +9,12 @@ export class ApiError extends Error {
 export interface Status { id: string; name: string }
 export interface Repo { name: string; role: string; path: string }
 export interface Group { id: string; name: string; collapsed: boolean; repos: Repo[]; links: string[]; statuses: Status[] }
-export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: { text: string; done: boolean }[] }
+export interface WebLink { text: string; type: string; url: string }
+export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: { text: string; done: boolean }[]; notes?: string; webLinks?: WebLink[]; files?: string[]; archivedAt?: string }
 export interface SessionRef { sessionId: string; cardId: string; createdAt: string; title?: string; readKeys?: string[] }
 export interface StateInfo { key: string; project: string; slug: string; status: string; next: string; updated: string; path: string; error?: string }
-export interface Snapshot { rev: number; board: { groups: Group[]; cards: Card[]; sessions: SessionRef[] }; states: StateInfo[]; hub: { workspaceId: string | null; path: string; title: string }; caps?: { unarchive: boolean } }
-export interface SessionInfo { card: { id: string; title: string; group: string } | null; memory?: { key: string; from: 'group' | 'card' | 'both'; slug: string; next: string; found: boolean; read?: boolean }[] }
+export interface Snapshot { rev: number; board: { groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[] }; states: StateInfo[]; hub: { workspaceId: string | null; path: string; title: string; groups?: Record<string, string> }; caps?: { unarchive: boolean }; files?: Record<string, boolean> }
+export interface SessionInfo { card: { id: string; title: string; group: string } | null; suggest?: { key: string; slug: string } | null; materials?: { notes: number; links: number; files: number }; memory?: { key: string; from: 'group' | 'card' | 'both'; slug: string; next: string; found: boolean; read?: boolean }[] }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response

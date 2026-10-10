@@ -20,6 +20,7 @@ type Workspace = {
     id: string;
     path: string;
     title: string;
+    setTitle?(title: string): Promise<void>;
 };
 type HostCtx = Context & {
     webServer: {

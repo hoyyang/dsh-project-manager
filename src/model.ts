@@ -7,11 +7,18 @@ export interface Status { id: string; name: string }
 export interface Repo { name: string; role: string; path: string }
 export interface Group { id: string; name: string; collapsed: boolean; repos: Repo[]; links: string[]; statuses: Status[] }
 export interface Task { text: string; done: boolean }
-export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[] }
+/**
+ * notes = 相关说明（自由文本）；webLinks = 相关链接（显示文字 + 类型 + 网址，数组顺序 = 展示顺序）；files = 相关文件的绝对路径（只登记，不复制/不删除文件）。
+ * 三者都会作为「卡片资料」注入关联会话（0.10）。
+ * archivedAt = 归档时间（ISO）；有值 = 已归档：不在看板列里、内容只读，g/col 保留以便恢复回原阶段。三者都可缺省（旧数据兼容）。
+ */
+export interface WebLink { text: string; type: string; url: string }
+export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; notes?: string; webLinks?: WebLink[]; files?: string[]; archivedAt?: string }
 /** readKeys = 关联时该会话已读过的落盘项目（不再注入）；只在关联时计算一次，保证注入文本稳定。 */
 export interface SessionRef { sessionId: string; cardId: string; createdAt: string; title?: string; readKeys?: string[] }
 export interface BoardEvent { at: string; actor: string; kind: string; card?: string; group?: string; from?: string; to?: string }
-export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[] }
+/** linkTypes = 相关链接的「类型」选项（全局共用）；缺省 = 默认两项。 */
+export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[] }
 
 export class BoardError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'BoardError' }
@@ -49,15 +56,41 @@ export function card(b: Board, id: string): Card {
   if (!c) throw new BoardError('NO_CARD', '找不到卡片 ' + id)
   return c
 }
+/** 要改动内容的卡片：已归档的只读，先恢复活跃。 */
+export function liveCard(b: Board, id: string): Card {
+  const c = card(b, id)
+  if (c.archivedAt) throw new BoardError('CARD_ARCHIVED', '卡片「' + c.t + '」已归档，只能查看；先恢复活跃再修改')
+  return c
+}
 export function status(g: Group, id: string): Status {
   const s = g.statuses.find((x) => x.id === id)
   if (!s) throw new BoardError('NO_STATUS', '卡片组「' + g.name + '」没有阶段 ' + id)
   return s
 }
 
-/** 同组同阶段内按 order 排序后的卡片。 */
+/** 同组同阶段内按 order 排序后的活跃卡片（已归档的不占位置）。 */
 export function cellCards(b: Board, gId: string, col: string): Card[] {
-  return b.cards.filter((c) => c.g === gId && c.col === col).sort((a, c) => a.order - c.order)
+  return b.cards.filter((c) => c.g === gId && c.col === col && !c.archivedAt).sort((a, c) => a.order - c.order)
+}
+
+/** 归档卡片：移出看板列（其余卡片补位），内容转只读；卡片的会话不动。已归档再归档 = 无操作。 */
+export function archiveCard(b: Board, id: string, at = new Date().toISOString()): Card {
+  const c = card(b, id)
+  if (c.archivedAt) return c
+  c.archivedAt = at
+  renumber(cellCards(b, c.g, c.col))
+  return c
+}
+
+/** 恢复活跃：回到原阶段末尾。原阶段已被删除时放到第一个阶段。 */
+export function unarchiveCard(b: Board, id: string): Card {
+  const c = card(b, id)
+  if (!c.archivedAt) return c
+  const g = group(b, c.g)
+  if (!g.statuses.some((s) => s.id === c.col)) c.col = g.statuses[0].id
+  c.order = cellCards(b, c.g, c.col).length
+  delete c.archivedAt
+  return c
 }
 
 function renumber(list: Card[]): void { list.forEach((c, i) => { c.order = i }) }
@@ -66,6 +99,17 @@ export function addGroup(b: Board, name: string): Group {
   const g: Group = { id: newId('g'), name: nonEmpty(name, '组名'), collapsed: false, repos: [], links: [], statuses: defaultStatuses() }
   b.groups.push(g)
   return g
+}
+
+/** 调整卡片组顺序：把 id 插到 beforeId 之前；beforeId 缺省/null = 放到最后。顺序即 groups 数组顺序。 */
+export function moveGroup(b: Board, id: string, beforeId?: string | null): void {
+  const g = group(b, id)
+  if (beforeId === id) return
+  if (beforeId) group(b, beforeId)
+  const rest = b.groups.filter((x) => x.id !== id)
+  const i = beforeId ? rest.findIndex((x) => x.id === beforeId) : rest.length
+  rest.splice(i, 0, g)
+  b.groups = rest
 }
 
 export function renameGroup(b: Board, id: string, name: string): void { group(b, id).name = nonEmpty(name, '组名') }
@@ -87,7 +131,8 @@ export function setStatuses(b: Board, gId: string, next: Status[]): void {
     ids.add(id)
     return { id, name: nonEmpty(s?.name, '阶段名') }
   })
-  for (const c of b.cards) if (c.g === gId && !ids.has(c.col)) {
+  // 已归档的卡片不挡删阶段：它们不在列里、也不能移动；恢复时原阶段不在了就回第一个阶段
+  for (const c of b.cards) if (c.g === gId && !c.archivedAt && !ids.has(c.col)) {
     const lost = g.statuses.find((s) => s.id === c.col)
     throw new BoardError('STATUS_IN_USE', '「' + (lost ? lost.name : c.col) + '」下还有卡片「' + c.t + '」，先移走再删除')
   }
@@ -141,7 +186,7 @@ export function addCard(b: Board, gId: string, title: string, links: string[] = 
 }
 
 export function updateCard(b: Board, id: string, patch: { t?: string; links?: string[] }): Card {
-  const c = card(b, id)
+  const c = liveCard(b, id)
   if (patch.t !== undefined) c.t = nonEmpty(patch.t, '卡片标题')
   if (patch.links !== undefined) c.links = dedupe(patch.links).filter((k) => !group(b, c.g).links.includes(k))
   return c
@@ -159,7 +204,7 @@ export function removeCard(b: Board, id: string): void {
  * 返回事件（供审计写 events.jsonl）。
  */
 export function moveCard(b: Board, id: string, to: { g?: string; col: string; beforeId?: string | null }, actor: string): BoardEvent {
-  const c = card(b, id)
+  const c = liveCard(b, id)
   const gId = to.g ?? c.g
   const g = group(b, gId)
   const dest = status(g, to.col)
@@ -179,7 +224,99 @@ export function moveCard(b: Board, id: string, to: { g?: string; col: string; be
 }
 
 export function setTasks(b: Board, id: string, tasks: Task[]): void {
-  card(b, id).tasks = tasks.map((t) => ({ text: nonEmpty(t.text, '子任务'), done: t.done === true }))
+  liveCard(b, id).tasks = tasks.map((t) => ({ text: nonEmpty(t.text, '子任务'), done: t.done === true }))
+}
+
+/** 相关说明：原样保存（只统一换行、去掉 NUL）；全是空白 = 清空。不限字数，受 HTTP 体上限约束。 */
+export function setNotes(b: Board, id: string, text: unknown): Card {
+  if (typeof text !== 'string') throw new BoardError('BAD_ARG', 'notes 必须是字符串')
+  const c = liveCard(b, id)
+  const v = text.replace(/\r\n?/g, '\n').replace(/\u0000/g, '')
+  if (v.trim() === '') delete c.notes
+  else c.notes = v
+  return c
+}
+
+/** 相关文件路径：必须是绝对路径、不含控制字符；去掉末尾分隔符。 */
+const filePath = (v: unknown): string => {
+  if (typeof v !== 'string' || v.trim() === '') throw new BoardError('BAD_ARG', '文件路径不能为空')
+  const p = v.trim().replace(/\/+$/, '')
+  if (!p.startsWith('/')) throw new BoardError('BAD_ARG', '文件路径必须是绝对路径：' + v)
+  if (/[\u0000-\u001f\u007f]/.test(p)) throw new BoardError('BAD_ARG', '文件路径含控制字符：' + JSON.stringify(v))
+  if (p.length > 4096) throw new BoardError('BAD_ARG', '文件路径过长')
+  return p
+}
+
+/** 追加相关文件：逐个校验，任一非法整批不写；已关联的跳过。返回实际新增数与跳过数。 */
+export function addFiles(b: Board, id: string, paths: unknown): { added: number; skipped: number } {
+  const c = liveCard(b, id)
+  if (!Array.isArray(paths) || paths.length === 0) throw new BoardError('BAD_ARG', '没有要添加的文件')
+  const clean = paths.map(filePath)
+  const cur = c.files ?? []
+  let added = 0
+  for (const p of clean) if (!cur.includes(p)) { cur.push(p); added++ }
+  c.files = cur
+  return { added, skipped: clean.length - added }
+}
+
+/** 解除关联：只从列表移除，不碰文件本身。 */
+export function removeFile(b: Board, id: string, path: unknown): void {
+  const c = liveCard(b, id)
+  if (typeof path !== 'string' || !(c.files ?? []).includes(path)) throw new BoardError('NOT_LINKED', '卡片「' + c.t + '」没有关联这个文件：' + String(path))
+  c.files = (c.files as string[]).filter((p) => p !== path)
+  if (!c.files.length) delete c.files
+}
+
+export const DEFAULT_LINK_TYPES = ['文档', '代码']
+export const linkTypes = (b: Board): string[] => b.linkTypes ?? DEFAULT_LINK_TYPES.slice()
+
+/** 新增全局「类型」选项（已有则不变）；类型名同名称类字段规则，限 20 字。 */
+export function addLinkType(b: Board, name: unknown): string {
+  const v = nonEmpty(name, '类型')
+  if (v.length > 20) throw new BoardError('BAD_ARG', '类型超过 20 字')
+  const ts = linkTypes(b)
+  if (!ts.includes(v)) ts.push(v)
+  b.linkTypes = ts
+  return v
+}
+
+/** 网址简单校验：只收 http(s)；没写协议但像域名 → 补 https://；不能有空白/控制字符。返回规范化后的网址。 */
+export function normUrl(v: unknown): string {
+  if (typeof v !== 'string' || v.trim() === '') throw new BoardError('BAD_URL', '请填写完整链接')
+  let s = v.trim()
+  if (/[\s\u0000-\u001f\u007f]/.test(s)) throw new BoardError('BAD_URL', '链接里不能有空格或换行：' + s)
+  if (!/^https?:\/\//i.test(s)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(s) && !/^[^:/]+:\d/.test(s)) throw new BoardError('BAD_URL', '只支持 http:// 或 https:// 开头的链接：' + s)
+    s = 'https://' + s
+  }
+  let u: URL
+  try { u = new URL(s) } catch { throw new BoardError('BAD_URL', '链接格式不对：' + v) }
+  if (!u.hostname.includes('.') && u.hostname !== 'localhost' && !u.hostname.startsWith('[')) throw new BoardError('BAD_URL', '域名不完整：' + u.hostname)
+  if (u.href.length > 4096) throw new BoardError('BAD_URL', '链接过长')
+  return u.href
+}
+
+/** 相关链接整表替换（新增 / 编辑 / 删除 / 排序都走这里）：逐条校验，任一非法整批不写；没见过的类型自动加入全局选项。 */
+export function setWebLinks(b: Board, id: string, list: unknown): Card {
+  const c = liveCard(b, id)
+  if (!Array.isArray(list)) throw new BoardError('BAD_ARG', 'links 必须是数组')
+  const clean = list.map((x, i) => {
+    const o = (x ?? {}) as Record<string, unknown>
+    try {
+      const url = normUrl(o.url)
+      const text = typeof o.text === 'string' && o.text.trim() ? nonEmpty(o.text, '显示文字') : url.replace(/^https?:\/\/(www\.)?/i, '').replace(/\/$/, '').slice(0, 60)
+      return { text, type: nonEmpty(o.type ?? DEFAULT_LINK_TYPES[0], '类型'), url }
+    } catch (e) { throw e instanceof BoardError ? new BoardError(e.code, '第 ' + (i + 1) + ' 条：' + e.message) : e }
+  })
+  for (const l of clean) addLinkType(b, l.type)
+  if (clean.length) c.webLinks = clean
+  else delete c.webLinks
+  return c
+}
+
+/** osascript「choose file」的输出：每行一个 POSIX 路径。 */
+export function parsePicked(out: string): string[] {
+  return out.split('\n').map((l) => l.trim()).filter(Boolean).map((p) => p.replace(/\/+$/, ''))
 }
 
 /** 会话实际读取的记忆：卡片组关联 ∪ 卡片关联，去重保序，标注来源。 */
@@ -197,7 +334,7 @@ export function memoryOf(b: Board, c: Card): Array<{ key: string; from: 'group' 
 
 /** 一个会话只属于一张卡片：重复绑定以最新一次为准。 */
 export function bindSession(b: Board, sessionId: string, cardId: string, title?: string): void {
-  card(b, cardId)
+  liveCard(b, cardId)
   b.sessions = b.sessions.filter((s) => s.sessionId !== sessionId)
   b.sessions.unshift({ sessionId, cardId, createdAt: new Date().toISOString(), ...(title ? { title } : {}) })
 }
@@ -206,8 +343,20 @@ export function bindSession(b: Board, sessionId: string, cardId: string, title?:
  * 手动关联已有会话（批量）：每个会话只属于一张卡片，已在别的卡片上的移过来；
  * readKeys 由调用方按会话记录算好（读过的 STATE 不再注入）。返回从别的卡片移过来的数量。
  */
+/**
+ * 卡片没有任何记忆（卡片组 ∪ 卡片都没关联）时，找标题里包含其 slug 的落盘项目作为「同名」建议；
+ * slug 至少 6 个字符防误配，多个命中取最长的。只做建议，不自动关联。
+ */
+export function sameNameState<T extends { key: string; slug: string }>(b: Board, c: Card, states: readonly T[]): T | null {
+  if (memoryOf(b, c).length) return null
+  const t = c.t.toLowerCase()
+  let hit: T | null = null
+  for (const s of states) if (s.slug.length >= 6 && t.includes(s.slug.toLowerCase()) && (!hit || s.slug.length > hit.slug.length)) hit = s
+  return hit
+}
+
 export function bindMany(b: Board, cardId: string, items: Array<{ sessionId: string; title?: string; readKeys?: string[] }>): { linked: number; moved: number } {
-  card(b, cardId)
+  liveCard(b, cardId)
   if (!Array.isArray(items) || items.length === 0) throw new BoardError('BAD_ARG', '没有要关联的会话')
   const ids = new Set<string>()
   let moved = 0
