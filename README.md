@@ -31,8 +31,8 @@ dsh plugin add github:hoyyang/dsh-project-manager
 
 | 环境 | 版本 | 状态 |
 |---|---|---|
-| dsh CLI（`@deepseek-ai/dsh`，`dsh web`） | `0.2.0-rc.2` | 实测通过（0.20.0） |
-| DSH Desktop | `2.0.17`（内置 dsh `0.2.0-rc.2`） | 实测通过（0.20.0） |
+| dsh CLI（`@deepseek-ai/dsh`，`dsh web`） | `0.2.0-rc.2` | 实测通过（0.20.1） |
+| DSH Desktop | `2.0.17`（内置 dsh `0.2.0-rc.2`） | 实测通过（0.20.1） |
 | 依赖范围（peerDependencies） | `@deepseek-ai/cordis >=4.0.1 <5`、`@deepseek-ai/dsh-tools >=0.1.5-rc <2`、`@deepseek-ai/dsh-client-ui-slots >=0.1.5-rc <2`、`@deepseek-ai/schemastery ^3.18.1` | 声明范围，范围内其他版本未逐一验证 |
 
 需要 dsh web 界面（CLI 的 `dsh web` 或 DSH Desktop）。侧栏增强（项目区数字、层级、「+」接管、空会话行）依赖 dsh 工作区列表的页面结构；dsh 改版后若对不上，这几项会自动不显示，看板、会话与落盘功能不受影响。
@@ -241,7 +241,7 @@ landfill { "op": "persist", "content": "…", "drop": ["a1b2c3d"] } → {"key":"
 - **真实模型端到端**：0.20 在 staging 用真实模型跑「落盘 → 自动迁移 → 规范检查 → 迁移卡 → 撤销」与「新建落盘进卡片组文件夹」；0.19 用 6 份真实落盘项目副本跑合并、嵌套合并、子删除、撤销逐字节还原。
 - **真实 GUI 测试**：Playwright 在真实 dsh web 上逐项点：组头统计、新建会话忙态与侧栏标题、链接按钮常驻、箭头方向、同名三种情况、卡片组落盘文件夹确认与非法名字提示、停止后状态与忽略、整页不移位，全部通过、0 页面报错。
 - **主实例验收**：每个版本装到日常使用的 dsh 后，用探针确认新逻辑已生效（0.20：组头统计、新建会话忙态与侧栏「卡片名 · 未开始」、链接按钮、箭头、同名检测）。
-- **单元测试**：95 项 node:test（看板模型、注入与已读判定、落盘防丢、合并全链路、规范清单、同名匹配、迁移与撤销、落盘状态跟踪）+ 9 项 ai-memory 测试。
+- **单元测试**：96 项 node:test（看板模型、注入与已读判定、落盘防丢、合并全链路、规范清单、同名匹配、迁移与撤销、落盘状态跟踪）+ 9 项 ai-memory 测试。
 - **失败会点名**：`NEED_FULL_READ`、`DROPPED_ANCHORS`、`UNINDEXED_FILES`、`SPEC_ISSUES`、`NEED_GROUP_FOLDER`、`MIGRATE_CLASH`、`FOLDER_TAKEN`、`REPO_MOUNTED` 等错误码点名对象，不静默吞掉。
 - **兼容与限制**：「恢复活跃」和删除空会话依赖 dsh-manage-sessions，缺失时按钮置灰或不显示；落盘项目需要 python3（Windows 关闭）；多个 dsh 进程共用同一 DSH_HOME 时看板没有跨进程锁（`~/.ai` 写入有）。
 - **安全边界**：项目会话默认完全访问（只对项目区目录的会话生效，可改 `inherit`）；HTTP 路由只接受本机回环（Host 必须是 127.0.0.1 / localhost），写操作带 Origin 时必须同源（DSH Desktop 壳转发会去掉 Origin，此时放行），没有登录态校验；插件会写 `~/.ai`、建 `~/.agents/skills/landfill-project` 链接；不读写凭据、不访问网络、不执行 git；删除卡片组只删软链接，不删真实仓库。

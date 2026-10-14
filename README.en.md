@@ -31,8 +31,8 @@ dsh plugin add github:hoyyang/dsh-project-manager
 
 | Environment | Version | Status |
 |---|---|---|
-| dsh CLI (`@deepseek-ai/dsh`, `dsh web`) | `0.2.0-rc.2` | Tested (0.20.0) |
-| DSH Desktop | `2.0.17` (bundles dsh `0.2.0-rc.2`) | Tested (0.20.0) |
+| dsh CLI (`@deepseek-ai/dsh`, `dsh web`) | `0.2.0-rc.2` | Tested (0.20.1) |
+| DSH Desktop | `2.0.17` (bundles dsh `0.2.0-rc.2`) | Tested (0.20.1) |
 | peerDependencies | `@deepseek-ai/cordis >=4.0.1 <5`, `@deepseek-ai/dsh-tools >=0.1.5-rc <2`, `@deepseek-ai/dsh-client-ui-slots >=0.1.5-rc <2`, `@deepseek-ai/schemastery ^3.18.1` | Declared range; other versions in range not individually tested |
 
 Needs the dsh web UI (`dsh web` or DSH Desktop). Sidebar enhancements (project hub counts, nesting, "+" takeover, blank-session rows) rely on the workspace list's page structure; if a dsh update changes it they simply stop showing, and the board, sessions and landfill keep working.
@@ -241,7 +241,7 @@ Each group's landfill folder is set in group settings, not in config.
 - **End-to-end with a real model**: 0.20 ran "persist → auto-migrate → spec check → migration card → undo" and "new project lands in the group folder" in staging; 0.19 ran merge, nested merge, child delete and byte-exact undo on 6 copies of real landfill projects.
 - **Real GUI tests**: Playwright on real dsh web: group stats, creating state and sidebar title, always-visible link buttons, arrow direction, the three same-name cases, group-folder confirmation and invalid names, stopped state and dismiss, no page shift — all pass, 0 page errors.
 - **Main-instance acceptance**: after installing into the daily dsh, probes confirm the new logic runs (0.20: group stats, creating state and "card title · not started", link buttons, arrow, same-name detection).
-- **Unit tests**: 95 node:test cases (board model, injection and known-version tracking, persist guards, merge end-to-end, spec checklist, same-name matching, migration and undo, persist-round tracking) + 9 ai-memory tests.
+- **Unit tests**: 96 node:test cases (board model, injection and known-version tracking, persist guards, merge end-to-end, spec checklist, same-name matching, migration and undo, persist-round tracking) + 9 ai-memory tests.
 - **Failures name the culprit**: `NEED_FULL_READ`, `DROPPED_ANCHORS`, `UNINDEXED_FILES`, `SPEC_ISSUES`, `NEED_GROUP_FOLDER`, `MIGRATE_CLASH`, `FOLDER_TAKEN`, `REPO_MOUNTED` and more; nothing is swallowed.
 - **Compatibility & limits**: restore and blank-session delete depend on dsh-manage-sessions (greyed out or hidden without it); landfill needs python3 (off on Windows); multiple dsh processes sharing one DSH_HOME have no cross-process board lock (`~/.ai` writes do).
 - **Security boundary**: project sessions default to full access (only sessions in the hub directory; switch to `inherit`); HTTP routes accept loopback only (Host must be 127.0.0.1 / localhost); writes carrying an Origin must be same-origin (DSH Desktop strips Origin when forwarding, which is allowed), no login check; the plugin writes `~/.ai` and creates the `~/.agents/skills/landfill-project` link; it never touches credentials, the network or git; deleting a group removes symlinks only.

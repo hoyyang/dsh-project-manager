@@ -71,10 +71,13 @@ function isLink(p: string): boolean { try { return lstatSync(p).isSymbolicLink()
 export const skillFile = (p: LandfillPaths): string => join(p.pkgDir, 'skills', SKILL_NAME, 'SKILL.md')
 export const skillLinkPath = (p: LandfillPaths): string => join(p.agentsHome, 'skills', SKILL_NAME, 'SKILL.md')
 
-/** 链接目标是不是本插件（任意版本）的 skill：<包>/skills/landfill-project/SKILL.md 且 <包>/package.json name = dsh-project-manager。 */
-function isOurSkill(target: string): boolean {
-  try { return (JSON.parse(readFileSync(join(dirname(dirname(dirname(target))), 'package.json'), 'utf8')) as { name?: string }).name === 'dsh-project-manager' } catch { return false }
+/** 链接目标所在的本插件版本：<包>/skills/landfill-project/SKILL.md 且 <包>/package.json name = dsh-project-manager；不是本插件 = null。 */
+function ourSkillVersion(target: string): string | null {
+  try { const j = JSON.parse(readFileSync(join(dirname(dirname(dirname(target))), 'package.json'), 'utf8')) as { name?: string; version?: string }; return j.name === 'dsh-project-manager' ? String(j.version ?? '0') : null } catch { return null }
 }
+const verLt = (a: string, b: string): boolean => { const x = a.split(/[.+-]/).map(Number), y = b.split(/[.+-]/).map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d < 0 } return false }
+
+const ownVersion = (p: LandfillPaths): string => ourSkillVersion(skillFile(p)) ?? '0'
 
 export function skillState(p: LandfillPaths): SkillLink {
   const link = skillLinkPath(p)
@@ -84,7 +87,11 @@ export function skillState(p: LandfillPaths): SkillLink {
   const raw = resolve(dirname(link), readlinkSync(link))
   if (!existsSync(raw)) return 'stale' // 链接断了（例如插件升级换了目录）
   try { if (realpathSync(raw) === realpathSync(skillFile(p))) return 'linked' } catch { /* 下面判断 */ }
-  return isOurSkill(raw) ? 'stale' : 'foreign'
+  // 指向本插件的另一份安装（另一个 DSH_HOME / profile）：比自己旧才算过期去重建；同版或更新的留给它，
+  // 免得几个 DSH home 来回抢这条链接（临时 home 删掉后链接就断了）
+  const v = ourSkillVersion(raw)
+  if (v === null) return 'foreign'
+  return verLt(v, ownVersion(p)) ? 'stale' : 'linked'
 }
 
 /** 没有 → 建链接；断了 / 指向本插件旧版本 → 重建；普通文件 / 别人的链接 → 不动。返回处理后的状态。 */

@@ -159,3 +159,22 @@ test('0.20 issue #1 / #2：Windows 绝对路径；Desktop 壳转发去掉 Origin
   assert.equal(sameOrigin({ headers: { host: '127.0.0.1:3080', origin: 'null' } }), false)
   assert.equal(sameOrigin({ headers: { host: '127.0.0.1:3080', origin: '' } }), false)
 })
+
+test('0.20 skill 链接：另一份同版 / 更新的本插件安装不抢，旧版或断链才重建', async () => {
+  const { mkdirSync: mk, writeFileSync: wf, symlinkSync: sl, readlinkSync: rl, rmSync: rm } = await import('node:fs')
+  const d = tmp()
+  const pkg = (dir, ver) => { mk(join(dir, 'skills/landfill-project'), { recursive: true }); wf(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-project-manager', version: ver })); wf(join(dir, 'skills/landfill-project/SKILL.md'), ver); return join(dir, 'skills/landfill-project/SKILL.md') }
+  const me = pkg(join(d, 'me'), '0.20.0')
+  const p = { aiRoot: join(d, 'ai'), agentsHome: join(d, 'agents'), pkgDir: join(d, 'me'), dataDir: join(d, 'data') }
+  const link = L.skillLinkPath(p)
+  assert.equal(L.ensureSkillLink(p), 'linked'); assert.equal(rl(link), me)
+  const other = pkg(join(d, 'other'), '0.20.0')
+  rm(link); sl(other, link)
+  assert.equal(L.ensureSkillLink(p), 'linked'); assert.equal(rl(link), other, '同版的另一份安装不抢')
+  const newer = pkg(join(d, 'newer'), '0.21.0'); rm(link); sl(newer, link)
+  assert.equal(L.ensureSkillLink(p), 'linked'); assert.equal(rl(link), newer, '更新的不抢')
+  const old = pkg(join(d, 'old'), '0.19.0'); rm(link); sl(old, link)
+  assert.equal(L.ensureSkillLink(p), 'linked'); assert.equal(rl(link), me, '旧版换成自己')
+  rm(link); sl(join(d, 'gone/skills/landfill-project/SKILL.md'), link)
+  assert.equal(L.ensureSkillLink(p), 'linked'); assert.equal(rl(link), me, '断链重建')
+})
