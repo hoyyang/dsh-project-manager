@@ -5,7 +5,8 @@
  */
 export interface Status { id: string; name: string }
 export interface Repo { name: string; role: string; path: string }
-export interface Group { id: string; name: string; collapsed: boolean; repos: Repo[]; links: string[]; statuses: Status[] }
+/** lfProject（0.20）= 这个卡片组的落盘文件夹（~/.ai/projects/<lfProject>/）：新建 / 迁移的落盘项目都放这里；缺省 = 还没设。 */
+export interface Group { id: string; name: string; collapsed: boolean; repos: Repo[]; links: string[]; statuses: Status[]; lfProject?: string }
 export interface Task { text: string; done: boolean }
 /**
  * notes = 相关说明（自由文本）；webLinks = 相关链接（显示文字 + 类型 + 网址，数组顺序 = 展示顺序）；files = 相关文件的绝对路径（只登记，不复制/不删除文件）。
@@ -13,12 +14,15 @@ export interface Task { text: string; done: boolean }
  * archivedAt = 归档时间（ISO）；有值 = 已归档：不在看板列里、内容只读，g/col 保留以便恢复回原阶段。三者都可缺省（旧数据兼容）。
  */
 export interface WebLink { text: string; type: string; url: string }
-export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; notes?: string; webLinks?: WebLink[]; files?: string[]; archivedAt?: string }
+/** repos（0.14）= 这张卡片自己的仓库清单：新建时复制所在组的「卡片共用仓库」，之后与组互不影响。 */
+export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; repos: Repo[]; notes?: string; webLinks?: WebLink[]; files?: string[]; archivedAt?: string }
 /** readKeys = 关联时该会话已读过的落盘项目（不再注入）；只在关联时计算一次，保证注入文本稳定。 */
 export interface SessionRef { sessionId: string; cardId: string; createdAt: string; title?: string; readKeys?: string[] }
 export interface BoardEvent { at: string; actor: string; kind: string; card?: string; group?: string; from?: string; to?: string }
-/** linkTypes = 相关链接的「类型」选项（全局共用）；缺省 = 默认两项。 */
-export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[] }
+/** 候选仓库（0.14）：任意卡片组 / 卡片添加过的仓库，移除后也保留；at = 最近一次添加的时间。 */
+export interface RepoSeen extends Repo { at: string }
+/** linkTypes = 相关链接的「类型」选项（全局共用，数组顺序 = 展示顺序）；缺省 = 默认两项。 */
+export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[]; repoHistory?: RepoSeen[] }
 
 export class BoardError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'BoardError' }
@@ -114,6 +118,16 @@ export function moveGroup(b: Board, id: string, beforeId?: string | null): void 
 
 export function renameGroup(b: Board, id: string, name: string): void { group(b, id).name = nonEmpty(name, '组名') }
 
+/** 0.20 卡片组的落盘文件夹：字母数字开头、只用 a-z 0-9 . _ -；两个组不能共用。空 = 清除。 */
+export function setGroupFolder(b: Board, id: string, v: unknown): void {
+  const g = group(b, id)
+  if (v === '' || v === null) { delete g.lfProject; return }
+  if (typeof v !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(v)) throw new BoardError('BAD_FOLDER', '落盘文件夹名只能用小写字母、数字和 . _ -，以字母或数字开头（收到 ' + JSON.stringify(v) + '）')
+  const other = b.groups.find((x) => x.id !== id && x.lfProject === v)
+  if (other) throw new BoardError('FOLDER_TAKEN', '落盘文件夹 ' + v + ' 已经是卡片组「' + other.name + '」的，换一个')
+  g.lfProject = v
+}
+
 export function removeGroup(b: Board, id: string): void {
   group(b, id)
   if (b.cards.some((c) => c.g === id)) throw new BoardError('GROUP_NOT_EMPTY', '卡片组里还有卡片，先移走或删除卡片')
@@ -139,13 +153,16 @@ export function setStatuses(b: Board, gId: string, next: Status[]): void {
   g.statuses = clean
 }
 
+/** 绝对路径：POSIX「/…」或 Windows「C:\…」「C:/…」「\\server\share…」（issue #1：Windows 原生路径曾被当成相对路径拒掉）。 */
+export const isAbsPath = (p: string): boolean => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p)
+
 export function cleanRepos(v: unknown): Repo[] {
   if (!Array.isArray(v)) throw new BoardError('BAD_ARG', 'repos 必须是数组')
   const out: Repo[] = []
   for (const r of v as Repo[]) {
     const name = nonEmpty(r?.name, '仓库名')
     const path = nonEmpty(r?.path, '仓库路径')
-    if (!path.startsWith('/')) throw new BoardError('BAD_ARG', '仓库路径必须是绝对路径：' + path)
+    if (!isAbsPath(path)) throw new BoardError('BAD_ARG', '仓库路径必须是绝对路径：' + path)
     if (out.some((x) => x.name === name)) throw new BoardError('BAD_ARG', '仓库名重复：' + name)
     out.push({ name, role: typeof r.role === 'string' && r.role.trim() ? r.role.trim() : '仓库', path })
   }
@@ -158,19 +175,74 @@ export function cleanRepos(v: unknown): Repo[] {
  */
 export function addRepos(b: Board, gId: string, v: unknown, canon: (p: string) => string = (p) => p): Repo[] {
   const g = group(b, gId)
-  // canon = 真实路径（软链 / macOS 的 /tmp→/private/tmp）：与 dsh 工作区的规范路径一致，重复挂载才判得准
-  const add = cleanRepos(v).map((r) => ({ ...r, path: canon(r.path) }))
-  if (add.length === 0) throw new BoardError('BAD_ARG', '没有要挂载的仓库')
-  const norm = (p: string): string => p.replace(/\/+$/, '') || '/'
-  for (const r of add) {
-    const clashName = g.repos.find((x) => x.name === r.name)
-    if (clashName) throw new BoardError('REPO_NAME_TAKEN', '「' + g.name + '」已有同名仓库「' + r.name + '」（' + clashName.path + '），换个名字')
-    const clashPath = g.repos.find((x) => norm(x.path) === norm(r.path))
-    if (clashPath) throw new BoardError('REPO_MOUNTED', r.path + ' 已挂载在「' + g.name + '」（名称「' + clashPath.name + '」）')
-  }
-  if (new Set(add.map((r) => norm(r.path))).size !== add.length) throw new BoardError('BAD_ARG', '同一路径选了两次')
-  g.repos = g.repos.concat(add)
+  g.repos = appendRepos(b, g.repos, '「' + g.name + '」的卡片共用仓库', v, canon)
   return g.repos
+}
+
+/** 0.14 给卡片追加仓库（只影响这张卡片）。 */
+export function addCardRepos(b: Board, id: string, v: unknown, canon: (p: string) => string = (p) => p): Repo[] {
+  const c = liveCard(b, id)
+  c.repos = appendRepos(b, c.repos, '卡片「' + c.t + '」', v, canon)
+  return c.repos
+}
+
+/** 0.14 整表替换卡片仓库（移除 / 改名 / 改角色）：只影响这张卡片。 */
+export function setCardRepos(b: Board, id: string, v: unknown): Repo[] {
+  const c = liveCard(b, id)
+  c.repos = cleanRepos(v)
+  return c.repos
+}
+
+const normPath = (p: string): string => p.replace(/\/+$/, '') || '/'
+
+/** 追加到一个仓库清单：逐个校验后一次性追加，任一冲突整批不写；成功的同时记进候选仓库。 */
+function appendRepos(b: Board, cur: Repo[], who: string, v: unknown, canon: (p: string) => string): Repo[] {
+  // canon = 真实路径（软链 / macOS 的 /tmp→/private/tmp）：重复判断才准
+  const add = cleanRepos(v).map((r) => ({ ...r, path: canon(r.path) }))
+  if (add.length === 0) throw new BoardError('BAD_ARG', '没有要添加的仓库')
+  for (const r of add) {
+    const clashName = cur.find((x) => x.name === r.name)
+    if (clashName) throw new BoardError('REPO_NAME_TAKEN', who + '已有同名仓库「' + r.name + '」（' + clashName.path + '），换个名字')
+    const clashPath = cur.find((x) => normPath(x.path) === normPath(r.path))
+    if (clashPath) throw new BoardError('REPO_MOUNTED', r.path + ' 已在' + who + '里（名称「' + clashPath.name + '」）')
+  }
+  if (new Set(add.map((r) => normPath(r.path))).size !== add.length) throw new BoardError('BAD_ARG', '同一路径选了两次')
+  noteRepos(b, add)
+  return cur.concat(add)
+}
+
+/** 记进候选仓库：同一路径只留一条，时间刷新为最新、名称 / 角色以最近一次为准。 */
+export function noteRepos(b: Board, rs: Repo[], at = new Date().toISOString()): void {
+  const h = (b.repoHistory ?? []).filter((x) => !rs.some((r) => normPath(r.path) === normPath(x.path)))
+  b.repoHistory = rs.map((r) => ({ name: r.name, role: r.role, path: r.path, at })).concat(h)
+}
+
+/** 候选仓库：最近添加的在前。 */
+export function repoCandidates(b: Board): RepoSeen[] {
+  return (b.repoHistory ?? []).slice().sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0))
+}
+
+/**
+ * 卡片组目录 repos/ 下的软链接（0.14）：组共用仓库 + 本组每张卡片的仓库（含已归档卡片，便于恢复）。
+ * 名称 = 软链接目录名；同名不同路径时后来者自动改成「名-2」「名-3」…；同一路径只挂一次。
+ * 返回 path → 软链接名（卡片注入时据此写 repos/<名>/）。
+ */
+export function groupMounts(b: Board, gId: string): Map<string, string> {
+  const g = group(b, gId)
+  const out = new Map<string, string>()
+  const used = new Set<string>()
+  const safe = (s: string): string => s.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 64) || 'x'
+  const all = g.repos.concat(...b.cards.filter((c) => c.g === gId).map((c) => c.repos ?? []))
+  for (const r of all) {
+    const p = normPath(r.path)
+    if (out.has(p)) continue
+    const base = safe(r.name)
+    let n = base
+    for (let i = 2; used.has(n); i++) n = base + '-' + i
+    used.add(n)
+    out.set(p, n)
+  }
+  return out
 }
 
 export function setGroupLinks(b: Board, gId: string, links: string[]): void {
@@ -180,7 +252,8 @@ export function setGroupLinks(b: Board, gId: string, links: string[]): void {
 export function addCard(b: Board, gId: string, title: string, links: string[] = [], col?: string): Card {
   const g = group(b, gId)
   const target = (col ? status(g, col) : g.statuses[0]).id
-  const c: Card = { id: newId('c'), g: gId, col: target, order: cellCards(b, gId, target).length, t: nonEmpty(title, '卡片标题'), links: dedupe(links), tasks: [] }
+  // 0.14：新卡片复制一份组的「卡片共用仓库」，之后各自独立
+  const c: Card = { id: newId('c'), g: gId, col: target, order: cellCards(b, gId, target).length, t: nonEmpty(title, '卡片标题'), links: dedupe(links), tasks: [], repos: g.repos.map((r) => ({ ...r })) }
   b.cards.push(c)
   return c
 }
@@ -240,8 +313,8 @@ export function setNotes(b: Board, id: string, text: unknown): Card {
 /** 相关文件路径：必须是绝对路径、不含控制字符；去掉末尾分隔符。 */
 const filePath = (v: unknown): string => {
   if (typeof v !== 'string' || v.trim() === '') throw new BoardError('BAD_ARG', '文件路径不能为空')
-  const p = v.trim().replace(/\/+$/, '')
-  if (!p.startsWith('/')) throw new BoardError('BAD_ARG', '文件路径必须是绝对路径：' + v)
+  const p = v.trim().replace(/[\\/]+$/, '')
+  if (!isAbsPath(p)) throw new BoardError('BAD_ARG', '文件路径必须是绝对路径：' + v)
   if (/[\u0000-\u001f\u007f]/.test(p)) throw new BoardError('BAD_ARG', '文件路径含控制字符：' + JSON.stringify(v))
   if (p.length > 4096) throw new BoardError('BAD_ARG', '文件路径过长')
   return p
@@ -257,6 +330,24 @@ export function addFiles(b: Board, id: string, paths: unknown): { added: number;
   for (const p of clean) if (!cur.includes(p)) { cur.push(p); added++ }
   c.files = cur
   return { added, skipped: clean.length - added }
+}
+
+/**
+ * 0.15 粘贴的一行路径 → 规整后的绝对路径（不判断存在）。去首尾空白与成对引号、file:// 解码、~ 展开、
+ * 终端转义空格（\ ）还原、去末尾分隔符。非绝对路径原样返回（由调用方判非法）。
+ */
+export function normPastedPath(raw: string, home: string): string {
+  let s = raw.trim().replace(/^(['"])(.*)\1$/, '$2').trim()
+  if (/^file:\/\//i.test(s)) { try { s = decodeURIComponent(new URL(s).pathname) } catch { /* 保留原值 */ } }
+  s = s.replace(/^~(?=\/|$)/, home).replace(/\\ /g, ' ')
+  return s.length > 1 && !/^[A-Za-z]:[\\/]$/.test(s) ? s.replace(/[\\/]+$/, '') : s
+}
+
+/** 0.15 分叉补关联：0.14 之前分出的会话（源会话关联了卡片、它自己没关联）批量补上。返回补上的 [子会话, 卡片] 对。 */
+export function backfillForks(b: Board, pairs: Array<{ child: string; parent: string }>): Array<{ child: string; card: string }> {
+  const out: Array<{ child: string; card: string }> = []
+  for (const p of pairs) { const c = bindFork(b, p.child, p.parent); if (c) out.push({ child: p.child, card: c.id }) }
+  return out
 }
 
 /** 解除关联：只从列表移除，不碰文件本身。 */
@@ -278,6 +369,39 @@ export function addLinkType(b: Board, name: unknown): string {
   if (!ts.includes(v)) ts.push(v)
   b.linkTypes = ts
   return v
+}
+
+/** 0.13 改名全局「类型」：类型表与所有卡片（含已归档）里用旧名的链接一起改，任一校验失败什么都不写。返回新名与改到的链接数。 */
+export function renameLinkType(b: Board, from: unknown, to: unknown): { name: string; links: number } {
+  const ts = linkTypes(b)
+  const i = typeof from === 'string' ? ts.indexOf(from) : -1
+  if (i < 0) throw new BoardError('NOT_FOUND', '没有这个类型：' + String(from))
+  const v = nonEmpty(to, '类型')
+  if (v.length > 20) throw new BoardError('BAD_ARG', '类型超过 20 字')
+  if (v === from) return { name: v, links: 0 }
+  if (ts.includes(v)) throw new BoardError('BAD_ARG', '已经有「' + v + '」了')
+  let n = 0
+  for (const c of b.cards) for (const l of c.webLinks ?? []) if (l.type === from) { l.type = v; n++ }
+  ts[i] = v
+  b.linkTypes = ts
+  return { name: v, links: n }
+}
+
+/** 0.14 调整类型顺序：from 位置的类型挪到 to 位置（数组顺序 = 下拉展示顺序）。 */
+export function moveLinkType(b: Board, name: unknown, to: unknown): string[] {
+  const ts = linkTypes(b)
+  const i = typeof name === 'string' ? ts.indexOf(name) : -1
+  if (i < 0) throw new BoardError('NOT_FOUND', '没有这个类型：' + String(name))
+  if (typeof to !== 'number' || !Number.isInteger(to) || to < 0 || to >= ts.length) throw new BoardError('BAD_ARG', '位置越界：' + String(to) + '（共 ' + ts.length + ' 个类型）')
+  const [t] = ts.splice(i, 1)
+  ts.splice(to, 0, t)
+  b.linkTypes = ts
+  return ts
+}
+
+/** 判断两条链接是否同一个：协议 + 域名（小写）+ 路径（去掉末尾 /）+ 查询 + 锚点。 */
+export function urlKey(url: string): string {
+  try { const u = new URL(url); return u.protocol + '//' + u.host.toLowerCase() + (u.pathname.replace(/\/+$/, '') || '') + u.search + u.hash } catch { return url.trim() }
 }
 
 /** 网址简单校验：只收 http(s)；没写协议但像域名 → 补 https://；不能有空白/控制字符。返回规范化后的网址。 */
@@ -308,6 +432,14 @@ export function setWebLinks(b: Board, id: string, list: unknown): Card {
       return { text, type: nonEmpty(o.type ?? DEFAULT_LINK_TYPES[0], '类型'), url }
     } catch (e) { throw e instanceof BoardError ? new BoardError(e.code, '第 ' + (i + 1) + ' 条：' + e.message) : e }
   })
+  // 0.14 同一张卡片不能有重复链接（点名第几条与已有的那条）
+  const seen = new Map<string, number>()
+  clean.forEach((l, i) => {
+    const k = urlKey(l.url)
+    const j = seen.get(k)
+    if (j !== undefined) throw new BoardError('DUP_URL', '第 ' + (i + 1) + ' 条和第 ' + (j + 1) + ' 条是同一个链接：' + l.url + '（已添加为「' + clean[j].text + '」）')
+    seen.set(k, i)
+  })
   for (const l of clean) addLinkType(b, l.type)
   if (clean.length) c.webLinks = clean
   else delete c.webLinks
@@ -332,11 +464,26 @@ export function memoryOf(b: Board, c: Card): Array<{ key: string; from: 'group' 
   return out
 }
 
+/** 0.18 关联了这个落盘项目的卡片（卡片级，含已归档）与卡片组（组级）。 */
+export function linksOfKey(b: Board, key: string): { cards: Card[]; groups: Group[] } {
+  return { cards: b.cards.filter((c) => c.links.includes(key)), groups: b.groups.filter((g) => g.links.includes(key)) }
+}
+
 /** 一个会话只属于一张卡片：重复绑定以最新一次为准。 */
 export function bindSession(b: Board, sessionId: string, cardId: string, title?: string): void {
   liveCard(b, cardId)
   b.sessions = b.sessions.filter((s) => s.sessionId !== sessionId)
   b.sessions.unshift({ sessionId, cardId, createdAt: new Date().toISOString(), ...(title ? { title } : {}) })
+}
+
+/** 0.14 分叉：源会话关联了卡片 → 新会话关联同一张卡片（带上源会话已读过的落盘项目）。源会话没关联 / 卡片已归档 → null。 */
+export function bindFork(b: Board, childId: string, parentId: string, title?: string): Card | null {
+  const p = sessionRef(b, parentId)
+  if (!p || sessionRef(b, childId)) return null
+  const c = b.cards.find((x) => x.id === p.cardId)
+  if (!c || c.archivedAt) return null
+  b.sessions.unshift({ sessionId: childId, cardId: c.id, createdAt: new Date().toISOString(), ...(title ? { title } : {}), ...(p.readKeys?.length ? { readKeys: p.readKeys.slice() } : {}) })
+  return c
 }
 
 /**
@@ -440,5 +587,13 @@ export function parseBoard(raw: unknown): Board {
     g.statuses = g.statuses.map((s) => ({ id: s.id, name: s.name }))
   }
   for (const c of b.cards) delete (c as Card & { ev?: unknown }).ev
+  // 0.14 升级：卡片还没有自己的仓库清单 → 复制所在组当前的仓库（表现与升级前一致）；候选仓库从各组 / 卡片现有仓库起步
+  const stamp = new Date().toISOString()
+  for (const c of b.cards) if (!Array.isArray(c.repos)) c.repos = (b.groups.find((g) => g.id === c.g)?.repos ?? []).map((r) => ({ ...r }))
+  if (!Array.isArray(b.repoHistory)) {
+    b.repoHistory = []
+    const all = b.groups.flatMap((g) => g.repos).concat(b.cards.flatMap((c) => c.repos))
+    for (const r of all) if (!b.repoHistory.some((x) => normPath(x.path) === normPath(r.path))) b.repoHistory.push({ name: r.name, role: r.role, path: r.path, at: stamp })
+  }
   return b
 }

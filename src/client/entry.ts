@@ -8,11 +8,12 @@
 import { createElement as h, useEffect, useRef, type ReactElement } from 'react'
 import type { Snapshot } from './api.js'
 
-/** 进行中 = 未归档、且不在本组第一个也不在最后一个阶段的卡片。 */
-export function doingCount(b: Snapshot['board']): number {
-  const sts = new Map(b.groups.map((g) => [g.id, g.statuses.map((s) => s.id)]))
-  return b.cards.filter((c) => { if (c.archivedAt) return false; const ids = sts.get(c.g) ?? []; const i = ids.indexOf(c.col); return i > 0 && i < ids.length - 1 }).length
+/** 0.19 进行中 = 没归档、且至少有 1 个没归档会话（不算子代理；会话已删除的不算）的卡片。live(id) = 会话存在且没归档。 */
+export function doingCount(b: Snapshot['board'], live: (sessionId: string) => boolean): number {
+  const busy = new Set(b.sessions.filter((s) => live(s.sessionId)).map((s) => s.cardId))
+  return b.cards.filter((c) => !c.archivedAt && busy.has(c.id)).length
 }
+export const DOING_TIP = '进行中 = 没归档、且至少有 1 个没归档会话的卡片（会话归档 / 恢复、卡片归档 / 恢复后立刻刷新）'
 
 const GLYPH = '<svg class="pgi" viewBox="0 0 24 24" aria-hidden="true"><rect class="b1" x="3.5" y="4" width="4.5" height="15" rx="2.25"/><rect class="b2" x="9.75" y="4" width="4.5" height="10" rx="2.25"/><rect class="b3" x="16" y="4" width="4.5" height="12.5" rx="2.25"/><rect class="drop" x="10.6" y="15.6" width="2.8" height="3.2" rx="1.1"/></svg>'
 
@@ -39,6 +40,6 @@ export function BoardEntry(p: { active: boolean; compact: boolean; count: number
   }, [p.active])
   return h('span', { ref, className: 'dpm-entry' + (p.compact ? ' rail' : ''), 'data-active': String(p.active), 'aria-hidden': 'true' },
     h('span', { className: 'hfx' }, h('span', { className: 'rim' }), h('span', { className: 'spot' }), h('span', { className: 'sheen' }), h('span', { className: 'ripple' })),
-    p.count > 0 ? h('span', { className: 'hbadge', title: p.count + ' 张卡片进行中' }, h('i'), String(p.count), h('span', { className: 'hl' }, ' 进行中')) : null,
+    p.count > 0 ? h('span', { className: 'hbadge', title: p.count + ' 张卡片进行中。' + DOING_TIP }, h('i'), String(p.count), h('span', { className: 'hl' }, ' 进行中')) : null,
     h('span', { className: 'pgw' }, h('span', { className: 'pg', dangerouslySetInnerHTML: { __html: GLYPH } })))
 }

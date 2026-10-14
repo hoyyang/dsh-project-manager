@@ -144,7 +144,7 @@ test('cards can be created in any stage and append to its end', () => {
 test('parseBoard upgrades 0.1.x boards: drops cat/gate/ev, keeps stage ids, names, order and card positions', () => {
   const old = {
     version: 1,
-    groups: [{ id: 'g1', name: '密码问题单处理', collapsed: false, repos: [], links: [], statuses: [
+    groups: [{ id: 'g1', name: '结算问题单处理', collapsed: false, repos: [], links: [], statuses: [
       { id: 's1', name: '分析', cat: 'unstarted', gate: true }, { id: 'plan', name: '制定方案', cat: 'unstarted' }, { id: 'done', name: '完成', cat: 'done' }] }],
     cards: [{ id: 'c1', g: 'g1', col: 'done', order: 0, t: 'X', links: [], tasks: [], ev: '17/17 PASS' }],
   }
@@ -159,7 +159,7 @@ test('memoryText names exactly the omitted items', () => {
   const cat = new StateCatalog(aiFixture(), 0)
   const { b, a } = seed()
   a.links = ['notes/analytics-kb', 'acme/checkout-flow']
-  const txt = memoryText(b, a, cat, 330)
+  const txt = memoryText(b, a, idxOf(b, a, cat), 120)
   const omitted = /名单：(.+)）/.exec(txt)
   assert.ok(omitted, txt)
   for (const k of omitted[1].split('、')) assert.ok(!txt.split('名单')[0].includes('- ' + k + '（'), k)
@@ -204,6 +204,8 @@ test('parseState accepts the label formats found in real ~/.ai STATE files', () 
   for (const [text, s, n] of cases) assert.deepEqual(parseState(text), { status: s, next: n }, text)
 })
 
+const idxOf = (b, c, cat) => M.memoryOf(b, c).map((m) => ({ ...m, state: cat.get(m.key) }))
+
 const aiFixture = () => {
   const root = mkdtempSync(join(tmpdir(), 'dpm-ai-'))
   const mk = (p, s, body) => { mkdirSync(join(root, 'projects', p, 'memory', 'designs', s), { recursive: true }); writeFileSync(join(root, 'projects', p, 'memory', 'designs', s, 'STATE.md'), body) }
@@ -223,11 +225,10 @@ test('memoryText lists linked STATEs with paths and respects byte budget', () =>
   const { b, g, a } = seed()
   M.setGroupLinks(b, g.id, ['acme/checkout-flow'])
   a.links = ['notes/analytics-kb', 'notes/missing']
-  const txt = memoryText(b, a, cat)
+  const txt = memoryText(b, a, idxOf(b, a, cat))
   assert.match(txt, /E2E PASS/); assert.match(txt, /STATE：.*analytics-kb\/STATE\.md/); assert.match(txt, /notes\/missing：未找到 STATE/)
-  const small = memoryText(b, a, cat, 260)
+  const small = memoryText(b, a, idxOf(b, a, cat), 100)
   assert.match(small, /因长度预算省略/)
-  assert.ok(Buffer.byteLength(small) < 500)
 })
 
 test('addRepos appends a batch, rejects name/path clashes loudly and writes nothing on failure', () => {
@@ -296,19 +297,21 @@ test('readKeysFromEvents finds STATE files read directly or inside run_code, ign
   assert.deepEqual(M.readKeysFromEvents([], paths), [])
 })
 
-test('memoryText skips STATEs the session already read and says so', () => {
+test('0.18 memoryText: one section, card archive exactly once, stable index (no version / status when full text is injected)', () => {
   const b = M.emptyBoard()
   const g = M.addGroup(b, 'G')
   const cat = new StateCatalog(aiFixture(), 0)
   const keys = cat.list().map((s) => s.key)
   M.setGroupLinks(b, g.id, keys)
   const c = M.addCard(b, g.id, 'C')
-  const full = memoryText(b, c, cat)
-  const skip = memoryText(b, c, cat, 6000, [keys[0]])
-  assert.ok(full.includes('STATE：' + cat.get(keys[0]).path))
-  assert.ok(!skip.includes('STATE：' + cat.get(keys[0]).path))
-  assert.match(skip, new RegExp('已读过、不再重复注入：' + keys[0].replace('/', '\\/')))
-  assert.match(memoryText(b, c, cat, 6000, keys), /之前已读过，不再重复注入/)
+  M.setNotes(b, c.id, '唯一的说明')
+  const t = memoryText(b, c, M.memoryOf(b, c).map((m) => ({ ...m, state: cat.get(m.key), required: ['notes/x.md'], full: true })))
+  assert.equal(t.split('唯一的说明').length, 2, 'card notes appear once')
+  assert.equal((t.match(/卡片档案（实时/g) || []).length, 1)
+  assert.match(t, /必读子文档：notes\/x\.md/)
+  assert.doesNotMatch(t, /E2E PASS|next_action：/, '全文会注入时索引不放会变的状态，落盘不让系统提示整段重发')
+  assert.match(memoryText(b, c, M.memoryOf(b, c).map((m) => ({ ...m, state: cat.get(m.key) }))), /next_action：/, '落盘功能没开时照旧放摘要')
+  assert.equal(t.includes('的资料'), false, 'old separate materials section is gone')
 })
 
 test('groupSessions groups by repo newest-first, filters by archived/exclude/query', async () => {
@@ -493,19 +496,19 @@ test('0.9 syncHub: each card group gets hub/groups/<id>/ with repos/<repo> links
   const repoA = mkdtempSync(join(tmpdir(), 'dpm-ra-')), repoB = mkdtempSync(join(tmpdir(), 'dpm-rb-'))
   const states = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
   const b = M.emptyBoard()
-  const g1 = M.addGroup(b, '密码 问题单'), g2 = M.addGroup(b, 'other')
-  M.setGroupRepos ? M.setGroupRepos(b, g1.id, [{ name: 'Passwords', role: '主仓', path: repoA }]) : (g1.repos = [{ name: 'Passwords', role: '主仓', path: repoA }])
+  const g1 = M.addGroup(b, '结算 问题单'), g2 = M.addGroup(b, 'other')
+  M.setGroupRepos ? M.setGroupRepos(b, g1.id, [{ name: 'WebApp', role: '主仓', path: repoA }]) : (g1.repos = [{ name: 'WebApp', role: '主仓', path: repoA }])
   g2.repos = [{ name: 'B', role: '仓库', path: repoB }]
   syncHub(data, b, states)
   const d1 = groupDir(data, g1.id)
   assert.ok(d1.endsWith(join('hub', 'groups', g1.id)), 'dir named by group id, not name')
-  assert.equal(readlinkSync(join(d1, 'repos', 'Passwords')), repoA)
+  assert.equal(readlinkSync(join(d1, 'repos', 'WebApp')), repoA)
   assert.equal(readdirSync(join(groupDir(data, g2.id), 'repos')).join(), 'B', 'only own repos')
-  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「密码 问题单」[\s\S]*repos\/Passwords\/ → /)
+  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「结算 问题单」[\s\S]*repos\/WebApp\/ → /)
   // rename: same dir, AGENTS.md title follows
-  M.renameGroup(b, g1.id, '密码问题单处理'); syncHub(data, b, states)
-  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「密码问题单处理」/)
-  assert.equal(readlinkSync(join(d1, 'repos', 'Passwords')), repoA)
+  M.renameGroup(b, g1.id, '结算问题单处理'); syncHub(data, b, states)
+  assert.match(readFileSync(join(d1, 'AGENTS.md'), 'utf8'), /卡片组「结算问题单处理」/)
+  assert.equal(readlinkSync(join(d1, 'repos', 'WebApp')), repoA)
   // repo removed → link removed, target untouched
   g1.repos = []; syncHub(data, b, states)
   assert.equal(readdirSync(join(d1, 'repos')).length, 0)
@@ -523,9 +526,11 @@ test('0.9 groupAgentsMd: duplicate repo names are flagged, links listed, names c
   const g = M.addGroup(b, 'x\n# injected')
   g.repos = [{ name: 'A', role: 'r', path: '/a' }, { name: 'A', role: 'r', path: '/b' }]
   g.links = ['p/missing']
-  const md = groupAgentsMd(g, states)
+  const md = groupAgentsMd(b, g, states)
   assert.ok(!/\n# injected/.test(md), 'group name is single-line')
-  assert.match(md, /未挂载（与本组其他仓库重名/)
+  // 0.14：同名不同路径不再「未挂载」，后来者改名为「名-2」
+  assert.match(md, /repos\/A\/ → \/a/)
+  assert.match(md, /repos\/A-2\/ → \/b/)
   assert.match(md, /p\/missing（未找到）/)
 })
 
@@ -570,23 +575,261 @@ test('0.10 setWebLinks: full replace keeps order, auto text, new types become gl
   assert.throws(() => M.setWebLinks(b, c.id, []), (e) => e.code === 'CARD_ARCHIVED')
 })
 
-test('0.10 memoryText injects card materials (notes fenced, links markdown, file paths); none → memory only', () => {
+test('0.13 renameLinkType: renames in the list and in every card (archived too), rejects unknown / empty / >20 / duplicate without writing', () => {
+  const { b, a, c } = seed()
+  M.setWebLinks(b, a.id, [{ text: 'x', type: '代码', url: 'https://a.com' }, { text: 'y', type: '文档', url: 'https://b.com' }])
+  M.setWebLinks(b, c.id, [{ text: 'z', type: '代码', url: 'https://c.com' }])
+  M.archiveCard(b, c.id)
+  assert.deepEqual(M.renameLinkType(b, '代码', ' 仓库 '), { name: '仓库', links: 2 })
+  assert.deepEqual(M.linkTypes(b), ['文档', '仓库'], 'position kept')
+  assert.deepEqual([...a.webLinks, ...c.webLinks].map((l) => l.type), ['仓库', '文档', '仓库'])
+  assert.deepEqual(M.renameLinkType(b, '文档', '文档'), { name: '文档', links: 0 }, 'same name is a no-op')
+  const before = JSON.stringify(b)
+  assert.throws(() => M.renameLinkType(b, '不存在', 'x'), (e) => e.code === 'NOT_FOUND')
+  assert.throws(() => M.renameLinkType(b, '文档', '仓库'), /已经有「仓库」/)
+  assert.throws(() => M.renameLinkType(b, '文档', '  '), /不能为空/)
+  assert.throws(() => M.renameLinkType(b, '文档', 'x'.repeat(21)), /20/)
+  assert.equal(JSON.stringify(b), before, 'failed renames write nothing')
+  const d = seed().b
+  assert.deepEqual(M.renameLinkType(d, '文档', '资料'), { name: '资料', links: 0 })
+  assert.deepEqual(M.linkTypes(d), ['资料', '代码'], 'default list is materialized on first rename')
+})
+
+test('0.10 memoryText injects card materials (notes fenced, links markdown, file paths)', () => {
   const ai = mkdtempSync(join(tmpdir(), 'dpm-ai-'))
   const states = new StateCatalog(ai)
   const { b, a } = seed()
-  const plain = memoryText(b, a, states)
-  assert.ok(!/卡片「A」的资料/.test(plain), 'no materials → no section')
   M.setNotes(b, a.id, '背景：\n## 不是标题\n```bash\nrm -rf /\n```')
   M.setWebLinks(b, a.id, [{ text: '方案 [v2]', type: '文档', url: 'https://docs.example.com/abc' }])
   M.addFiles(b, a.id, ['/srv/demo/a.md', '/srv/demo/b.png'])
-  const t = memoryText(b, a, states)
-  assert.match(t, /## dsh-project-manager：卡片「A」的资料/)
-  assert.match(t, /### 相关说明\n```text\n背景：\n## 不是标题/)
+  const t = memoryText(b, a, idxOf(b, a, states))
+  assert.match(t, /### 卡片档案（实时，以看板为准）/)
+  assert.match(t, /- 相关说明（用户原文）：\n```text\n背景：\n## 不是标题/)
   assert.equal((t.match(/```/g) || []).length, 2, 'user fences neutralized, only our fence remains')
   assert.match(t, /- \[方案 v2\]\(https:\/\/docs\.example\.com\/abc\)（文档）/)
-  assert.match(t, /### 相关文件（绝对路径）\n- \/srv\/demo\/a\.md\n- \/srv\/demo\/b\.png/)
+  assert.match(t, /- 相关文件（绝对路径）：\n  - \/srv\/demo\/a\.md\n  - \/srv\/demo\/b\.png/)
   M.setNotes(b, a.id, '长'.repeat(4000))
-  const cut = memoryText(b, a, states, 6000, [], 3000)
+  const cut = memoryText(b, a, idxOf(b, a, states), 6000, 3000)
   assert.match(cut, /已截断/)
-  assert.ok(Buffer.byteLength(cut) < 6000)
+})
+
+test('0.12/0.20 blankRows: blank sessions of the given workspaces (not archived / subagent; current one marked, titled from board), host order kept', () => {
+  const src = readFileSync(new URL('../src/client/sidebar.ts', import.meta.url), 'utf8')
+  const m = /export function blankRows\([\s\S]*?\): Record<string, BlankRow\[\]> \{([\s\S]*?)\n\}\n/.exec(src)
+  assert.ok(m, 'blankRows not found')
+  const body = m[1].replace(/: Record<string, BlankRow\[\]>/g, '')
+  const blankRows = new Function('items', 'byId', 'archived', 'wids', 'titles = {}', body)
+  const items = [{ workspaceId: 'hub', sessionIds: ['h1', 'h2'] }, { workspaceId: 'g1', sessionIds: ['a', 'b', 'c', 'd', 'e', 'f'] }, { workspaceId: 'other', sessionIds: ['x'] }]
+  const byId = {
+    h1: { displayTitle: '新会话', blank: true }, h2: { title: 'talked', blank: false },
+    a: { title: 'A', blank: true }, b: { title: 'B', blank: true, retainedBy: { mainView: 1 } }, c: { title: 'C', blank: true, parentId: 'p' },
+    d: { title: 'D', blank: true }, e: { blank: true, origin: 'subagent' }, f: { displayTitle: 'F', blank: true },
+    x: { title: 'X', blank: true },
+  }
+  const r = blankRows(items, byId, new Set(['d']), ['hub', 'g1', 'missing'])
+  // 0.15：c 是分叉（带 parentId、不是子代理）→ 照常补画
+  assert.deepEqual(r, { hub: [{ id: 'h1', title: '新会话' }], g1: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', current: true }, { id: 'c', title: 'C' }, { id: 'f', title: '新会话' }] })
+  // 0.20：当前打开的空会话也由插件画；没有会话标题时用看板上记的标题（绑定卡片时写入）
+  assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['n'] }], { n: { blank: true, retainedBy: { mainView: 1 } } }, new Set(), ['g'], { n: '插件诊断' }), { g: [{ id: 'n', title: '插件诊断', current: true }] })
+  // 没有标题时 displayTitle 是目录名，不能拿来当标题
+  assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['z'] }], { z: { displayTitle: 'gmunhccece', blank: true } }, new Set(), ['g']), { g: [{ id: 'z', title: '新会话' }] })
+  assert.deepEqual(blankRows(items, byId, new Set(), []), {})
+})
+
+test('0.12 limitList / moreBtn: default 3, button only when more, label counts the hidden ones', () => {
+  const src = readFileSync(new URL('../src/client/board.ts', import.meta.url), 'utf8')
+  const lm = /export function limitList<T>\(list: T\[\], all: boolean, limit = LIST_LIMIT\): T\[\] \{ (return [^\n]*) \}\n/.exec(src)
+  assert.ok(lm, 'limitList not found')
+  assert.match(src, /export const LIST_LIMIT = 3\n/)
+  const limitList = new Function('list', 'all', 'limit', lm[1].replace('limit)', 'limit)'))
+  const L = [1, 2, 3, 4, 5]
+  assert.deepEqual(limitList(L, false, 3), [1, 2, 3])
+  assert.deepEqual(limitList(L, true, 3), L)
+  assert.deepEqual(limitList([1, 2, 3], false, 3), [1, 2, 3])
+  const mb = /export const moreBtn = \(k: string, all: boolean, n: number, ctl: string, limit = LIST_LIMIT\): string => ([\s\S]*?)\n\n/.exec(src)
+  assert.ok(mb, 'moreBtn not found')
+  const moreBtn = new Function('ic', 'k', 'all', 'n', 'ctl', 'limit', 'return ' + mb[1])
+  const ic = () => '<svg/>'
+  assert.equal(moreBtn(ic, 'mem', false, 3, 'x', 3), '')
+  assert.match(moreBtn(ic, 'mem', false, 5, 'x', 3), /data-more="mem" aria-expanded="false" aria-controls="x">展示更多（还有 2 项）/)
+  assert.match(moreBtn(ic, 'sess', true, 5, 'y', 3), /aria-expanded="true" aria-controls="y">折叠/)
+})
+
+
+test('0.14 card repos: new card copies group shared repos; later group edits and card edits stay independent', () => {
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'G')
+  M.addRepos(b, g.id, [{ name: 'A', path: '/r/a' }, { name: 'B', path: '/r/b' }])
+  const c1 = M.addCard(b, g.id, 'C1')
+  assert.deepEqual(c1.repos.map((r) => r.name), ['A', 'B'])
+  M.addRepos(b, g.id, [{ name: 'X', path: '/r/x' }])
+  assert.deepEqual(c1.repos.map((r) => r.name), ['A', 'B'], 'existing card not affected by later group change')
+  const c2 = M.addCard(b, g.id, 'C2')
+  assert.deepEqual(c2.repos.map((r) => r.name), ['A', 'B', 'X'])
+  M.setCardRepos(b, c2.id, c2.repos.filter((r) => r.name !== 'A'))
+  assert.deepEqual(g.repos.map((r) => r.name), ['A', 'B', 'X'], 'removing from card leaves group')
+  assert.deepEqual(c1.repos.map((r) => r.name), ['A', 'B'], 'and other cards')
+  M.addCardRepos(b, c1.id, [{ name: 'Y', path: '/r/y' }])
+  assert.deepEqual(c1.repos.map((r) => r.name), ['A', 'B', 'Y'])
+  assert.throws(() => M.addCardRepos(b, c1.id, [{ name: 'Z', path: '/r/y/' }]), { code: 'REPO_MOUNTED' })
+  assert.throws(() => M.addCardRepos(b, c1.id, [{ name: 'A', path: '/r/q' }]), { code: 'REPO_NAME_TAKEN' })
+  c1.repos[0].name = 'mutated'
+  assert.equal(g.repos[0].name, 'A', 'copy, not shared reference')
+  M.archiveCard(b, c1.id)
+  assert.throws(() => M.addCardRepos(b, c1.id, [{ name: 'W', path: '/r/w' }]), { code: 'CARD_ARCHIVED' })
+})
+
+test('0.14 repo history: every add is remembered (also after removal), newest first, re-add refreshes time', () => {
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'G')
+  M.noteRepos(b, [{ name: 'A', role: '仓库', path: '/r/a' }], '2026-10-01T00:00:00.000Z')
+  M.noteRepos(b, [{ name: 'B', role: '仓库', path: '/r/b' }], '2026-10-02T00:00:00.000Z')
+  assert.deepEqual(M.repoCandidates(b).map((r) => r.name), ['B', 'A'])
+  M.noteRepos(b, [{ name: 'A2', role: '主仓', path: '/r/a/' }], '2026-10-03T00:00:00.000Z')
+  assert.deepEqual(M.repoCandidates(b).map((r) => r.name), ['A2', 'B'], 'same path kept once with newest name')
+  const c = M.addCard(b, g.id, 'C')
+  M.addCardRepos(b, c.id, [{ name: 'Q', path: '/r/q' }])
+  M.setCardRepos(b, c.id, [])
+  assert.equal(M.repoCandidates(b)[0].name, 'Q', 'removed repo stays a candidate')
+})
+
+test('0.14 parseBoard migrates: cards without repos copy their group repos; history seeded once', () => {
+  const raw = { version: 1, groups: [{ id: 'g', name: 'G', collapsed: false, repos: [{ name: 'A', role: '主仓', path: '/r/a' }], links: [], statuses: [{ id: 's', name: 'S' }] }], cards: [{ id: 'c', g: 'g', col: 's', order: 0, t: 'C', links: [], tasks: [] }], sessions: [] }
+  const b = M.parseBoard(JSON.parse(JSON.stringify(raw)))
+  assert.deepEqual(b.cards[0].repos, [{ name: 'A', role: '主仓', path: '/r/a' }])
+  assert.notEqual(b.cards[0].repos[0], b.groups[0].repos[0])
+  assert.deepEqual(b.repoHistory.map((r) => r.path), ['/r/a'])
+  b.cards[0].repos = []
+  const again = M.parseBoard(JSON.parse(JSON.stringify(b)))
+  assert.deepEqual(again.cards[0].repos, [], 'explicitly empty card repos are not refilled')
+})
+
+test('0.14 groupMounts: group + card repos, same path once, name clash becomes name-2', () => {
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'G')
+  M.addRepos(b, g.id, [{ name: 'A', path: '/r/a' }])
+  const c1 = M.addCard(b, g.id, 'C1')
+  M.addCardRepos(b, c1.id, [{ name: 'B', path: '/r/b' }])
+  const c2 = M.addCard(b, g.id, 'C2')
+  M.addCardRepos(b, c2.id, [{ name: 'B', path: '/other/b' }])
+  const m = M.groupMounts(b, g.id)
+  assert.deepEqual([...m], [['/r/a', 'A'], ['/r/b', 'B'], ['/other/b', 'B-2']])
+})
+
+test('0.14 card archive injects repos (with real repos/ link name) and subtasks', () => {
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'G')
+  const c1 = M.addCard(b, g.id, 'C1')
+  M.addCardRepos(b, c1.id, [{ name: 'B', role: '主仓', path: '/r/b' }])
+  const c2 = M.addCard(b, g.id, 'C2')
+  M.addCardRepos(b, c2.id, [{ name: 'B', path: '/other/b' }])
+  M.setTasks(b, c2.id, [{ text: '做完', done: true }, { text: '没做', done: false }])
+  const cat = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
+  const t = memoryText(b, c2, idxOf(b, c2, cat))
+  assert.match(t, /- 仓库（1）/)
+  assert.match(t, /  - B（仓库）：repos\/B-2\/ → \/other\/b/)
+  assert.match(t, /- 子任务（1\/2 完成）：\n  - \[x\] 做完\n  - \[ \] 没做/)
+  assert.doesNotMatch(t, /\/r\/b/, 'only this card\'s repos')
+})
+
+test('0.14 syncHub mounts card-only repos in the group dir and lists them in AGENTS.md', () => {
+  const data = mkdtempSync(join(tmpdir(), 'dpm-m-'))
+  const ra = mkdtempSync(join(tmpdir(), 'dpm-ra-')), rb = mkdtempSync(join(tmpdir(), 'dpm-rb-'))
+  const states = new StateCatalog(mkdtempSync(join(tmpdir(), 'dpm-ai-')))
+  const b = M.emptyBoard()
+  const g = M.addGroup(b, 'G')
+  M.addRepos(b, g.id, [{ name: 'A', path: ra }])
+  const c = M.addCard(b, g.id, 'C')
+  M.addCardRepos(b, c.id, [{ name: 'B', path: rb }])
+  syncHub(data, b, states)
+  const d = groupDir(data, g.id)
+  assert.equal(readlinkSync(join(d, 'repos', 'A')), ra)
+  assert.equal(readlinkSync(join(d, 'repos', 'B')), rb)
+  assert.match(readFileSync(join(d, 'AGENTS.md'), 'utf8'), /仓库 B（仓库，卡片自己加的）：repos\/B\/ → /)
+  M.setCardRepos(b, c.id, [])
+  syncHub(data, b, states)
+  assert.deepEqual(readdirSync(join(d, 'repos')), ['A'], 'card repo removed → link removed')
+  assert.ok(existsSync(rb))
+})
+
+test('0.14 moveLinkType reorders the global type list', () => {
+  const b = M.emptyBoard()
+  for (const t of ['x', 'y', 'z']) M.addLinkType(b, t)
+  assert.deepEqual(M.moveLinkType(b, 'z', 0), ['z', '文档', '代码', 'x', 'y'])
+  assert.deepEqual(M.moveLinkType(b, 'z', 4), ['文档', '代码', 'x', 'y', 'z'])
+  assert.throws(() => M.moveLinkType(b, 'nope', 0), { code: 'NOT_FOUND' })
+  assert.throws(() => M.moveLinkType(b, 'x', 5), { code: 'BAD_ARG' })
+})
+
+test('0.14 setWebLinks rejects duplicate links (host case, trailing slash, bare domain) and names both rows', () => {
+  const { b, a } = seed()
+  M.setWebLinks(b, a.id, [{ text: '商城', type: '文档', url: 'https://mall.example.com/' }])
+  assert.throws(() => M.setWebLinks(b, a.id, [a.webLinks[0], { text: '', type: '文档', url: 'MALL.example.com' }]), (e) => e.code === 'DUP_URL' && /第 2 条和第 1 条/.test(e.message) && /商城/.test(e.message))
+  assert.equal(a.webLinks.length, 1, 'nothing written')
+  M.setWebLinks(b, a.id, [a.webLinks[0], { text: '', type: '文档', url: 'mall.example.com/a' }])
+  assert.equal(a.webLinks.length, 2, 'different path is fine')
+  assert.equal(M.urlKey('https://X.com/a/'), M.urlKey('https://x.com/a'))
+  assert.notEqual(M.urlKey('https://x.com/a?q=1'), M.urlKey('https://x.com/a'))
+})
+
+test('0.14 bindFork: child inherits parent card + readKeys; unlinked or archived parent card → no bind', () => {
+  const { b, a, c } = seed()
+  b.sessions.unshift({ sessionId: 'p1', cardId: a.id, createdAt: 'x', readKeys: ['k/1'] })
+  const got = M.bindFork(b, 'f1', 'p1')
+  assert.equal(got.id, a.id)
+  assert.deepEqual(M.sessionRef(b, 'f1').readKeys, ['k/1'])
+  assert.equal(M.bindFork(b, 'f1', 'p1'), null, 'already bound → untouched')
+  assert.equal(M.bindFork(b, 'f2', 'nobody'), null)
+  b.sessions.unshift({ sessionId: 'p3', cardId: c.id, createdAt: 'x' })
+  M.archiveCard(b, c.id)
+  assert.equal(M.bindFork(b, 'f3', 'p3'), null)
+  assert.equal(M.sessionRef(b, 'f3'), undefined)
+})
+
+test('0.15 normPastedPath: quotes, file://, ~, escaped spaces, trailing slash', () => {
+  const H = '/srv/demo'
+  assert.equal(M.normPastedPath('  "/a/b c.md"  ', H), '/a/b c.md')
+  assert.equal(M.normPastedPath("'/a/x'", H), '/a/x')
+  assert.equal(M.normPastedPath('file:///a/%E6%96%B9%E6%A1%88.md', H), '/a/方案.md')
+  assert.equal(M.normPastedPath('~/Desktop/x.zip', H), '/srv/demo/Desktop/x.zip')
+  assert.equal(M.normPastedPath('/a/b\\ c/d.txt', H), '/a/b c/d.txt')
+  assert.equal(M.normPastedPath('/a/dir/', H), '/a/dir')
+  assert.equal(M.normPastedPath('/', H), '/')
+  assert.equal(M.normPastedPath('relative/x', H), 'relative/x')
+})
+
+test('0.15 checkPaths: ok / dir / missing / linked / dup / bad, blank lines skipped, cap 200', async () => {
+  const { checkPaths } = await import('../lib/routes.js')
+  const fs = { '/a/f.md': 'file', '/a/d': 'dir' }
+  const r = checkPaths(['/a/f.md', '', '/a/d', '/a/none', '/a/linked.md', '"/a/f.md"', 'rel/x'], ['/a/linked.md'], '/h', (p) => fs[p] ?? null)
+  assert.deepEqual(r.map((x) => x.status), ['ok', 'dir', 'missing', 'linked', 'dup', 'bad'])
+  assert.equal(r[4].path, '/a/f.md')
+  assert.throws(() => checkPaths('x', [], '/h', () => null), /字符串数组/)
+  assert.throws(() => checkPaths(Array(201).fill('/a'), [], '/h', () => null), /200/)
+})
+
+test('0.15 backfillForks: binds child of a linked parent once; skips unlinked parent / already linked child / archived card', () => {
+  const { b, a, c } = seed()
+  M.bindSession(b, 'p1', a.id)
+  M.bindSession(b, 'p2', c.id)
+  M.bindSession(b, 'k3', c.id)
+  M.archiveCard(b, c.id)
+  const r = M.backfillForks(b, [{ child: 'k1', parent: 'p1' }, { child: 'k1', parent: 'p1' }, { child: 'k2', parent: 'nobody' }, { child: 'k3', parent: 'p1' }, { child: 'k4', parent: 'p2' }])
+  assert.deepEqual(r, [{ child: 'k1', card: a.id }])
+  assert.equal(M.sessionRef(b, 'k1').cardId, a.id)
+  assert.equal(M.sessionRef(b, 'k3').cardId, c.id)
+  assert.equal(M.sessionRef(b, 'k4'), undefined)
+})
+
+test('0.15 eventsTail reads only the tail of a large audit log', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dpm-tail-'))
+  const st = new BoardStore(dir)
+  const line = (i) => JSON.stringify({ at: 't', actor: 'u', kind: 'k' + i, card: 'x'.repeat(200) }) + '\n'
+  let s = ''
+  for (let i = 0; i < 2000; i++) s += line(i)
+  writeFileSync(st.eventsPath, s)
+  const tail = st.eventsTail(80)
+  assert.equal(tail.length, 80)
+  assert.equal(tail[79].kind, 'k1999')
+  assert.equal(tail[0].kind, 'k1920')
 })

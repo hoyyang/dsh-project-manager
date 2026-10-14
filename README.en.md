@@ -2,7 +2,7 @@
 
 ![banner](assets/banner.png)
 
-**A project board for DeepSeek Harness: card groups are parent projects, cards are the work. Each card links landfill-project memory, mounted repos and sessions, and every session opened from a card starts with that project context loaded.**
+**A project board for DeepSeek Harness that treats project memory as a first-class job: every session opened from a card starts with the project's complete, up-to-date landfill memory (STATE + required sub-docs) and card details; say "落盘项目" and the progress is written back by the rules, so you can pick up the work in another session, another CLI, or days later.**
 
 [**中文**](README.md) · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [Changelog](CHANGELOG.md)
 
@@ -27,168 +27,241 @@ Alternative (straight from GitHub):
 dsh plugin add github:hoyyang/dsh-project-manager
 ```
 
-**Zero config**: restart dsh after installing — no account, API key or settings needed. Landfill projects are scanned read-only from `~/.ai`; see "Configuration" to change the data folder or the permission mode.
-
-**Supported dsh versions**
+**Zero config, works out of the box**: restart dsh after installing. No account, API key or settings. Landfill memory lives in `~/.ai` by default (all writes go through the bundled `ai-memory`, which needs python3; on Windows this part is turned off and the board still works). See "Configuration" to change the data directory or permission mode.
 
 | Environment | Version | Status |
 |---|---|---|
-| dsh CLI (`@deepseek-ai/dsh`, `dsh web`) | `0.2.0-rc.2` | Tested (0.11.0) |
-| DSH Desktop | `2.0.17` (bundles dsh `0.2.0-rc.2`) | Tested (0.11.0) |
-| dsh `0.1.5-rc.1` | — | Tested with 0.4.0; not re-verified since 0.5.0 |
-| peerDependencies | `@deepseek-ai/cordis >=4.0.1 <5`, `@deepseek-ai/dsh-tools >=0.1.5-rc <2`, `@deepseek-ai/dsh-client-ui-slots >=0.1.5-rc <2`, `@deepseek-ai/schemastery ^3.18.1` | Declared ranges; other versions inside them not individually tested |
+| dsh CLI (`@deepseek-ai/dsh`, `dsh web`) | `0.2.0-rc.2` | Tested (0.20.0) |
+| DSH Desktop | `2.0.17` (bundles dsh `0.2.0-rc.2`) | Tested (0.20.0) |
+| peerDependencies | `@deepseek-ai/cordis >=4.0.1 <5`, `@deepseek-ai/dsh-tools >=0.1.5-rc <2`, `@deepseek-ai/dsh-client-ui-slots >=0.1.5-rc <2`, `@deepseek-ai/schemastery ^3.18.1` | Declared range; other versions in range not individually tested |
 
-Needs the dsh web UI (`dsh web` from the CLI, or DSH Desktop). The sidebar counts, indentation and the "+" takeover depend on the markup of dsh's workspace list; if a future dsh changes it, those three simply stop showing — the board and sessions keep working.
+Needs the dsh web UI (`dsh web` or DSH Desktop). Sidebar enhancements (project hub counts, nesting, "+" takeover, blank-session rows) rely on the workspace list's page structure; if a dsh update changes it they simply stop showing, and the board, sessions and landfill keep working.
 
-## Features
+## What it does
 
 ![Project board](assets/board-zh.png)
 
-### Board
+### Sessions start with the complete, latest project memory
 
-- **Every project at a glance**: one swim lane per card group; stage names, count and order are editable. Drag cards within a stage (Alt+↑/↓ from the keyboard) or to another stage to advance them. Drag a group by the handle on its header to reorder; click anywhere on the left of the header to collapse/expand.
-- **Add cards right where they go**: every stage has an always-visible "添加卡片" row — Enter adds and keeps typing, Esc closes. Or bulk-import landfill projects (one STATE → one linked card).
-- **Two small badges per card**: a session badge (green with active sessions, gray when all are archived, hidden with none) and the landfill-project count (hidden when zero). Subtasks live in the detail pane.
-- **Archive cards**: the archive icon on a card or in its detail, or drag the card into the opened "已归档卡片" tray. The tray is collapsed by default; open it in place, click a row for a read-only detail, "恢复活跃" puts it back in its stage. The card's sessions are not touched.
-- **The agent can edit the board too**: 4 tools `card_manage` / `repo_manage` / `phase_move` / `task_manage`; inside a project session, omitting `card` targets the session's own card.
+- **Open a session from a card and the context is already there**: the plugin puts the **full text** of the card's landfill projects (STATE plus sub-docs tagged `[必读]`, "required") into the session, and the system prompt carries a live "card archive" (repos, subtasks, notes, links, files). No need to say "recall" first.
+- **Always the latest, never duplicated**: when another session or another CLI (Codex, Claude Code, ...) changes the STATE, the next step gets the new version (marked with which version it replaces and who wrote it); after compaction the text is re-injected; each version goes in once, your own writes are not echoed back, forks inherit.
+- **See exactly what the AI receives**: "查看 AI 收到的原文" in the session card shows the system prompt and injected text verbatim, with versions, whether it is already in this session, and an approximate token count.
+
+![What the AI receives](assets/raw-overlay-zh.png)
+
+### Say "落盘项目" and progress is written back by the rules
+
+- **One sentence**: "落盘项目 XX" writes progress into XX's STATE; "回忆 XX" / "继续 XX" reads it fully before continuing. Trigger words come from the project names and aliases already in `~/.ai`. Only command-style phrasing triggers, so talking about the feature does not; in plan mode it only reminds.
+- **Facts are not lost**: no write without a full read; a draft that drops commit hashes, paths, versions or issue IDs without declaring them is rejected; every write is read back and reports size before/after and removed sections. If the user asked and the turn did not do it, the model is pulled back before the turn ends.
+- **One project, one folder**: `STATE.md` is the single entry; every file in `plans/` (approved plans are saved here), `notes/` and `evidence/` has a line in the "📁 文件索引" (file index). Each persist rewrites the whole STATE and tidies the folder (merges duplicates, retires stale files to a recycle area).
+- **Card archive inside STATE**: the plugin generates a "🗂 卡片档案" block from the board (the AI never writes it), so other tools reading the STATE see the card details too.
+- **No bypassing**: direct `write` / `edit` / `bash` edits to memory files under `~/.ai` are refused; writes only go through `ai-memory` (file locks + optimistic concurrency), safe to share with other CLIs.
+
+### Session card: which card this session belongs to, and what it carries
+
+![Session card](assets/sic-collapsed-zh.png)
+
+- **One line above the input box**: group / card, number of landfill projects, repo / link / subtask / note pills, and a jump to this card on the board. Light blue when linked, light grey when not.
+- **Expand for everything**: one row per landfill project (project, aliases, next_action, injected or not, size) with its own "落盘" (persist) button; card details below.
+- **Persist outcomes shown as they are**: after you persist from the card, the round ends with "落盘完成" (done) when written; if you stopped it, it failed, or the AI is asking you something, the card says so and offers "重新落盘 / 忽略" (retry / dismiss) instead of spinning forever.
+
+![Expanded session card](assets/sic-open-zh.png)
+
+![When persisting fails](assets/sic-error-zh.png)
+
+### Same-name detection: one project never becomes two
+
+- **Hints before you type**: when the card has no landfill project, existing projects whose alias equals the card title are offered as "可能就是这个" (maybe this one).
+- **Exact name match cannot be created again**: if the file name or an alias matches an existing project, the main button becomes "关联并落盘" (link and persist) with a rename suggestion; near matches are only hinted.
+- **Each candidate is clear**: size, last update, which cards already link it, and whether persisting will move it; link only, or link and persist.
+
+![Maybe this one](assets/sic-hint-zh.png)
+
+![Exact match](assets/sic-exact-zh.png)
+
+![Near match](assets/sic-near-zh.png)
+
+### Filed by card group, migrated by the rules
+
+- **Each card group has its own landfill folder** `~/.ai/projects/<folder>/`. The first persist in a group asks you once to confirm a folder (suggested from the group name, editable); it can also be changed in group settings. New and merged landfill projects go there.
+- **The spec is a versioned checklist** checked on every persist, so a STATE written under any older spec is brought up to date on its next persist. A project in the wrong place is moved **as a whole folder** by the plugin (sub-docs moved, old paths inside rewritten, references under `~/.ai` repointed, card links switched, old folder to the recycle area); the title line, file index and alias line are fixed by the persisting AI per the checklist, and a non-conforming draft is refused.
+- **Told in advance, undoable afterwards**: the session card marks "落盘时迁到 xxx" (moves to xxx on persist) beforehand; afterwards an "已按规范迁移" card lets you undo (move back, no more auto-moves) or delete the old folder. Projects shared by several groups stay with the first one linking them; nothing is migrated in bulk, only on persist.
+
+![Group settings: landfill folder](assets/group-settings-zh.png)
+
+### Merge landfill projects
+
+- **Several into one**: projects linked to the same card can be merged (pick which). The AI reads each in full, writes key points first, then rewrites one STATE; the plugin checks key facts from every source survive, then files everything into the merged folder by the rules (identical files once, files outside `~/.ai` copied into `evidence/`).
+- **Old names become aliases**: "recall + old name" still works; card links and references under `~/.ai` are updated.
+- **Undo, delete, nest**: sources go to the recycle area; undo one step or delete permanently; merged results can be merged again.
+
+![Merge landfill projects](assets/merge-panel-zh.png)
+
+### Board: groups are parent projects, cards are tasks
+
+- **See everything by project**: one lane per group; stages (columns) can be renamed, added, reordered; drag cards within a stage (Alt+↑/↓) or to another stage to advance; groups can be dragged and collapsed.
+- **Group header stats**: card count in a blue pill (grey at 0) and "● N active sessions" (sessions of this group's cards that are not archived, live); repo and stage counts in small grey text.
+- **Add cards anywhere**: every stage has an "add card" box (Enter to keep adding); or import from landfill projects in bulk.
+- **Two small badges per card**: session badge (green with active sessions, grey when all archived) and landfill count.
+- **Card archive**: archive icon or drag into "archived cards"; read-only detail, "restore" returns it to its stage.
+- **The agent can edit the board too**: `card_manage` / `repo_manage` / `phase_move` / `task_manage`; without `card` they act on the session's card.
+- **Dark theme**: follows dsh, one-click toggle on the board.
+
+![Group header stats](assets/lane-stats-zh.png)
 
 ### Card detail
 
 ![Card detail](assets/card-detail-zh.png)
 
-- **The card's sessions come first**: active ones first, then archived, each newest first. Open them, archive them (same call as dsh's sidebar "归档会话"; a session that is still working asks "停止并归档" first, with undo), restore archived ones to their original place in the workspace, or unlink with a confirmation (the session is never deleted).
-- **Link existing sessions**: search by session name or repo; active and archived columns grouped by repo, newest first; tick and save once. A session belongs to one card.
-- **Landfill projects, titles first**: "关联的落盘项目" shows only titles by default; a single "展开详情 / 收起详情" button expands or collapses all of them (project, updated date, one-line status, next_action). The choice sticks while you switch cards and resets when the board is reopened.
-- **Notes / links / files**: notes have no length limit, URLs are clickable and long notes fold with "展开全部 / 收起"; links have a label, a type ("文档 / 代码" by default, new types are shared across cards) and a full URL, with bulk add, edit, delete and drag-to-reorder, opening in your default browser; files are picked with the system file dialog, shown as present/deleted, and unlinking never deletes the file.
-- **Stages and subtasks**: click a step to move there, or "推进到 …"; tick, delete or add subtasks with Enter.
+- **New session from this card**: the button switches to "正在新建会话…" (creating) and locks at once, a placeholder row appears in the sidebar, and the finished row reads "card title · not started". Sessions default to full access and are titled after the card.
+- **This card's sessions on top**: active first, archived after, each by update time; open, archive (confirm "stop and archive" when running, undoable), restore to the original place, unlink; sessions with no conversation yet can be deleted (needs [dsh-manage-sessions](https://github.com/hoyyang/dsh-manage-sessions)).
+- **Link existing sessions**: search by name or repo, active / archived columns grouped by repo, save in one go; a session belongs to one card, forks follow their source.
+- **Linked landfill projects**: titles by default, "展开详情" expands all (project, date, status, next_action); "回忆" / "落盘" buttons send to the card's latest session.
+- **Notes / links / files**: unlimited notes with clickable URLs and folding; links with text, type (global, add/rename/reorder in "管理类型") and URL, bulk add, always-visible edit / delete, drag to reorder, copy; files via the system picker or "paste paths" (each line checked: exists / folder / missing / already linked).
+- **Stages and subtasks**: click the stepper to move stage; tick, delete, add subtasks.
 
-![Landfill projects expanded](assets/card-memory-zh.png)
+![Landfill details](assets/card-memory-zh.png)
 
-### The 项目区 sidebar section
+![Links](assets/card-links-zh.png)
 
-![Sidebar](assets/sidebar-zh.png)
+![Link existing sessions](assets/link-sessions-zh.png)
 
-- **A pinned 项目区 workspace**: kept first in the workspace list, with one sub-workspace per card group (nested under 项目区 when dsh's view options use "Workspace Tree" grouping). Project sessions live there by group.
-- **Active session counts**: each card-group row shows how many unarchived sessions it has, gray 0 when none; it updates as sessions are created, archived or restored, with a small bump when it changes. On hover the number stays and the row actions appear to its right.
-- **Clear nesting**: a group's sessions are indented as whole rows to the right of a vertical guide line — the selected background and any border/fill other plugins add to session rows move with them; an expanded group's name turns bold.
-- **Opening from the board reveals the session**: after "打开" in the detail, opening from the "新建会话" dialog, or creating a session from a card, the session's group (and 项目区) expands if collapsed and scrolls to the session; groups that are already open are never collapsed.
-- **"+" asks for a card first**: the "+" on 项目区 or a group row opens a card picker (a group row lists only its own cards; each row shows stage, memory count and session count), then the "新建会话" dialog lets you pick exactly one: start a new session, or open one of the card's linked sessions (archived ones can be restored in place).
-- **The "项目看板" hero button** sits in the sidebar's global panel list next to Plugins, with an "N in progress" badge.
+### Repos
+
+- **Shared repos + card repos**: repos in group settings are shared by cards (copied into new cards); cards can add their own. Candidates come from dsh workspaces and repos added anywhere, or "选择文件夹…".
+- **One path in project sessions**: repos are symlinked under `repos/<repo>/` in the session directory with an AGENTS.md listing them; reading through that path loads the repo's own AGENTS.md / CLAUDE.md. Same name, different path becomes "name-2".
+
+![Add shared repos](assets/add-repos-zh.png)
+
+### Sidebar "项目区" (project hub)
+
+![Sidebar project hub](assets/sidebar-zh.png)
+
+- **Project hub workspace** pinned on top, each group a child workspace (nested with "group by workspace tree"); project sessions live here.
+- **Active counts + nesting**: each group row shows unarchived sessions (grey at 0, bumps on change); sessions are indented behind a guide line.
+- **Blank sessions show up too**: dsh hides sessions with no conversation; the plugin draws them as "card title · not started" rows (including the one you have open), deletable in place.
+- **Auto-expand from the board**: opening or creating a session from the board expands its collapsed group and scrolls to it.
+- **"+" picks a card first**: the hub or group "+" opens a card picker (stage, memory count, session count), then a new or existing session.
+- **"项目看板" button** next to "Plugins", with an "N in progress" badge (unarchived cards with at least one unarchived session).
 
 ![Card picker](assets/card-picker-zh.png)
 
-### Sessions
-
-- **Memory loads itself, and only once**: sessions created from a card or linked to it get the de-duplicated "group ∪ card" landfill memory (one-line status, next_action, STATE path) every turn; on linking, the session history is scanned and STATEs it already `read` are skipped.
-- **Card materials come along**: the card's notes (full text, truncated with a note above 16 KB), links (label + URL + type) and files (absolute paths) are injected as "卡片资料" after the memory — even when no landfill project is linked.
-- **Memory strip**: above the composer, "已自动读取 N 个落盘项目的记忆，M 个已读过不重复读取", collapsed by default, expandable to each next_action.
-- **Same-name hint**: when a card has no linked landfill project but its title contains one's name (e.g. an issue id), the "新建会话" dialog and the memory strip offer a one-click "关联" — never linked silently.
-- **Project sessions start with full access** and are renamed to the card name ("Workspace Tree" grouping) or "group · card".
-
-**How it differs**: most board plugins track per-workspace to-dos. This one does not do generic to-dos; it does one chain — project → landfill memory → repos → sessions — so a card is the project and its sessions inherit the context.
+**How it differs**: most board plugins track to-dos per workspace. This one only does the chain "project → landfill memory → repos → sessions", and builds reading, writing, spec, migration and merging of that memory into the plugin: a card is a project, and its sessions inherit the complete, latest project context.
 
 ## Quick start (30 seconds)
 
-1. Click the "项目看板" hero button under Plugins in the sidebar, then "新建卡片组", type a name and press Enter.
-2. Click "添加卡片" at the bottom of any stage, type a title and press Enter; keep typing to add more.
-3. Open the card detail, click "关联" next to linked landfill projects, tick them and save.
-4. Open "卡片组设置", click "添加" next to repos, tick dsh workspaces or click "选择文件夹…", then "保存".
-5. Click "以此卡片新建会话" at the bottom of the card detail: the session appears in that group's sub-workspace under 项目区 with memory loaded, and the group row's count goes up by one.
+1. Click "项目看板" under "Plugins" in the sidebar, then "新建卡片组" (new group), type a name, Enter.
+2. Click "添加卡片" (add card) at the bottom of any stage, type a title, Enter.
+3. Open group settings, add repos under "卡片共用仓库"; set the "落盘文件夹" (landfill folder) if you like.
+4. In card detail click "以此卡片新建会话": the session appears under this group in the project hub, with card details attached.
+5. After some work, say "落盘项目" (or click "新建并落盘" in the session card); the next session from this card has the memory automatically.
 
 | Action | Result |
 |---|---|
-| Drag a card to another stage | The card moves; `events.jsonl` gets a move record |
-| Type a title at the bottom of a stage and press Enter | A new card at the end of that stage; the input stays open |
-| Create a session from a card | It appears in the group sub-workspace, the group count +1, a collapsed group expands |
-| Archive an active session in the detail | The group count −1, you stay on the board, with undo |
-| Click "展开详情" | Every linked landfill project shows its status and next_action |
-| Click "恢复活跃" on an archived session | It returns to its original place in the workspace, now active |
-| Mount a path that is already mounted | Rejected with `REPO_MOUNTED`, naming the existing repo |
+| New session from card | Button shows "creating" immediately; sidebar row "card title · not started"; group count +1 |
+| Say "落盘项目" in the session | STATE written into the group's landfill folder with the card archive block, read back, card says "done" |
+| Click "Stop" mid-persist | Card shows "stopped, nothing written" with retry / dismiss |
+| Type an existing project's name in the card | Button becomes "link and persist", tag says "exists", rename suggested |
+| Persist a project in an old location | Whole folder moves to the group's folder, "migrated" card appears, undoable |
+| Another CLI changes the STATE | Next step receives the new full text, marked with the replaced version and writer |
+| Draft drops a commit hash from the old STATE | Rejected (`DROPPED_ANCHORS`) naming what is missing |
+| Drag a card to another stage | Card moves; `events.jsonl` gets a move record |
 
-Let the agent drive the board from a project session (omitting `card` targets this session's card):
+Let the agent drive the board (without `card` it acts on the session's card):
 
 ```text
-> Move this card to 验收 and add a subtask "补回归用例"
+> Move this card to "验收" and add a subtask "补回归用例"
 phase_move  { "status": "verify" }                     → {"ok":true,"event":{"kind":"move","from":"开发","to":"验收"}}
 task_manage { "op": "add", "text": "补回归用例" }      → {"ok":true,"tasks":[…,{"text":"补回归用例","done":false}]}
 ```
 
+Read and write landfill projects (the `landfill` tool the plugin registers; the model calls it per the bundled skill):
+
+```text
+landfill { "op": "recall" }                          → STATE + [必读] in chunks until complete:true
+landfill { "op": "persist", "content": "…", "drop": ["a1b2c3d"] } → {"key":"checkout/checkout-flow","verified":true,"migrated":{…}}
+```
+
 ## Use cases
 
-- **One feature across several repos**: mount front end, SDK and infra repos on a group; project sessions read and write them through `repos/<repo>/`, and AGENTS.md lists them.
-- **Pick a long project back up**: link the STATE written by /landfill-project to a card; tomorrow's session opened from that card already has the status and next_action.
-- **Gather scattered sessions**: link discussions started in various workspaces to one card and see the whole project's progress in one place.
-- **Start the day with the big picture**: the sidebar shows each group's active session count, the board shows every card's stage and session badge.
-- **Bring back an archived session**: when an old discussion is needed again, "恢复活跃" on the card puts it back where it was.
-- **Hand over to a teammate or a new session**: the card's landfill projects, notes, links, files and sessions are the handover checklist.
-- **Stage-based reviews**: name a group's stages after your process (e.g. 方案 → 开发 → 验收) and walk the board column by column.
-- **Let the agent advance work**: `phase_move` and `task_manage` from a project session update the board live, every move audited.
+- **Long-running projects**: persist today, open a new session from the card tomorrow; status, decisions and next_action are already in context.
+- **One memory across CLIs**: persist in DSH, Codex / Claude Code read the same STATE in `~/.ai`; when they write, DSH picks up the new version on the next step.
+- **One feature across several repos**: mount frontend, SDK and infra repos on a group; read and write them via `repos/<repo>/` in project sessions.
+- **Clean up scattered memory**: merge duplicates into one with old names as aliases; misplaced projects move into the group's folder on the next persist.
+- **Gather scattered sessions**: link earlier discussions to the same card.
+- **Start the day with the big picture**: card and active-session counts per group, session badges per card.
+- **Hand-offs**: a card's landfill projects, notes, links, files and sessions are the hand-off list.
+- **Let the agent advance work**: the agent moves stages and ticks subtasks; every change is audited.
+- **One card per ticket**: title the card with the ticket ID and the landfill project gets it as an alias; "recall + ticket ID" in any session finds the analysis again.
+- **Spec upgrades without manual migration**: STATEs written under older specs need no bulk cleanup; whichever project is persisted next moves into the group folder and gets the missing spec items.
 
-![Link existing sessions](assets/link-sessions-zh.png)
+## What you'll see
 
-## What you get
+- Sessions from a card carry the STATE and `[必读]` full text from the first step; the system prompt has one "project memory" section (card archive + landfill index).
+- After persisting, STATE lives at `~/.ai/projects/<group folder>/memory/designs/<name>/STATE.md` with the card archive block, file index and alias line.
+- The session card shows each persist round's outcome live; same-name candidates appear as you type.
+- Each group row under the project hub shows its active-session count; new blank sessions show the card title.
+- Every move, link, mount and migration is appended to `events.jsonl` (who, when, what).
+- After a merge, the merged folder holds STATE.md, notes/ (key points from each source) and evidence/; the sources sit in each project's `inbox/retired/`.
+- After a migration, the old folder sits in `inbox/retired/<time>-migrate-<name>/` of the old project; the session card shows how many sub-docs moved and references changed.
+- "查看 AI 收到的原文" shows the system-prompt length, number and total size of injected texts, and approximate tokens.
 
-- Under 项目区 each group row carries its active session count; its sessions are indented behind a guide line; opening a session from the board expands its group.
-- Board cards show the session badge and landfill-project count; in the detail, landfill projects are titles first with one button to expand all.
-- A memory strip above the composer, expandable to each next_action; card materials injected alongside the memory.
-- Sessions in 项目区 and its group sub-workspaces start with full access and are renamed to the card name or "group · card".
-- The 项目区 folder holds `repos/<group>/<repo>` symlinks and an AGENTS.md; each group folder holds its own `repos/<repo>` and AGENTS.md; repo AGENTS.md / CLAUDE.md files load via those literal paths.
-- Every move, link and mount is appended to `events.jsonl` — who (user / agent) did what, and when.
-- Dark theme follows dsh; the board has a one-click toggle.
-
-![Mount repos](assets/add-repos-zh.png)
+![Dark theme](assets/board-dark-zh.png)
 
 ## Configuration
 
-Works with zero config. To override, add a top-level id entry to the profile's `cordis.patch.yml` (not inside an `insert:` list):
+Works with zero config. To override, add a top-level id entry to the profile's `cordis.patch.yml` (not inside the `insert:` list):
 
 ```yaml
 - id: dsh-project-manager
   config:
     dataDir: ''                              # default <DSH_HOME>/dsh-project-manager
-    aiRoot: ''                               # default ~/.ai (read-only)
+    aiRoot: ''                               # default ~/.ai
+    landfill: true                           # landfill tool / detection / guard / end-of-turn check (false = read-only scan)
+    agentsHome: ''                           # ~/.agents holding the landfill-project skill link
     hubTitle: 项目区
-    projectSessionMode: danger-full-access   # or inherit (follow the global permission)
-    memoryMaxBytes: 6000                     # per-session memory budget, 1000–32000
+    projectSessionMode: danger-full-access   # or inherit (follow global permission)
+    memoryMaxBytes: 6000                     # cap of the project-memory section in the system prompt, 1000–32000
 ```
+
+Each group's landfill folder is set in group settings, not in config.
 
 ## How it works
 
-- **Data**: the board lives in `<dataDir>/board.json` (atomic writes, serialized mutations); audits append to `events.jsonl`; landfill projects are scanned read-only on demand from `~/.ai/projects/*/memory/designs/*/STATE.md`.
-- **项目区**: one workspace registered through the official `workspaceRegistry` (folder `<dataDir>/hub`) and kept first; each card group registers a sub-workspace (`hub/groups/<group id>`, titled with the group name), which dsh's "Workspace Tree" grouping nests by folder. Repos are symlinked under `hub/repos/<group>/<repo>` and `hub/groups/<group id>/repos/<repo>`.
-- **Memory injection**: per-session card memory and materials through the official `systemPrompt.context`; unchanged text is not resent and the "already read" set computed at link time stays fixed.
-- **Sessions and archive**: candidates come from dsh's session and workspace lists; archiving calls `workspaces.archiveSession`, restoring calls `workspaceRegistry.unarchiveSession` (from dsh-manage-sessions); archiving never changes a session's order in its workspace, so restoring puts it back in place.
-- **UI**: the board is a main-area panel; the hero button uses the official `sidebar.panellist` slot. The sidebar counts and nesting are one stylesheet generated per row id (`[data-row-key="workspace:<id>"]`) without touching dsh's nodes; the "+" takeover and the auto-expand are DOM enhancements (auto-expand = one simulated click on a collapsed row). When those rows can't be found they are skipped quietly and the official "+" still creates a session.
+- **Data**: the board is `<dataDir>/board.json` (atomic writes, serialized mutations), audit in `events.jsonl`; landfill projects are scanned from `~/.ai/projects/*/memory/designs/*/STATE.md`; writes only via `~/.ai/tools/ai-memory` (Python stdlib: fcntl locks + expected-hash + journal). Merge and migration records in `merges.json` / `migrations.json`.
+- **Injection**: one system-prompt section (card archive regenerated each step + landfill index); STATE and `[必读]` full text injected at `agent/pre-step` as one-off messages, tracked per session × file version across restarts, re-injected after compaction events.
+- **Persist triggers**: `agent/pre-step` detects the user's words and adds a hint; `tools/pre-execute` blocks direct writes; `agent/turn-stopping` checks and steers back; the `turn/end` reason (completed / aborted / error) drives the session card's persist state.
+- **Spec and migration**: the checklist (v2: location, title line, file index, alias line with card titles) runs before every persist; location is fixed by moving the folder with `ai-memory retire-dir / write / import / update-state`, rolled back step by step on failure.
+- **Project hub**: the official `workspaceRegistry` registers the hub (`<dataDir>/hub`) and a child workspace per group; repos are symlinked under `repos/<repo>`.
+- **UI**: the board is a main-area panel; the board button uses the official `sidebar.panellist`; the session card uses `conversation.input.dock`; sidebar counts and nesting are a stylesheet keyed by row id, while "+" takeover, blank rows and auto-expand are DOM enhancements that quietly skip when rows are not found.
 
-## Reliability and verification
+## Reliability & verification
 
-- **Isolated verification**: every release is assembled in a separate staging DSH_HOME first; it reaches the everyday dsh only after the cold-start static checks (dependency links / bundle manifest / runtime imports / duplicate entries — six classes) pass for this plugin.
-- **Real GUI tests**: Playwright drives a real dsh web — 22 new checks in 0.11.0 (count 1→2→1→2, gray 0, no numbers on other workspaces, whole-row indentation and guide-line position, auto-expand after collapsing a group or 项目区, open groups not collapsed, landfill titles-first and expand/collapse-all), plus 28 + 36 + 42 + 8 regression checks — all passing, 0 page errors.
-- **Live-instance check**: after installing into the everyday dsh, read-only probes confirm the new code is running (0.11.0: group counts, indentation in both grouping modes, dsh-kiro session styling moving with the indent, auto-expand after opening from the board).
-- **Uninstall/reinstall is idempotent**: after uninstalling there are no styles, no entry, no sidebar numbers and routes return 404 while user data stays; after reinstalling everything comes back and all checks pass again.
-- **Upgrade check**: old data loaded with the previous build reads losslessly after an in-place upgrade (missing fields fall back to defaults; no migration).
-- **Unit tests**: 49 node:test cases cover the board model, mount conflicts, bulk session linking and moves, read detection, memory budget and omission notes, card-material injection, link validation and symlink containment.
-- **Failures name names**: conflicts and errors return explicit codes and objects such as `REPO_NAME_TAKEN`, `REPO_MOUNTED`, `BAD_URL` (with the row number), `CARD_ARCHIVED`, `UNARCHIVE_UNAVAILABLE` — never swallowed.
-- **Compatibility and limits**: "恢复活跃" needs the core patch from dsh-manage-sessions; without it the button is disabled with the reason. Several dsh processes sharing one DSH_HOME have no cross-process lock.
-- **Security boundary**: project sessions default to full access (only for sessions in the 项目区 folders; switch to `inherit`); HTTP routes accept loopback only and writes check same-origin, with no login check; no credentials read or written, no network access, no git commands; deleting a group removes symlinks only, never real repos.
-
-![Dark theme](assets/board-dark-zh.png)
+- **Isolated verification**: each version is assembled in a separate staging DSH_HOME; cold-start static checks (link deps / bundle manifest / runtime imports / duplicate entries, six classes) must pass for this plugin before it reaches the main instance.
+- **End-to-end with a real model**: 0.20 ran "persist → auto-migrate → spec check → migration card → undo" and "new project lands in the group folder" in staging; 0.19 ran merge, nested merge, child delete and byte-exact undo on 6 copies of real landfill projects.
+- **Real GUI tests**: Playwright on real dsh web: group stats, creating state and sidebar title, always-visible link buttons, arrow direction, the three same-name cases, group-folder confirmation and invalid names, stopped state and dismiss, no page shift — all pass, 0 page errors.
+- **Main-instance acceptance**: after installing into the daily dsh, probes confirm the new logic runs (0.20: group stats, creating state and "card title · not started", link buttons, arrow, same-name detection).
+- **Unit tests**: 95 node:test cases (board model, injection and known-version tracking, persist guards, merge end-to-end, spec checklist, same-name matching, migration and undo, persist-round tracking) + 9 ai-memory tests.
+- **Failures name the culprit**: `NEED_FULL_READ`, `DROPPED_ANCHORS`, `UNINDEXED_FILES`, `SPEC_ISSUES`, `NEED_GROUP_FOLDER`, `MIGRATE_CLASH`, `FOLDER_TAKEN`, `REPO_MOUNTED` and more; nothing is swallowed.
+- **Compatibility & limits**: restore and blank-session delete depend on dsh-manage-sessions (greyed out or hidden without it); landfill needs python3 (off on Windows); multiple dsh processes sharing one DSH_HOME have no cross-process board lock (`~/.ai` writes do).
+- **Security boundary**: project sessions default to full access (only sessions in the hub directory; switch to `inherit`); HTTP routes accept loopback only (Host must be 127.0.0.1 / localhost); writes carrying an Origin must be same-origin (DSH Desktop strips Origin when forwarding, which is allowed), no login check; the plugin writes `~/.ai` and creates the `~/.agents/skills/landfill-project` link; it never touches credentials, the network or git; deleting a group removes symlinks only.
 
 ## FAQ
 
-- **No 项目区 in the sidebar?** It is registered with the first project session; until then use the "项目看板" hero button.
-- **Groups not nested under 项目区?** Set grouping to "Workspace Tree" in the view options next to the workspace list title.
-- **No numbers or indentation on group rows?** Only 项目区's group sub-workspaces get them; if a dsh update changed the markup they switch off on their own — please open an issue with your dsh version.
-- **Group didn't expand after opening from the board?** It applies only to sessions in 项目区 and its groups; a sidebar collapsed to an icon rail has no rows to expand.
-- **"恢复活跃" is disabled?** Your dsh lacks `workspaceRegistry.unarchiveSession`; install dsh-manage-sessions and apply its core patch.
-- **"选择文件夹…" became a text field?** dsh is using its web file browser (non-local or remote access), which can't open the system dialog; type an absolute path.
-- **A new session shows "新会话" in the sidebar?** That is how dsh shows blank sessions; after the first message it shows the card name.
+- **No "项目区" in the sidebar?** It is registered with the first project session; use the "项目看板" button until then.
+- **Groups not nested under the hub?** Set grouping to "by workspace tree" in the workspace list's view options.
+- **Why am I asked for a landfill folder?** New and migrated projects go into the group's own folder; asked once, changeable in group settings.
+- **Will my old landfill projects be moved?** Only when you persist them and their group has a folder set; undo from the session card stops future auto-moves.
+- **Persist refused?** Read the error code: recall first if not fully read; restore missing facts or list them in `drop`; for `SPEC_ISSUES` fix the listed items.
+- **"Restore" greyed out?** Your dsh lacks `workspaceRegistry.unarchiveSession`; install dsh-manage-sessions and apply its core patch.
+- **"选择文件夹…" became a text box?** With the web file browser (non-local or remote access) the system dialog is unavailable; type an absolute path.
 
 ## Uninstall
 
-1. Call `POST /_dsh/dsh-project-manager/api/hub/cleanup` (or remove 项目区 and the group workspaces from the workspace list by hand) to drop the workspaces the plugin registered; sessions and files are not deleted.
-2. `dsh plugin --profile web remove dsh-project-manager`, then restart dsh.
-3. Data stays in `<DSH_HOME>/dsh-project-manager/` (board.json, events.jsonl, hub/); delete it by hand if you want.
+1. Call `POST /_dsh/dsh-project-manager/api/hub/cleanup` (or remove the hub and group workspaces manually) to drop the workspace entries; sessions and files are kept.
+2. `dsh plugin --profile web remove dsh-project-manager`, restart dsh.
+3. Data stays in `<DSH_HOME>/dsh-project-manager/` (board.json, events.jsonl, merges.json, migrations.json, hub/, backups/); delete manually if needed.
+4. Landfill: `~/.ai` (including the `tools/ai-memory` the plugin may have added) is shared memory and is not removed. If `~/.agents/skills/landfill-project/SKILL.md` is a link to the plugin it breaks after uninstalling; copy the backup in `backups/` (or the plugin's SKILL.md) back to keep the skill.
 
 ## Build locally
 
@@ -197,7 +270,7 @@ npm install
 npm run build          # host: tsc → lib/
 npm run build:client   # client: tsdown → lib/client.js
 npm run typecheck
-npm test               # node:test unit tests
+npm test               # node:test + ai-memory tests
 ```
 
 ## License

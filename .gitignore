@@ -5,3 +5,4 @@ lib/*.map
 src/client/style.gen.ts
 prototype/
 .sanitize-allow.json
+__pycache__/

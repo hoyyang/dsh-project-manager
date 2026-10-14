@@ -13,6 +13,8 @@ export interface StateInfo {
   status: string
   next: string
   updated: string
+  /** 0.19 合并前的名字（STATE 里的 aliases: 行）：说这些名字也会回忆 / 落盘这个项目。 */
+  aliases?: string[]
   error?: string
 }
 
@@ -31,11 +33,14 @@ const label = (names: string): RegExp => new RegExp('^\\s*(?:[-*]\\s+)?[*_`]{0,2
 const STATUS_RE = label('one-line status|一行状态')
 const NEXT_RE = label('next_action')
 const META_STATUS_RE = label('status')
+const ALIAS_RE = label('aliases|别名')
 
-export function parseState(text: string): { status: string; next: string } {
+export function parseState(text: string): { status: string; next: string; aliases?: string[] } {
   const status = pickLine(text, STATUS_RE) || pickLine(text, META_STATUS_RE)
   const next = pickLine(text, NEXT_RE)
-  return { status: status.slice(0, 400), next: next.slice(0, 400) }
+  // 别名行：逗号 / 顿号 / 空格分隔，括号里的说明不算
+  const al = pickLine(text, ALIAS_RE).replace(/[（(].*$/, '').split(/[\s,，、]+/).map((x) => x.replace(/`/g, '')).filter((x) => /^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9._\u4e00-\u9fff-]{1,63}$/.test(x)).slice(0, 30)
+  return { status: status.slice(0, 400), next: next.slice(0, 400), ...(al.length ? { aliases: al } : {}) }
 }
 
 export class StateCatalog {
@@ -72,23 +77,21 @@ export class StateCatalog {
     return list
   }
 
-  /** 按 key 直接读单个 STATE（记忆注入每步调用，不能每次全量扫描）。 */
+  /** 按 key 直接读单个 STATE（记忆注入每步调用）。0.18：按 mtime + 大小判断是否变了，变了立刻重读（注入永远是磁盘上的最新版）。 */
   get(key: string): StateInfo | undefined {
-    const hit = this.one.get(key)
-    if (hit && Date.now() - hit.at < this.ttlMs) return hit.info
     const m = /^([^/]+)\/([^/]+)$/.exec(key)
     if (!m || m[1] === '..' || m[2] === '..') return undefined
     const path = join(this.aiRoot, 'projects', m[1], 'memory', 'designs', m[2], 'STATE.md')
-    let info: StateInfo | undefined
-    try {
-      const st = statSync(path)
-      info = { key, project: m[1], slug: m[2], path, status: '', next: '', updated: st.mtime.toISOString().slice(0, 10) }
-      Object.assign(info, parseState(readFileSync(path, 'utf8').slice(0, MAX_BYTES)))
-    } catch { info = undefined }
-    this.one.set(key, { at: Date.now(), info })
+    let st
+    try { st = statSync(path) } catch { this.one.delete(key); return undefined }
+    const hit = this.one.get(key)
+    if (hit && hit.mtime === st.mtimeMs && hit.size === st.size) return hit.info
+    let info: StateInfo | undefined = { key, project: m[1], slug: m[2], path, status: '', next: '', updated: st.mtime.toISOString().slice(0, 10) }
+    try { Object.assign(info, parseState(readFileSync(path, 'utf8').slice(0, MAX_BYTES))) } catch { info = undefined }
+    this.one.set(key, { mtime: st.mtimeMs, size: st.size, info })
     return info
   }
-  private one = new Map<string, { at: number; info: StateInfo | undefined }>()
+  private one = new Map<string, { mtime: number; size: number; info: StateInfo | undefined }>()
   invalidate(): void { this.cache = null; this.one.clear() }
 
   /** 目录签名（条目数 + 最新更新日 + 各 status/next 长度和）：STATE 变化时前端轮询能察觉。 */

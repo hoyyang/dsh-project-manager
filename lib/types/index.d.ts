@@ -7,6 +7,8 @@ export interface Config {
     hubTitle: string;
     projectSessionMode: 'danger-full-access' | 'inherit';
     memoryMaxBytes: number;
+    landfill: boolean;
+    agentsHome: string;
 }
 export declare const Config: z<Config>;
 type Session = {
@@ -14,7 +16,36 @@ type Session = {
     header: {
         cwd?: string;
         origin?: string;
+        parentSession?: string;
     };
+};
+type Msg = {
+    id: string;
+    role: 'user';
+    content: Array<{
+        type: 'text';
+        text: string;
+    }>;
+    source: {
+        kind: string;
+        form?: string;
+    };
+};
+type Ev = {
+    type: string;
+    data?: unknown;
+};
+type Agent = {
+    id?: string;
+    session?: {
+        id?: string;
+        header?: {
+            cwd?: string;
+        };
+        seq?: number;
+        eventAt?(seq: number): Ev | undefined;
+    };
+    steer?(m: Msg): void;
 };
 type Workspace = {
     id: string;
@@ -58,6 +89,35 @@ type HostCtx = Context & {
                     };
                 };
             }) => string;
+        }): () => void;
+    };
+    skills?: {
+        register(s: {
+            name: string;
+            description: string;
+            content: string;
+            source: string;
+            path?: string;
+            resourceBase?: {
+                kind: 'directory';
+                path: string;
+            };
+        }): () => void;
+    };
+    commands?: {
+        register(c: {
+            name: string;
+            description: string;
+            input?: {
+                hint?: string;
+            };
+            handler: (i: {
+                rawInput: string;
+                agent?: Agent;
+            }) => {
+                kind: 'success' | 'error';
+                text: string;
+            };
         }): () => void;
     };
     get(name: string): unknown;

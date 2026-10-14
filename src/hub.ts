@@ -7,7 +7,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { Board, Group } from './model.js'
+import { Board, Group, groupMounts } from './model.js'
 import { StateCatalog } from './states.js'
 
 const SAFE = (s: string): string => s.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 64) || 'x'
@@ -39,14 +39,14 @@ export function syncHub(dataDir: string, b: Board, states: StateCatalog): string
       const rel = join(gdir, name)
       const lp = join(repos, rel)
       if (!lstatSync(lp).isSymbolicLink()) continue
-      if (wanted.get(rel) !== readlinkSync(lp)) rmSync(lp)
+      if (wanted.get(rel) !== linkTarget(lp)) rmSync(lp)
     }
   }
   for (const [rel, target] of wanted) {
     const lp = join(repos, rel)
     mkdirSync(join(lp, '..'), { recursive: true })
     if (existsSync(lp) || isLink(lp)) continue
-    if (existsSync(target)) symlinkSync(target, lp, 'dir')
+    if (existsSync(target)) symlinkSync(target, lp, process.platform === 'win32' ? 'junction' : 'dir')
   }
   writeFileSync(join(root, 'AGENTS.md'), agentsMd(b, states))
   syncGroupDirs(root, b, states)
@@ -61,10 +61,11 @@ function syncGroupDirs(root: string, b: Board, states: StateCatalog): void {
   for (const g of b.groups) {
     const dir = join(base, SAFE(g.id))
     live.add(SAFE(g.id))
+    // 0.14：组共用仓库 + 本组卡片自己的仓库都挂上（同名不同路径的后来者叫「名-2」）
     const wanted = new Map<string, string>()
-    for (const r of g.repos) if (!wanted.has(SAFE(r.name))) wanted.set(SAFE(r.name), r.path)
+    for (const [path, name] of groupMounts(b, g.id)) wanted.set(name, path)
     syncLinks(join(dir, 'repos'), wanted)
-    writeFileSync(join(dir, 'AGENTS.md'), groupAgentsMd(g, states))
+    writeFileSync(join(dir, 'AGENTS.md'), groupAgentsMd(b, g, states))
   }
   for (const d of safeList(base)) {
     const p = join(base, d)
@@ -74,22 +75,25 @@ function syncGroupDirs(root: string, b: Board, states: StateCatalog): void {
   }
 }
 
+/** 软链目标（Windows junction 读回来带末尾 \\，去掉再比对，免得每次同步都删了重建）。 */
+const linkTarget = (lp: string): string => readlinkSync(lp).replace(/[\\/]+$/, '')
+
 /** 一层软链目录：多余/指错的软链删掉（只删 symlink），缺的补上（目标不存在时不建）。 */
 function syncLinks(dir: string, wanted: Map<string, string>): void {
   if (isLink(dir)) rmSync(dir)
   mkdirSync(dir, { recursive: true })
   for (const name of safeList(dir)) {
     const lp = join(dir, name)
-    if (lstatSync(lp).isSymbolicLink() && wanted.get(name) !== readlinkSync(lp)) rmSync(lp)
+    if (lstatSync(lp).isSymbolicLink() && wanted.get(name) !== linkTarget(lp)) rmSync(lp)
   }
   for (const [name, target] of wanted) {
     const lp = join(dir, name)
     if (existsSync(lp) || isLink(lp)) continue
-    if (existsSync(target)) symlinkSync(target, lp, 'dir')
+    if (existsSync(target)) symlinkSync(target, lp, process.platform === 'win32' ? 'junction' : 'dir')
   }
 }
 
-export function groupAgentsMd(g: Group, states: StateCatalog): string {
+export function groupAgentsMd(b: Board, g: Group, states: StateCatalog): string {
   const lines = [
     '# 卡片组「' + g.name + '」（dsh-project-manager 自动生成，请勿手改）',
     '',
@@ -98,16 +102,16 @@ export function groupAgentsMd(g: Group, states: StateCatalog): string {
     '## 读写纪律',
     '- 读写仓库文件一律用 repos/<仓库>/ 下的路径，这样仓库里的 AGENTS.md / CLAUDE.md 才会被加载。',
     '- 不要在本目录根下新建项目文件；产物写进对应仓库。',
-    '- 落盘项目（~/.ai）只读；更新 STATE 请走 ai-memory 工具。',
+    '- 落盘项目（~/.ai）不要直接改文件；读写 STATE 用 landfill 工具（它经 ~/.ai/tools/ai-memory 写入）。',
     '',
     '## 仓库',
   ]
-  const seen = new Set<string>()
-  if (g.repos.length) for (const r of g.repos) {
-    const n = SAFE(r.name)
-    lines.push('- 仓库 ' + r.name + '（' + r.role + '）：' + (seen.has(n) ? '未挂载（与本组其他仓库重名，请改名）' : 'repos/' + n + '/') + ' → ' + r.path)
-    seen.add(n)
-  }
+  // 0.14：组共用仓库 + 本组卡片自己的仓库；每张卡片的会话另会收到它自己的仓库清单
+  const mounts = groupMounts(b, g.id)
+  const shared = new Set(g.repos.map((r) => r.path.replace(/\/+$/, '') || '/'))
+  const info = new Map<string, { name: string; role: string }>()
+  for (const r of g.repos.concat(...b.cards.filter((c) => c.g === g.id).map((c) => c.repos ?? []))) { const p = r.path.replace(/\/+$/, '') || '/'; if (!info.has(p)) info.set(p, r) }
+  if (mounts.size) for (const [p, n] of mounts) { const r = info.get(p)!; lines.push('- 仓库 ' + r.name + '（' + r.role + (shared.has(p) ? '' : '，卡片自己加的') + '）：repos/' + n + '/ → ' + p) }
   else lines.push('- 未挂载')
   if (g.links.length) { lines.push('', '## 落盘项目'); for (const k of g.links) { const s = states.get(k); lines.push('- ' + k + (s ? '：' + s.path : '（未找到）')) } }
   lines.push('')
@@ -126,7 +130,7 @@ export function agentsMd(b: Board, states: StateCatalog): string {
     '## 读写纪律',
     '- 读写仓库文件一律用 repos/<卡片组>/<仓库>/ 下的路径，这样仓库里的 AGENTS.md / CLAUDE.md 才会被加载。',
     '- 不要在本目录根下新建项目文件；产物写进对应仓库。',
-    '- 落盘项目（~/.ai）只读；更新 STATE 请走 ai-memory 工具。',
+    '- 落盘项目（~/.ai）不要直接改文件；读写 STATE 用 landfill 工具（它经 ~/.ai/tools/ai-memory 写入）。',
     '',
   ]
   for (const g of b.groups) {

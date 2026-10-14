@@ -2,9 +2,11 @@
  * 看板持久化：<dataDir>/board.json（原子写：tmp + rename）+ events.jsonl（审计追加）。
  * 串行化：所有变更经 mutate() 进入同一条 Promise 链，读-改-写不交错。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Board, BoardEvent, emptyBoard, parseBoard } from './model.js'
+
+const TAIL_BYTES = 64 * 1024
 
 export class BoardStore {
   private board: Board
@@ -47,7 +49,18 @@ export class BoardStore {
 
   eventsTail(n: number): BoardEvent[] {
     if (!existsSync(this.eventsPath)) return []
-    const lines = readFileSync(this.eventsPath, 'utf8').trim().split('\n').filter(Boolean)
+    // 只读文件末尾（审计日志只增不减，每次轮询读全量会随时间变慢）；第一行可能被截断，丢掉
+    const fd = openSync(this.eventsPath, 'r')
+    let text = ''
+    try {
+      const size = fstatSync(fd).size
+      const len = Math.min(size, TAIL_BYTES)
+      const buf = Buffer.alloc(len)
+      readSync(fd, buf, 0, len, size - len)
+      text = buf.toString('utf8')
+      if (len < size) text = text.slice(text.indexOf('\n') + 1)
+    } finally { closeSync(fd) }
+    const lines = text.trim().split('\n').filter(Boolean)
     return lines.slice(-n).map((l) => { try { return JSON.parse(l) as BoardEvent } catch { return null } }).filter((x): x is BoardEvent => x !== null)
   }
 }

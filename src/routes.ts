@@ -4,7 +4,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
-import { existsSync, realpathSync } from 'node:fs'
+import { copyFileSync, existsSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import * as M from './model.js'
 import type { Board } from './model.js'
@@ -28,8 +28,39 @@ export interface Services {
   unlinkSession(sessionId: string): Promise<{ cardId: string }>
   unarchiveSession(sessionId: string): Promise<{ restored: boolean }>
   canUnarchive(): boolean
+  /** 0.16 落盘项目环境（看板顶部提示 / 接管按钮用）。 */
+  landfill(): import('./landfill.js').LandfillStatus & { toolOutdated?: boolean }
+  /** 0.16：把 ~/.agents 下已有的 SKILL.md 备份后换成指向插件的链接。 */
+  adoptSkill(): { backup: string }
+  /** 0.18 用户点「升级 ai-memory」：先备份再替换。 */
+  upgradeTool(): { backup: string; version: number }
   /** 弹系统选文件框（可多选）；取消返回 null；不支持的平台抛 BoardError('PICK_UNAVAILABLE')。 */
   pickFiles(): Promise<string[] | null>
+  /** 0.15：慢请求日志（超过阈值时记每一步耗时）。 */
+  warn?(msg: string): void
+  /** 0.19 会话信息卡：卡片资料明细 + 落盘项目明细 + 合并卡片。 */
+  sessionExtra?(sessionId: string): Json
+  /** 0.19「AI 收到的原文」：系统提示原文 + 注入的全文。 */
+  sessionRaw?(sessionId: string): Json
+  /** 0.19 合并：预览 / 开始 / 取消 / 撤销 / 删除合并前的。 */
+  merge?: {
+    preview(sessionId: string, keys: string[], name: string): Json
+    start(sessionId: string, keys: string[], name: string): Promise<Json>
+    cancel(id: string): Promise<void>
+    undo(id: string): Promise<Json>
+    purge(id: string): Promise<Json>
+  }
+  /** 0.20 同名检测。 */
+  lfMatch?(sessionId: string, q: string): Json
+  /** 0.20 把已有落盘项目关联到会话的卡片。 */
+  lfLink?(sessionId: string, key: string): Promise<Json>
+  /** 0.20 信息卡发出落盘指令后登记 / 用户点「忽略」。 */
+  lfRunStart?(sessionId: string, key: string, label: string): unknown
+  lfRunDismiss?(sessionId: string): void
+  /** 0.20 设卡片组的落盘文件夹（并在 ~/.ai 登记）。 */
+  setFolder?(sessionId: string, value: string): Promise<Json>
+  migUndo?(id: string): Promise<Json>
+  migPurge?(id: string): Promise<Json>
 }
 
 type Json = Record<string, unknown>
@@ -52,10 +83,14 @@ function loopbackHost(req: IncomingMessage): boolean {
   return name === '127.0.0.1' || name === 'localhost' || name === '[::1]'
 }
 
-/** 写操作：必须带 Origin 且与 Host 一致（浏览器同源请求一定带 Origin）。 */
-function sameOrigin(req: IncomingMessage): boolean {
+/**
+ * 写操作：带 Origin 时必须与 Host 一致（挡浏览器跨站请求——浏览器发 POST 一定带 Origin）。
+ * 没有 Origin 放行：DSH Desktop 壳转发请求时会删掉 Origin（issue #2），脚本 / 同进程工具也不带；
+ * 能到这里的请求已经过了「仅本机回环 + Host 是 127.0.0.1 / localhost」那道门。与 dsh-manage-sessions 同一口径。
+ */
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>): boolean {
   const origin = req.headers.origin
-  if (typeof origin !== 'string' || origin === '') return false
+  if (origin === undefined) return true
   const host = req.headers.host
   if (typeof origin !== 'string' || typeof host !== 'string' || host.trim() === '') return false
   try { return new URL(origin).host.toLowerCase() === host.trim().toLowerCase() } catch { return false }
@@ -110,9 +145,33 @@ export function snapshot(s: Services, rev: string): Json {
     states: s.states.list().map((x) => ({ key: x.key, project: x.project, slug: x.slug, status: x.status, next: x.next, updated: x.updated, path: x.path, error: x.error })),
     hub: s.hub(),
     caps: { unarchive: s.canUnarchive() },
+    landfill: s.landfill(),
     events: s.store.eventsTail(80),
   }
 }
+
+/** 0.15 粘贴路径检测：逐行规整 + 判断存在 / 是文件夹 / 已关联 / 本批重复 / 非绝对路径。只读，不写盘。 */
+export type PathCheck = { raw: string; path: string; status: 'ok' | 'dir' | 'missing' | 'linked' | 'dup' | 'bad' }
+export function checkPaths(raws: unknown, linked: readonly string[], home: string, stat: (p: string) => 'file' | 'dir' | null): PathCheck[] {
+  if (!Array.isArray(raws)) throw new M.BoardError('BAD_ARG', 'paths 必须是字符串数组')
+  if (raws.length > 200) throw new M.BoardError('BAD_ARG', '一次最多检测 200 行（收到 ' + raws.length + ' 行）')
+  const seen = new Set<string>()
+  const out: PathCheck[] = []
+  for (const r of raws) {
+    if (typeof r !== 'string' || r.trim() === '') continue
+    const path = M.normPastedPath(r, home)
+    const bad = !M.isAbsPath(path) || /[\u0000-\u001f\u007f]/.test(path) || path.length > 4096
+    let status: PathCheck['status']
+    if (bad) status = 'bad'
+    else if (seen.has(path)) status = 'dup'
+    else if (linked.includes(path)) status = 'linked'
+    else { const k = stat(path); status = k === 'file' ? 'ok' : k === 'dir' ? 'dir' : 'missing' }
+    if (!bad) seen.add(path)
+    out.push({ raw: r.trim(), path, status })
+  }
+  return out
+}
+const statKind = (p: string): 'file' | 'dir' | null => { try { const s = statSync(p); return s.isFile() ? 'file' : s.isDirectory() ? 'dir' : null } catch { return null } }
 
 type Handler = (body: Json, b: Board) => unknown
 
@@ -126,7 +185,8 @@ const MUTATIONS: Record<string, Handler> = {
     if (x.collapsed !== undefined) g.collapsed = x.collapsed === true
     if (x.statuses !== undefined) M.setStatuses(b, id, x.statuses as M.Status[])
     if (x.links !== undefined) M.setGroupLinks(b, id, x.links as string[])
-    if (x.repos !== undefined) g.repos = M.cleanRepos(x.repos)
+    if (x.repos !== undefined) { const next = M.cleanRepos(x.repos); M.noteRepos(b, next.filter((r) => !g.repos.some((o) => o.path === r.path))); g.repos = next }
+    if (x.lfProject !== undefined) M.setGroupFolder(b, id, x.lfProject)
     return g
   },
   'group/remove': (x, b) => M.removeGroup(b, str(x.id, 'id')),
@@ -139,6 +199,10 @@ const MUTATIONS: Record<string, Handler> = {
   'card/notes': (x, b) => M.setNotes(b, str(x.id, 'id'), x.notes),
   'card/weblinks': (x, b) => M.setWebLinks(b, str(x.id, 'id'), x.links),
   'linktype/add': (x, b) => M.addLinkType(b, x.name),
+  'linktype/rename': (x, b) => M.renameLinkType(b, x.from, x.to),
+  'linktype/move': (x, b) => M.moveLinkType(b, x.name, x.to),
+  'card/repos-add': (x, b) => M.addCardRepos(b, str(x.id, 'id'), x.repos, (p) => { try { return realpathSync(p) } catch { return p } }),
+  'card/repos': (x, b) => M.setCardRepos(b, str(x.id, 'id'), x.repos),
   'card/files-add': (x, b) => M.addFiles(b, str(x.id, 'id'), Array.isArray(x.paths) ? x.paths.map(expandHome) : x.paths),
   'card/files-remove': (x, b) => M.removeFile(b, str(x.id, 'id'), x.path),
   'card/archive': (x, b) => M.archiveCard(b, str(x.id, 'id')),
@@ -153,8 +217,9 @@ export function mountRoutes(
 ): () => void {
   // 版本号 = 启动标识 + 看板变更计数 + STATE 目录签名：插件重载或 STATE 改动都会让前端拉到新快照
   const boot = Date.now().toString(36)
+  let forkBackup = ''
   // 文件被删/恢复也要让前端拉新快照 → 版本号带上「缺失文件」签名
-  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature() + '.' + fileSig(fileStatus(s.store.get()))
+  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature() + '.' + fileSig(fileStatus(s.store.get())) + '.' + s.landfill().skill + (s.landfill().toolOutdated ? 'o' : '')
   return webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -165,10 +230,17 @@ export function mountRoutes(
         const sub = u.pathname.slice(ROUTE_PREFIX.length).replace(/^\/api/, '') || '/'
         if (req.method === 'GET') {
           if (sub === '/state') {
+            // 0.15：超过 1 秒记下每一步耗时（看板偶发白屏时定位卡在哪）
+            const t0 = Date.now()
             const since = u.searchParams.get('since') ?? ''
             const rev = getRev()
-            if (since !== '' && since === rev) return send(res, 200, { ok: true, rev, same: true })
-            return send(res, 200, snapshot(s, getRev()))
+            const t1 = Date.now()
+            if (since !== '' && since === rev) { send(res, 200, { ok: true, rev, same: true }); if (t1 - t0 > 1000) s.warn?.('/state 慢：rev ' + (t1 - t0) + 'ms（same）'); return }
+            const body = snapshot(s, rev)
+            const t2 = Date.now()
+            send(res, 200, body)
+            if (Date.now() - t0 > 1000) s.warn?.('/state 慢：共 ' + (Date.now() - t0) + 'ms = rev ' + (t1 - t0) + 'ms + 快照 ' + (t2 - t1) + 'ms + 发送 ' + (Date.now() - t2) + 'ms')
+            return
           }
           if (sub === '/session') {
             const id = u.searchParams.get('id') ?? ''
@@ -181,9 +253,23 @@ export function mountRoutes(
               card: { id: c.id, title: c.t, group: g.name },
               suggest: ((x) => (x ? { key: x.key, slug: x.slug } : null))(M.sameNameState(b, c, s.states.list())),
               // 0.10：注入的卡片资料概要（会话界面提示用）
-              materials: { notes: (c.notes ?? '').trim().length, links: (c.webLinks ?? []).length, files: (c.files ?? []).length },
+              materials: { notes: (c.notes ?? '').trim().length, links: (c.webLinks ?? []).length, files: (c.files ?? []).length, repos: (c.repos ?? []).length, tasks: c.tasks.length },
               memory: M.memoryOf(b, c).map((m) => { const st = s.states.get(m.key); return { key: m.key, from: m.from, slug: st?.slug ?? m.key, next: st?.next ?? '', found: st !== undefined, read: (M.sessionRef(b, id)?.readKeys ?? []).includes(m.key) } }),
+              ...(s.sessionExtra?.(id) ?? {}),
             })
+          }
+          if (sub === '/session/raw') {
+            if (!s.sessionRaw) return fail(res, 404, 'NOT_FOUND', '当前版本没有原文接口')
+            return send(res, 200, { ok: true, ...s.sessionRaw(u.searchParams.get('id') ?? '') })
+          }
+          if (sub === '/landfill/match') {
+            if (!s.lfMatch) return fail(res, 404, 'NOT_FOUND', '当前版本没有同名检测')
+            return send(res, 200, { ok: true, ...s.lfMatch(u.searchParams.get('session') ?? '', (u.searchParams.get('q') ?? '').slice(0, 300)) })
+          }
+          if (sub === '/merge/preview') {
+            if (!s.merge) return fail(res, 400, 'MERGE_OFF', '落盘项目功能没开启，不能合并')
+            const keys = (u.searchParams.get('keys') ?? '').split(',').filter(Boolean)
+            return send(res, 200, { ok: true, ...s.merge.preview(u.searchParams.get('session') ?? '', keys, u.searchParams.get('name') ?? '') })
           }
           return fail(res, 404, 'NOT_FOUND', '未知路径 ' + sub)
         }
@@ -210,13 +296,56 @@ export function mountRoutes(
           const r = await s.store.mutate((b) => M.addFiles(b, id, picked), () => [{ at: new Date().toISOString(), actor: 'user', kind: 'card/files-add', card: id }])
           return send(res, 200, { ok: true, result: { cancelled: false, ...r }, ...snapshot(s, getRev()) })
         }
+        if (key === 'card/files-check') {
+          const c = M.liveCard(s.store.get(), str(body.id, 'id'))
+          return send(res, 200, { ok: true, results: checkPaths(body.paths, c.files ?? [], homedir(), statKind) })
+        }
+        if (key === 'session/fork-backfill') {
+          const pairs = (Array.isArray(body.pairs) ? body.pairs : []).slice(0, 500).map((x) => ({ child: str((x as Json)?.child, 'child'), parent: str((x as Json)?.parent, 'parent') }))
+          const b0 = s.store.get()
+          // 先算一遍有没有要补的，没有就不写盘、不备份
+          if (!pairs.some((p) => M.sessionRef(b0, p.parent) && !M.sessionRef(b0, p.child))) return send(res, 200, { ok: true, result: { bound: [] }, ...snapshot(s, getRev()) })
+          if (!forkBackup && existsSync(s.store.boardPath)) { forkBackup = s.store.boardPath + '.bak-fork-' + new Date().toISOString().replace(/[-:]/g, '').slice(0, 15); copyFileSync(s.store.boardPath, forkBackup) }
+          const bound = await s.store.mutate((b) => M.backfillForks(b, pairs), (r) => r.map((x) => ({ at: new Date().toISOString(), actor: 'user', kind: 'session/fork-backfill', card: x.card, to: x.child })))
+          return send(res, 200, { ok: true, result: { bound, backup: forkBackup }, ...snapshot(s, getRev()) })
+        }
+        if (key === 'landfill/adopt-skill') {
+          try { const r = s.adoptSkill(); return send(res, 200, { ok: true, result: r, ...snapshot(s, getRev()) }) } catch (e) { const x = e as { code?: string; message?: string }; return fail(res, 400, x.code ?? 'ADOPT_FAILED', '接管 skill 失败：' + (x.message ?? String(e))) }
+        }
+        if (key === 'landfill/upgrade-tool') {
+          try { const r = s.upgradeTool(); return send(res, 200, { ok: true, result: r, ...snapshot(s, getRev()) }) } catch (e) { const x = e as { code?: string; message?: string }; return fail(res, 400, x.code ?? 'UPGRADE_FAILED', '升级 ai-memory 失败：' + (x.message ?? String(e))) }
+        }
+        if (key.startsWith('lf/')) {
+          try {
+            if (key === 'lf/link' && s.lfLink) return send(res, 200, { ok: true, ...(await s.lfLink(str(body.sessionId, 'sessionId'), str(body.key, 'key'))) })
+            if (key === 'lf/run' && s.lfRunStart) { s.lfRunStart(str(body.sessionId, 'sessionId'), typeof body.key === 'string' ? body.key : '', typeof body.label === 'string' ? body.label.slice(0, 120) : ''); return send(res, 200, { ok: true }) }
+            if (key === 'lf/run-dismiss' && s.lfRunDismiss) { s.lfRunDismiss(str(body.sessionId, 'sessionId')); return send(res, 200, { ok: true }) }
+            if (key === 'lf/folder' && s.setFolder) return send(res, 200, { ok: true, ...(await s.setFolder(str(body.sessionId, 'sessionId'), str(body.value, 'value'))) })
+            if (key === 'lf/migrate-undo' && s.migUndo) return send(res, 200, { ok: true, ...(await s.migUndo(str(body.id, 'id'))) })
+            if (key === 'lf/migrate-purge' && s.migPurge) return send(res, 200, { ok: true, ...(await s.migPurge(str(body.id, 'id'))) })
+          } catch (e) { const x = e as { code?: string; message?: string }; if (e instanceof M.BoardError) throw e; return fail(res, 400, x.code ?? 'LF_FAILED', x.message ?? String(e)) }
+          return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)
+        }
         if (key === 'states/refresh') { s.states.invalidate(); return send(res, 200, snapshot(s, getRev())) }
+        if (key.startsWith('merge/')) {
+          const mg = s.merge
+          if (!mg) return fail(res, 400, 'MERGE_OFF', '落盘项目功能没开启，不能合并')
+          try {
+            if (key === 'merge/start') return send(res, 200, { ok: true, ...(await mg.start(str(body.sessionId, 'sessionId'), Array.isArray(body.keys) ? body.keys.map(String) : [], typeof body.name === 'string' ? body.name : '')) })
+            if (key === 'merge/cancel') { await mg.cancel(str(body.id, 'id')); return send(res, 200, { ok: true }) }
+            if (key === 'merge/undo') return send(res, 200, { ok: true, ...(await mg.undo(str(body.id, 'id'))) })
+            if (key === 'merge/purge') return send(res, 200, { ok: true, ...(await mg.purge(str(body.id, 'id'))) })
+          } catch (e) { const x = e as { code?: string; message?: string; extra?: Json }; if (e instanceof M.BoardError) throw e; return send(res, 400, { ok: false, error: { code: x.code ?? 'MERGE_FAILED', message: x.message ?? String(e) }, ...(x.extra ?? {}) }) }
+          return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)
+        }
         const fn = MUTATIONS[key]
         if (!fn) return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)
         const result = await s.store.mutate((b) => fn(body, b), (r) => (key === 'card/move' ? [r as M.BoardEvent] : [{ at: new Date().toISOString(), actor: 'user', kind: key, card: typeof body.id === 'string' ? body.id : undefined }]))
         return send(res, 200, { ok: true, result: result ?? null, ...snapshot(s, getRev()) })
       } catch (e) {
         if (e instanceof M.BoardError) return fail(res, 400, e.code, e.message)
+        const lc = (e as { name?: string; code?: string }).name === 'LandfillError' ? (e as { code: string }).code : ''
+        if (lc) return fail(res, 400, lc, (e as Error).message)
         return fail(res, 500, 'INTERNAL', e instanceof Error ? e.message : String(e))
       }
     },

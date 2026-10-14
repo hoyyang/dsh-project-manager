@@ -4,7 +4,7 @@
  * 所有变更 → POST → 用返回的新快照重绘（服务端是唯一事实来源，失败时点名提示并回到服务端状态）。
  */
 import { ApiError, Card, getState, Group, post, Snapshot, StateInfo, Status, WebLink } from './api.js'
-import { esc, ic } from './icons.js'
+import { CHECK_SVG, COPY_SVG, esc, ic } from './icons.js'
 
 export interface BoardHost {
   /** 以卡片新建项目会话（index.ts 实现：准备工作区 → 新建会话 → 绑定 → 打开）。 */
@@ -14,8 +14,6 @@ export interface BoardHost {
   setDark(dark: boolean): void
   toast(msg: string, kind?: 'ok' | 'err', action?: { label: string; run: () => void }): void
   pickCard(anchor: HTMLElement, groupId?: string): void
-  /** dsh 侧栏里已添加的工作区（不含「项目区」），作为挂载仓库候选。 */
-  workspaces(): Array<{ title: string; path: string }>
   /** 打开 dsh 的选文件夹对话框（与添加工作区同一个）；取消返回 null；不支持（网页文件浏览器模式）时抛错。 */
   pickDirectory(): Promise<string | null>
   /** dsh 的全部会话（活跃 + 已归档，不含子代理），带所在工作区与更新时间；来自 ctx.sessions + ctx.workspaces。 */
@@ -24,6 +22,14 @@ export interface BoardHost {
   archiveSession(id: string, stop: boolean): Promise<{ ok: true } | { ok: false; activity: ArchiveActivity[] }>
   /** 取消归档（撤销用），同 dsh 侧栏。 */
   unarchiveSession(id: string): Promise<void>
+  /** 0.13：能否删除会话（dsh-manage-sessions 提供）。 */
+  canDeleteSession(): boolean
+  /** 0.13：确认后删除还没对话的会话；返回是否删了。 */
+  deleteSession(id: string, title: string): Promise<boolean>
+  /** 0.15：侧栏轮询已拿到的快照（有就先用它画，不等请求）。 */
+  seed?(): Snapshot | null
+  /** 0.16：把一句话（「回忆 X」/「落盘项目 X」）发到这张卡片最近的活跃会话并打开；没有就先新建。返回会话名。 */
+  sendToCard(cardId: string, text: string): Promise<string>
 }
 
 /** 宿主拒绝归档时带回的「仍在进行的工作」，一类一条。 */
@@ -46,7 +52,13 @@ export function activityLine(a: ArchiveActivity): string {
 /** 归档时长：今天 / N 天前。 */
 export const daysAgo = (iso: string | undefined, now = Date.now()): string => { const d = Math.floor((now - (Date.parse(iso ?? '') || now)) / 86400000); return d < 1 ? '今天' : d + ' 天前' }
 
-export interface SessionView { id: string; title: string; ws: string; wsId: string | null; updatedAt: number; archived: boolean }
+/** 0.15 粘贴路径的逐行检测结果（与 host routes.checkPaths 一致）。 */
+export type PathCheck = { raw: string; path: string; status: 'ok' | 'dir' | 'missing' | 'linked' | 'dup' | 'bad' }
+const FP_WHY: Record<PathCheck['status'], string> = { ok: '存在', dir: '是文件夹（文件夹请加到「仓库」）', missing: '文件不存在', linked: '已关联', dup: '重复，已忽略', bad: '不是绝对路径' }
+const FP_ICON: Record<PathCheck['status'], string> = { ok: 'check', dir: 'alert', missing: 'alert', linked: 'minus', dup: 'minus', bad: 'alert' }
+const fpKind = (s: PathCheck['status']): string => (s === 'ok' ? 'ok' : s === 'linked' || s === 'dup' ? 'skip' : 'bad')
+
+export interface SessionView { id: string; blank?: boolean; forkOf?: string; title: string; ws: string; wsId: string | null; updatedAt: number; archived: boolean }
 
 /** 相对时间：刚刚 / N分钟 / N小时 / N天（与侧栏一致的粒度）。 */
 export const ago = (t: number, now = Date.now()): string => { const m = Math.max(0, Math.floor((now - t) / 60000)); return m < 1 ? '刚刚' : m < 60 ? m + '分钟' : m < 1440 ? Math.floor(m / 60) + '小时' : Math.floor(m / 1440) + '天' }
@@ -71,6 +83,14 @@ export function sortLinked<T extends { sessionId: string; createdAt?: string }>(
   return refs.slice().sort((a, b) => rank(a) - rank(b) || at(b) - at(a))
 }
 
+/** 0.12：详情里「本卡片的会话」「关联的落盘项目」默认显示的项数。 */
+export const LIST_LIMIT = 3
+/** 0.12：列表折叠时只取前 limit 项；超出时给出「展示更多 / 折叠」按钮（k = sess | mem）。 */
+export function limitList<T>(list: T[], all: boolean, limit = LIST_LIMIT): T[] { return all || list.length <= limit ? list : list.slice(0, limit) }
+export const moreBtn = (k: string, all: boolean, n: number, ctl: string, limit = LIST_LIMIT): string => n > limit
+  ? '<button type="button" class="more-tg" data-more="' + k + '" aria-expanded="' + all + '" aria-controls="' + ctl + '">' + (all ? '折叠' : '展示更多（还有 ' + (n - limit) + ' 项）') + ic('chev') + '</button>'
+  : ''
+
 /** 详情原地更新后找回焦点：优先 id，其次第一个 data-* 属性。 */
 const keyOf = (el: HTMLElement): string | null => {
   if (el.id) return '#' + CSS.escape(el.id)
@@ -85,9 +105,13 @@ const normPath = (p: string): string => p.replace(/[/\\]+$/, '') || '/'
 /** 相关说明里的网址变成可点链接（先转义再匹配，链接文本与 href 都是转义后的同一串）；末尾标点不算进网址。 */
 /** 相关说明折叠阈值（px）：超过就折叠，给「展开全部 / 收起」。 */
 const NOTE_CLAMP = 172
-type WlRow = { text: string; type: string; url: string; err: string; tnew: boolean; tdraft: string }
+type WlRow = { text: string; type: string; url: string; err: string }
 /** 卡片有没有会注入会话的「卡片资料」（说明 / 链接 / 文件）。 */
-export const hasMaterials = (c: Card): boolean => !!(c.notes ?? '').trim() || !!(c.webLinks ?? []).length || !!(c.files ?? []).length
+export const hasMaterials = (c: Card): boolean => !!(c.notes ?? '').trim() || !!(c.webLinks ?? []).length || !!(c.files ?? []).length || !!(c.repos ?? []).length || !!c.tasks.length
+/** 0.14 与服务端 urlKey 同口径：协议 + 域名（小写）+ 路径（去掉末尾 /）+ 查询 + 锚点。 */
+export function urlKey(url: string): string { try { const u = new URL(url); return u.protocol + '//' + u.host.toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search + u.hash } catch { return url.trim() } }
+/** 「N 天前添加过」 */
+export function addedAgo(at: string, now = Date.now()): string { const d = Math.floor((now - Date.parse(at)) / 864e5); return !Number.isFinite(d) ? '' : d <= 0 ? '今天添加过' : d === 1 ? '昨天添加过' : d + ' 天前添加过' }
 /** 前端即时校验（与服务端 normUrl 同口径）：只收 http(s)；没写协议但像域名 → 补 https://。 */
 export function checkUrl(v: string): { url?: string; err?: string } {
   let s = v.trim()
@@ -120,6 +144,16 @@ export class BoardView {
   err = ''
   editG: string | null = null
   private timer: ReturnType<typeof setInterval> | null = null
+  private syncing = false
+  /** 0.15：右上角「正在同步…」，只在首次同步超过 300ms 时出现（快的时候不闪）。 */
+  private syncTimer = 0
+  private syncBadge(): void {
+    const b = this.root.querySelector('.pm-sync') as HTMLElement | null
+    if (!b) return
+    clearTimeout(this.syncTimer)
+    if (!this.syncing) { b.classList.remove('on'); return }
+    this.syncTimer = window.setTimeout(() => { if (this.syncing) b.classList.add('on') }, 300)
+  }
   private dragId: string | null = null
   private dropAt: { g: string; col: string; before: string | null; tray?: boolean } | null = null
   private link: { kind: 'group' | 'card'; id: string; sel: Set<string>; locked: Set<string>; q: string } | null = null
@@ -132,7 +166,8 @@ export class BoardView {
   private rendering = false
   private composing = false
   /** 「添加挂载仓库」弹窗的草稿：候选搜索词、已选项、是否降级为手输路径。 */
-  private ar: { g: string; q: string; sel: Array<{ path: string; name: string; role: string }>; manual: boolean; busy: boolean } | null = null
+  /** 添加仓库弹窗：mode=group → 卡片组的「卡片共用仓库」；mode=card → 这张卡片自己的仓库（id = 组 id / 卡片 id）。 */
+  private ar: { mode: 'group' | 'card'; id: string; q: string; sel: Array<{ path: string; name: string; role: string }>; manual: boolean; busy: boolean } | null = null
   /** 「关联已有会话」弹窗草稿；cf = 待确认解除关联的会话。 */
   private ls: { card: string; q: string; sel: string[]; busy: boolean } | null = null
   private cf: string | null = null
@@ -141,7 +176,9 @@ export class BoardView {
   private noteEdit: { card: string; draft: string } | null = null
   /** 相关文件：系统选文件框打开中 / 降级为手输路径。 */
   private filePicking = false
-  private fileManual = false
+  /** 0.15 粘贴路径：card = 打开在哪张卡片；text = 输入框内容；res = 服务端逐行检测结果（与 text 同步）。 */
+  private fp: { card: string; text: string; res: PathCheck[]; seq: number } | null = null
+  private fpTimer = 0
   private chipSig = ''
   /** 展开了「已归档卡片」列表的卡片组（默认全部收起，只在本次打开期间记住）。 */
   private tray = new Set<string>()
@@ -151,6 +188,9 @@ export class BoardView {
   private noteOpen = new Set<string>()
   /** 0.11：「关联的落盘项目」是否展开详情（全部卡片共用一个开关，本次打开期间记住，默认只显示标题）。 */
   private memOpen = false
+  /** 0.12：当前卡片的两个列表是否「展示更多」（切换卡片回到默认 3 项）。 */
+  private more = { card: '', sess: false, mem: false }
+  private moreOf(c: Card): { sess: boolean; mem: boolean } { if (this.more.card !== c.id) this.more = { card: c.id, sess: false, mem: false }; return this.more }
   /** 0.10：「添加 / 编辑相关链接」弹窗草稿。 */
   private wl: { card: string; mode: 'add' | 'edit'; idx: number; rows: WlRow[] } | null = null
   /** 0.10：相关链接拖动排序（pointer：按住手柄拖动，松开落位，Esc 取消）。 */
@@ -158,15 +198,48 @@ export class BoardView {
 
   constructor(readonly root: HTMLElement, readonly host: BoardHost) {
     root.classList.add('dpm')
-    root.innerHTML = '<div class="pm-top"></div><div class="pm-body"><div class="board-wrap"></div></div>' + DIALOGS.replace('%FOLDER%', ic('fplus')).replace('%PLUS%', ic('plus'))
+    root.innerHTML = '<div class="pm-top"></div><div class="pm-body"><div class="board-wrap"></div></div>' + DIALOGS.replace('%FOLDER%', ic('fplus')).replaceAll('%PLUS%', ic('plus'))
     this.bind()
-    void this.refresh()
+    // 0.15：有上次的快照就立刻画（看板不再等第一次请求），否则画骨架；后台同步完成后静默更新
+    const seed = host.seed?.() ?? null
+    if (seed) { this.snap = seed; this.render() } else this.render()
+    queueMicrotask(() => { if (this.wantCard && this.snap) void this.focusCard(this.wantCard) })
+    this.syncing = true
+    this.syncBadge()
+    void this.refresh().finally(() => { this.syncing = false; this.syncBadge() })
     this.timer = setInterval(() => { if (!document.hidden) void this.refresh(true) }, 4000)
+  }
+
+  /** 0.19 从会话信息卡直达：选中卡片、打开详情、滚到它、闪一下蓝框（快照还没到就等下一次渲染）。 */
+  private wantCard: string | null = null
+  async focusCard(id: string): Promise<void> {
+    if (!this.card(id)) { this.wantCard = id; return }
+    this.wantCard = null
+    const c = this.card(id) as Card
+    if (c.archivedAt) this.tray.add(c.g)
+    if (this.sel !== id) { this.noteEdit = null; this.fp = null }
+    this.sel = id
+    // 卡片组收起着 → 展开并存下来（只改本地快照的话，下一次同步又会收回去）
+    if (this.grp(c.g)?.collapsed) await this.act('group/update', { id: c.g, collapsed: false })
+    else this.render()
+    const wrap = this.root.querySelector('.board-wrap') as HTMLElement | null
+    const el = wrap?.querySelector('[data-card="' + CSS.escape(id) + '"]') as HTMLElement | null
+    if (!wrap || !el) return
+    // 只滚看板自己的滚动区（纵向）和这一组的阶段条（横向）。不用 scrollIntoView：它会连宿主外层的
+    // overflow:hidden 容器一起滚，整个看板被顶上去（0.19 主实例实测）。
+    const wr = wrap.getBoundingClientRect()
+    const er = el.getBoundingClientRect()
+    wrap.scrollTo({ top: Math.max(0, wrap.scrollTop + er.top - wr.top - Math.max(16, (wrap.clientHeight - er.height) / 2)), behavior: 'smooth' })
+    const lane = el.closest('.lane-in') as HTMLElement | null
+    if (lane) { const lr = lane.getBoundingClientRect(); if (er.left < lr.left || er.right > lr.right) lane.scrollTo({ left: Math.max(0, lane.scrollLeft + er.left - lr.left - 16), behavior: 'smooth' }) }
+    el.classList.remove('dpm-flash'); void el.offsetWidth; el.classList.add('dpm-flash'); setTimeout(() => el.classList.remove('dpm-flash'), 1400)
   }
 
   dispose(): void {
     this.disposed = true
     if (this.timer) clearInterval(this.timer)
+    clearTimeout(this.syncTimer)
+    clearTimeout(this.fpTimer)
     for (const d of this.disposers) d()
     this.root.innerHTML = ''
   }
@@ -201,6 +274,7 @@ export class BoardView {
       this.snap = r
       this.err = ''
       this.render()
+      if (this.wantCard) void this.focusCard(this.wantCard)
     } catch (e) {
       this.err = e instanceof Error ? e.message : String(e)
       this.render()
@@ -227,7 +301,7 @@ export class BoardView {
     if (this.disposed) return
     const dark = this.host.isDark()
     const top = this.root.querySelector('.pm-top') as HTMLElement
-    if (!top.firstChild) top.innerHTML = '<div class="ttl"><h1>项目看板</h1><p>一张卡片对应一个落盘项目，卡片组就是父项目。每个卡片组有自己的一套阶段。</p></div>'
+    if (!top.firstChild) top.innerHTML = '<div class="ttl"><h1>项目看板<span class="pm-sync" role="status"><span class="dot" aria-hidden="true"></span>正在同步…</span></h1><p>一张卡片对应一个落盘项目，卡片组就是父项目。每个卡片组有自己的一套阶段。</p></div>'
       + '<label class="search">' + ic('search') + '<span class="sr-only">搜索卡片</span><input id="dpmQ" type="search" placeholder="搜索卡片或仓库" value="' + esc(this.q) + '"></label>'
       + '<button type="button" class="btn" data-import>' + ic('import') + '导入落盘项目</button>'
       + '<button type="button" class="btn primary" data-new-group>' + ic('plus') + '新建卡片组</button>'
@@ -243,7 +317,7 @@ export class BoardView {
     const laneX = new Map<string, number>()
     wrap.querySelectorAll<HTMLElement>('.lane-in[data-g]').forEach((el) => laneX.set(el.dataset.g as string, el.scrollLeft))
     this.idxCache = this.sessIndex()
-    try { wrap.innerHTML = (this.err ? '<div class="dpm-err" role="alert">' + esc(this.err) + '</div>' : '') + this.boardHtml() } finally { this.idxCache = null }
+    try { wrap.innerHTML = (this.err ? '<div class="dpm-err" role="alert">' + esc(this.err) + '</div>' : '') + this.lfNoteHtml() + this.boardHtml() } finally { this.idxCache = null }
     this.chipSig = this.chipSignature()
     wrap.scrollTop = scroll
     wrap.querySelectorAll<HTMLElement>('.lane-in[data-g]').forEach((el) => { const x = laneX.get(el.dataset.g as string); if (x) el.scrollLeft = x })
@@ -267,7 +341,7 @@ export class BoardView {
     if (old && old.getAttribute('data-card') === this.sel) {
       if (html === this.lastDetail) return
       // 正在输入相关说明时不原地替换（会丢光标）；失焦后的下一次推送再更新
-      if (document.activeElement?.id === 'dpmNoteIn' && old.contains(document.activeElement)) return
+      if ((document.activeElement?.id === 'dpmNoteIn' || document.activeElement?.id === 'dpmFpIn') && old.contains(document.activeElement)) return
       const tpl = document.createElement('template')
       tpl.innerHTML = html
       const nd = tpl.content.firstElementChild as HTMLElement
@@ -300,7 +374,8 @@ export class BoardView {
   }
 
   private boardHtml(): string {
-    if (!this.snap) return '<div class="empty-board"><span>加载中…</span></div>'
+    // 0.15：第一次打开还没数据 → 骨架（不再整块空白）
+    if (!this.snap) return '<div class="skel-board" aria-busy="true" aria-label="正在加载看板">' + [0, 1].map(() => '<div class="lane skel-lane"><div class="skel-h"></div><div class="skel-row">' + [0, 1, 2].map(() => '<div class="skel"></div>').join('') + '</div></div>').join('') + '</div>'
     if (!this.groups.length) return '<div class="empty-board"><b>还没有卡片组</b><span>新建一个卡片组，或从落盘项目导入。</span><button type="button" class="btn primary" data-new-group>' + ic('plus') + '新建卡片组</button></div>'
     const q = this.q
     const vis = this.cards.filter((c) => !c.archivedAt).filter((c) => !q || (c.t + ' ' + c.links.join(' ') + ' ' + this.cardDesc(c) + ' ' + (this.grp(c.g)?.repos.map((r) => r.name).join(' ') ?? '')).toLowerCase().includes(q))
@@ -318,8 +393,8 @@ export class BoardView {
       // 头部左侧整块（箭头、组名、统计、空白）点击展开/收起；里面的「组记忆」按钮保持自己的作用
       return '<section class="lane' + (g.collapsed ? ' collapsed' : '') + '" data-lane="' + esc(g.id) + '"><div class="lane-h">'
         + '<div class="lane-hit" data-toggle-area="' + esc(g.id) + '"><h2><button type="button" class="tg" data-toggle="' + esc(g.id) + '" aria-expanded="' + !g.collapsed + '"><span class="chev-b"><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span><span class="nm">' + esc(g.name) + '</span></button></h2>'
-        + '<span class="meta">' + g.repos.length + ' 个仓库 · ' + cs.length + ' 张卡片 · ' + n + ' 个阶段</span>'
-        + (g.links.length ? '<button type="button" class="chip mem as-btn" data-edit-group="' + esc(g.id) + '" data-focus-links>' + ic('mem') + '组记忆 ' + g.links.length + '</button>' : '')
+        + this.statHtml(g, cs)
+        + (g.links.length ? '<button type="button" class="chip mem as-btn" data-edit-group="' + esc(g.id) + '" data-focus-links>' + ic('mem') + '<span class="lb">组记忆 </span>' + g.links.length + '</button>' : '')
         + '</div>'
         + '<button type="button" class="btn ghost" data-edit-group="' + esc(g.id) + '">' + ic('sliders') + '卡片组设置</button>'
         + '<button type="button" class="btn ghost" data-new-in="' + esc(g.id) + '">' + ic('plus') + '新会话</button>'
@@ -358,16 +433,24 @@ export class BoardView {
     const ro = !!c.archivedAt
     const steps = sts.map((s, k) => '<button type="button" class="step' + (k < i ? ' past' : k === i ? ' cur' : '') + '"' + (ro ? ' disabled' : ' data-step="' + esc(s.id) + '"') + (k === i ? ' aria-current="step"' : '') + ' aria-label="移到 ' + esc(s.name) + '"><span class="nd">' + (k < i ? ic('check') : '') + '</span>' + esc(s.name) + '</button>').join('')
     const mem = this.memOf(c)
-    const memRows = mem.map((m) => {
+    const mo = this.moreOf(c)
+    const memRows = limitList(mem, mo.mem).map((m) => {
       const s = this.stateOf(m.k)
       const tag = m.from === 'group' ? '<span class="chip plain">来自卡片组</span>' : m.from === 'both' ? '<span class="chip plain">卡片组 + 卡片</span>' : '<span class="chip brand">卡片</span>'
       const rm = !ro && m.from !== 'group' ? '<button type="button" class="ib" data-unlink-card="' + esc(m.k) + '" aria-label="取消关联 ' + esc(m.k) + '">' + ic('x') + '</button>' : ''
       if (!s) return '<div class="mrow"><div class="txt"><div class="nm" title="' + esc(m.k) + '">' + esc(m.k) + '</div><div class="more"><p class="l">未找到这个落盘项目的 STATE（可能已移动或删除）</p></div></div><div class="mside">' + tag + rm + '</div></div>'
-      return '<div class="mrow"><div class="txt"><div class="nm" title="' + esc(s.slug) + '">' + esc(s.slug) + '</div><div class="more"><span class="mono">' + esc(s.project) + ' · 更新于 ' + esc(s.updated) + '</span><p class="l">' + esc(s.status || '暂无状态说明') + '</p><p class="nx"><b>next_action</b>' + esc(s.next || '暂无下一步') + '</p></div></div><div class="mside">' + tag + rm + '</div></div>'
+      return '<div class="mrow"><div class="txt"><div class="nm mq" title="' + esc(s.slug) + '">' + esc(s.slug) + '</div><div class="more"><span class="mono">' + esc(s.project) + ' · 更新于 ' + esc(s.updated) + '</span><p class="l">' + esc(s.status || '暂无状态说明') + '</p><p class="nx"><b>next_action</b>' + esc(s.next || '暂无下一步') + '</p></div></div><div class="mside">' + tag + rm + '</div></div>'
     }).join('')
-    const memBody = memRows ? '<div class="mlist' + (this.memOpen ? ' open' : '') + '" id="dpmMemList">' + memRows + '</div>' : '<p class="meta">还没有关联落盘项目。会话不会自动读取任何记忆。</p>'
+    const memBody = memRows ? '<div class="mlist' + (this.memOpen ? ' open' : '') + '" id="dpmMemList">' + memRows + '</div>' + moreBtn('mem', mo.mem, mem.length, 'dpmMemList') : '<p class="meta">还没有关联落盘项目。会话不会自动读取任何记忆。</p>'
     const memTg = memRows ? '<button type="button" class="btn ghost sm mem-tg" data-mem-toggle aria-expanded="' + this.memOpen + '" aria-controls="dpmMemList">' + (this.memOpen ? '收起详情' : '展开详情') + ic('chev') + '</button>' : ''
-    const repos = g.repos.map((r) => '<div class="repo">' + ic('repo') + '<div class="txt"><div class="nm">' + esc(r.name) + '</div><span class="mono">' + esc(r.path) + '</span></div><span class="chip ' + (r.role === '主仓' ? 'brand' : 'plain') + '">' + esc(r.role) + '</span></div>').join('') || '<p class="meta">未挂载仓库，在「卡片组设置」里添加。</p>'
+    // 0.14：卡片自己的仓库清单；「本组共用」= 也在卡片组的卡片共用仓库里（只是提示）
+    const shared = new Set(g.repos.map((r) => normPath(r.path)))
+    const crs = c.repos ?? []
+    const repos = crs.map((r, i) => '<div class="repo">' + ic('repo') + '<div class="txt"><div class="nm mq">' + esc(r.name) + '</div><span class="mono mq" title="' + esc(r.path) + '">' + esc(r.path) + '</span></div>'
+      + (shared.has(normPath(r.path)) ? '<span class="from" title="也在卡片组「' + esc(g.name) + '」的卡片共用仓库里">本组共用</span>' : '')
+      + '<span class="chip ' + (r.role === '主仓' ? 'brand' : 'plain') + '">' + esc(r.role) + '</span>'
+      + (ro ? '' : '<button type="button" class="ib sm" data-card-repo-del="' + i + '" aria-label="从这张卡片移除 ' + esc(r.name) + '">' + ic('x') + '</button>') + '</div>').join('')
+    const repoBody = repos ? repos + (ro ? '' : '<p class="meta">移除只影响这张卡片，卡片组的共用仓库和其他卡片不变。</p>') : '<p class="ar-empty">' + (ro ? '没有仓库。' : '这张卡片还没有仓库。点「新增仓库」，可以一键带上卡片组的共用仓库。') + '</p>'
     const tasks = c.tasks.map((t, k) => '<div class="task' + (t.done ? ' done' : '') + '"><label><input type="checkbox"' + (ro ? ' disabled' : ' data-task="' + k + '"') + (t.done ? ' checked' : '') + '><span>' + esc(t.text) + '</span></label>' + (ro ? '' : '<button type="button" class="ib sm" data-task-del="' + k + '" aria-label="删除子任务 ' + esc(t.text) + '">' + ic('x') + '</button>') + '</div>').join('')
     const sess = this.linkedHtml(c, ro)
     return '<aside class="detail' + (ro ? ' ro' : '') + '" data-card="' + esc(c.id) + '" aria-labelledby="dpmDT"><div class="d-h"><div class="grow" style="white-space:normal"><h2 id="dpmDT">' + esc(c.t) + '</h2><div class="sub">' + esc(g.name) + ' · ' + esc(sts[i]?.name ?? '') + '</div></div>'
@@ -376,15 +459,59 @@ export class BoardView {
       + (ro ? '<div class="arch-bar"><span class="txt"><b>已归档</b> · ' + esc(daysAgo(c.archivedAt)) + '，只能查看</span><button type="button" class="btn sm" data-unarchive-card="' + esc(c.id) + '">' + ic('unarchive') + '恢复活跃</button></div>' : '')
       + '<div class="d-b">'
       + '<section class="sec"><h3>' + ic('play') + '本卡片的会话 · ' + this.sessionsOf(c.id).length + '<span class="grow"></span>' + (ro ? '' : '<button type="button" class="btn ghost sm" data-link-sess>' + ic('link') + '关联已有会话</button>') + '</h3>' + sess + '</section>'
-      + '<section class="sec"><h3>' + ic('mem') + '关联的落盘项目 · ' + mem.length + '<span class="grow"></span>' + memTg + (ro ? '' : '<button type="button" class="btn ghost sm" data-link-card>' + ic('plus') + '关联</button>') + '</h3>' + (ro ? '' : '<p class="meta mb">会话会自动读取下面这些落盘项目的记忆。来自卡片组的在「卡片组设置」里改。</p>') + memBody + '</section>'
+      + '<section class="sec"><h3>' + ic('mem') + '关联的落盘项目 · ' + mem.length + '<span class="grow"></span>' + memTg + (ro ? '' : '<button type="button" class="btn ghost sm" data-link-card>' + ic('plus') + '关联</button>') + '</h3>' + (ro ? '' : '<p class="meta mb">会话会自动读取下面这些落盘项目的记忆。来自卡片组的在「卡片组设置」里改。</p>') + memBody + (ro ? '' : this.memActHtml(c, mem.length)) + '</section>'
       + this.notesHtml(c, ro) + this.webLinksHtml(c, ro) + this.filesHtml(c, ro)
       + '<section class="sec"><h3>阶段</h3><div class="steps">' + steps + '</div>' + (ro ? '' : nx ? '<button type="button" class="btn primary lg" data-next>推进到 ' + esc(nx.name) + ic('arrow') + '</button>' : '<p class="meta">已在最后一个阶段</p>') + '</section>'
       + '<section class="sec"><h3>子任务 ' + c.tasks.filter((t) => t.done).length + '/' + c.tasks.length + '</h3>' + tasks
       + (ro ? (c.tasks.length ? '' : '<p class="meta">没有子任务。</p>') : '<form class="addtask" data-addtask><label class="sr-only" for="dpmNewTask">新子任务</label><input id="dpmNewTask" placeholder="添加子任务，回车确认" autocomplete="off"><button class="btn" type="submit">添加</button></form>') + '</section>'
-      + '<section class="sec"><h3>' + ic('repo') + '仓库（继承自卡片组）</h3>' + repos + '</section>'
+      + '<section class="sec"><h3>' + ic('repo') + '仓库 · ' + crs.length + '<span class="grow"></span>' + (ro ? '' : '<button type="button" class="btn ghost sm" data-card-repo-add>' + ic('plus') + '新增仓库</button>') + '</h3>' + repoBody + '</section>'
       + (ro ? '</div></aside>' : '<section class="sec"><button type="button" class="btn ghost danger" data-remove-card>' + ic('trash') + '删除这张卡片</button></section></div>'
       + '<div class="d-f"><div class="note"><span class="chip warn">' + ic('shield') + '完全权限</span><span class="chip mem">' + ic('mem') + '自动读取 ' + mem.length + ' 个落盘项目' + (hasMaterials(c) ? ' + 卡片资料' : '') + '</span></div>'
-      + '<button type="button" class="btn primary lg" data-open-card>' + ic('play') + '以此卡片新建会话</button></div></aside>')
+      + (this.creating === c.id ? '<button type="button" class="btn primary lg" disabled aria-busy="true"><span class="spin" aria-hidden="true"></span>正在新建会话…</button>' : '<button type="button" class="btn primary lg" data-open-card>' + ic('play') + '以此卡片新建会话</button>') + '</div></aside>')
+  }
+
+  // ── 0.16 落盘项目入口 ──
+  /** 看板顶部一行提示：只在需要时出现（本机 skill 是单独一份 → 接管；功能没开 → 原因）。 */
+  private lfNoteHtml(): string {
+    const lf = this.snap?.landfill
+    if (!lf || !lf.enabled) return ''
+    if (!lf.ok) return '<div class="lf-note" role="status">' + ic('info') + '<span class="txt">落盘项目功能没开启：<b>' + esc(lf.reason) + '</b>。看板其他功能照常。</span></div>'
+    const up = lf.toolOutdated ? '<div class="lf-note" role="status">' + ic('info') + '<span class="txt">本机的 <code>~/.ai/tools/ai-memory</code> 是旧版（v' + lf.toolVersion + '），不支持把截图等文件导入项目文件夹。升级 = 先备份，再换成插件自带的 v' + lf.bundledVersion + '（只新增命令，Codex 等其他工具照常用）。</span><button type="button" class="btn sm" data-lf-upgrade' + (this.upgrading ? ' disabled' : '') + '>' + (this.upgrading ? '升级中…' : '升级 ai-memory') + '</button></div>' : ''
+    if (lf.skill !== 'file') return up
+    return up + '<div class="lf-note" role="status">' + ic('info') + '<span class="txt">本机的 <code>' + esc(lf.skillPath.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, '~')) + '</code> 是单独一份，Codex 等其他工具读的不是插件里这份。接管 = 先备份，再换成指向插件的链接。</span><button type="button" class="btn sm" data-lf-adopt' + (this.adopting ? ' disabled' : '') + '>' + (this.adopting ? '接管中…' : '接管') + '</button></div>'
+  }
+  private adopting = false
+  private upgrading = false
+  private lfBusy = false
+  /** 卡片详情：回忆 / 落盘 两个按钮（发到这张卡片最近的会话）。 */
+  private memActHtml(c: Card, memN: number): string {
+    const lf = this.snap?.landfill
+    if (!lf || !lf.enabled) return ''
+    const off = !lf.ok
+    const last = this.lastLive(c.id)
+    const hint = off ? '落盘项目功能没开启，见看板顶部说明。' : last ? '发到这张卡片最近的会话「' + esc(last.title) + '」' : '这张卡片还没有会话，会先新建一个'
+    return '<div class="mem-act"><button type="button" class="btn sm" data-lf-recall' + (off || !memN || this.lfBusy ? ' disabled' : '') + (memN ? '' : ' title="还没有关联落盘项目"') + '>' + ic('restore') + '回忆</button>'
+      + '<button type="button" class="btn sm" data-lf-persist' + (off || this.lfBusy ? ' disabled' : '') + '>' + ic('save') + '落盘</button><p class="hint">' + hint + '</p></div>'
+  }
+  /** 这张卡片最近更新的活跃会话（没有归档、宿主里还在）。 */
+  private lastLive(cardId: string): { id: string; title: string } | null {
+    const all = new Map(this.host.allSessions().map((s) => [s.id, s]))
+    let best: SessionView | null = null
+    for (const r of this.snap?.board.sessions ?? []) {
+      if (r.cardId !== cardId) continue
+      const s = all.get(r.sessionId)
+      if (s && !s.archived && (!best || s.updatedAt > best.updatedAt)) best = s
+    }
+    return best ? { id: best.id, title: best.title } : null
+  }
+  private async lfSend(c: Card, verb: '回忆' | '落盘项目'): Promise<void> {
+    const keys = this.memOf(c).map((m) => this.stateOf(m.k)?.slug ?? m.k.split('/')[1])
+    const text = verb + ' ' + (keys.join('、') || '').trim()
+    this.lfBusy = true
+    this.renderDetail()
+    try { const t = await this.host.sendToCard(c.id, text.trim()); this.host.toast('已发到「' + t + '」：' + text.trim()) }
+    catch (e) { this.host.toast((verb === '回忆' ? '回忆' : '落盘') + '失败：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
+    finally { this.lfBusy = false; if (!this.disposed) this.renderDetail() }
   }
 
   /** 「已归档卡片」列表：就地展开在卡片组头部下方；一行 = 名称 + 灰字信息，点行看只读详情，行尾图标恢复活跃。 */
@@ -467,8 +594,26 @@ export class BoardView {
   }
   private chipSignature(): string {
     this.idxCache = this.sessIndex()
-    try { return this.cards.map((c) => { const b = this.badgeOf(c.id); return b ? b.n + ':' + (b.live ? 1 : 0) : '-' }).join(',') } finally { this.idxCache = null }
+    try { return this.cards.map((c) => { const b = this.badgeOf(c.id); return b ? b.n + ':' + b.live : '-' }).join(',') } finally { this.idxCache = null }
   }
+  /** 0.20 卡片组标题旁统计：卡片数（蓝底，0 张变灰）+ 活跃会话数（本组卡片关联、没归档的会话，实时）+ 仓库 / 阶段（灰色小字）。 */
+  private liveLast = new Map<string, number>()
+  private statHtml(g: Group, cs: Card[]): string {
+    const idx = this.sessIndex()
+    let live = 0
+    for (const c of this.cards.filter((x) => x.g === g.id && !x.archivedAt)) live += this.badgeOfIdx(c.id, idx)?.live ?? 0
+    const prev = this.liveLast.get(g.id)
+    this.liveLast.set(g.id, live)
+    const bump = prev !== undefined && prev !== live
+    const n = cs.length
+    return '<span class="gstat"><span class="cnt cards' + (n ? '' : ' zero') + '" title="' + (n ? n + ' 张卡片（不含已归档）' : '还没有卡片') + '"><b>' + n + '</b>张卡片</span>'
+      + '<span class="cnt live' + (live ? '' : ' zero') + (bump ? ' bump' : '') + '" title="' + (live ? '本组卡片关联的会话里，没归档的有 ' + live + ' 个（实时）' : '本组卡片没有活跃会话') + '"><i aria-hidden="true"></i><b>' + live + '</b><span class="lb">活跃会话</span></span>'
+      + '<span class="quiet">' + g.repos.length + ' 个仓库 · ' + g.statuses.length + ' 个阶段</span></span>'
+  }
+  private badgeOfIdx(cardId: string, idx: ReadonlyMap<string, SessionView>): { n: number; live: number } | null { return sessBadge((this.snap?.board.sessions ?? []).filter((s) => s.cardId === cardId), idx) }
+  /** 0.20「以此卡片新建会话」：点了立刻进入忙态（锁按钮），建好或失败后恢复。 */
+  creating: string | null = null
+  setCreating(cardId: string | null): void { this.creating = cardId; this.renderDetail() }
 
   /** 相关说明：没保存过 = 输入框；保存过 = 只读展示（网址可点）+ 编辑按钮。 */
   private notesHtml(c: Card, ro = false): string {
@@ -483,7 +628,7 @@ export class BoardView {
     return '<section class="sec">' + head + '<label class="sr-only" for="dpmNoteIn">相关说明</label>'
       + '<textarea class="note-in" id="dpmNoteIn" placeholder="写下和这个项目相关的任何说明：背景、约定、网址链接……不限字数">' + esc(draft) + '</textarea>'
       + '<div class="note-bar"><span class="meta" id="dpmNoteN">' + draft.length + ' 字' + (saved ? ' · 编辑中' : '') + '</span><span class="grow"></span>'
-      + '<button type="button" class="btn sm" data-note-reset' + (dirty ? '' : ' disabled') + ' title="' + (saved ? '恢复成上次保存的内容' : '清空输入') + '">重置</button>'
+      + '<button type="button" class="btn sm" data-note-clear' + (draft ? '' : ' hidden') + ' title="清空输入框（还没保存；按 ⌘Z 可以撤回）">清空</button>'
       + '<button type="button" class="btn primary sm" data-note-save' + (dirty ? '' : ' disabled') + '>保存</button></div></section>'
   }
   private noteView(c: Card, saved: string): string {
@@ -497,33 +642,34 @@ export class BoardView {
     const ls = c.webLinks ?? []
     const rows = ls.map((l, k) => '<div class="wl" data-wl="' + k + '">'
       + (ro ? '' : '<button type="button" class="wgrip" data-wdrag="' + k + '" aria-label="拖动调整「' + esc(l.text) + '」的位置（键盘 Alt+上下方向键）">' + ic('grip') + '</button>')
-      + '<a class="wl-a' + (ro ? ' ro' : '') + '" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" title="' + esc(l.url) + '">' + ic('ext') + '<span class="t">' + esc(l.text) + '</span></a>'
+      + '<a class="wl-a' + (ro ? ' ro' : '') + '" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" title="' + esc(l.url) + '">' + ic('ext') + '<span class="t mq">' + esc(l.text) + '</span></a>'
       + '<span class="chip plain">' + esc(l.type) + '</span>'
+      + '<button type="button" class="ib sm cp tipbtn" data-copy-url="' + esc(l.url) + '" aria-label="复制链接 ' + esc(l.text) + '">' + COPY_SVG + CHECK_SVG + '<span class="tip" aria-hidden="true">复制链接</span></button>'
       + (ro ? '' : '<span class="acts"><button type="button" class="ib sm tipbtn" data-wl-edit="' + k + '" aria-label="编辑 ' + esc(l.text) + '">' + ic('pencil') + '<span class="tip" aria-hidden="true">编辑</span></button>'
         + '<button type="button" class="ib sm del tipbtn" data-wl-del="' + k + '" aria-label="删除 ' + esc(l.text) + '">' + ic('trash') + '<span class="tip" aria-hidden="true">删除</span></button></span>')
       + '</div>').join('')
     const body = ls.length ? '<div class="wl-list">' + rows + '</div>' : '<p class="meta">' + (ro ? '没有相关链接。' : '还没有相关链接。点「添加链接」可以一次加多条。') + '</p>'
-    return '<section class="sec"><h3>' + ic('link') + '相关链接 · ' + ls.length + '<span class="grow"></span>' + (ro ? '' : '<button type="button" class="btn ghost sm" data-wl-add>' + ic('plus') + '添加链接</button>') + '</h3>' + body + '</section>'
+    return '<section class="sec"><h3>' + ic('link') + '相关链接 · ' + ls.length + '<span class="grow"></span>' + (ro ? '' : '<span class="h3-acts"><button type="button" class="btn ghost sm" data-types>' + ic('sliders') + '管理类型</button><button type="button" class="btn ghost sm" data-wl-add>' + ic('plus') + '添加链接</button></span>') + '</h3>' + body + '</section>'
   }
   private get linkTypes(): string[] { return this.snap?.board.linkTypes ?? ['文档', '代码'] }
-  private blankRow(type?: string): WlRow { return { text: '', type: type ?? this.linkTypes[0], url: '', err: '', tnew: false, tdraft: '' } }
+  private blankRow(type?: string): WlRow { return { text: '', type: type ?? this.linkTypes[0], url: '', err: '' } }
   private wlOpen(c: Card, mode: 'add' | 'edit', idx = -1): void {
     const l = mode === 'edit' ? (c.webLinks ?? [])[idx] : undefined
     if (mode === 'edit' && !l) return
-    this.wl = { card: c.id, mode, idx, rows: [l ? { ...l, err: '', tnew: false, tdraft: '' } : this.blankRow()] }
+    this.wl = { card: c.id, mode, idx, rows: [l ? { ...l, err: '' } : this.blankRow()] }
     this.$('#dpmWlT').textContent = mode === 'edit' ? '编辑链接' : '添加相关链接'
     this.$('#dpmWlP').textContent = mode === 'edit' ? '改完点保存。' : '可以一次加多条；在「完整链接」里粘贴多行网址会自动拆成多条。'
     this.$('#dpmWlMore').hidden = mode === 'edit'
     this.wlRender()
     const d = this.$<HTMLDialogElement>('#dpmDlgWl')
     d.returnValue = ''
-    d.showModal()
+    if (!d.open) d.showModal()
     ;(this.root.querySelector('#dpmWlRows [data-wurl]') as HTMLElement | null)?.focus()
   }
+  /** 类型下拉：只能选已有类型（0.13 起新增 / 改名统一走「管理类型」）。 */
   private wlTypeCtl(r: WlRow, i: number): string {
-    if (r.tnew) return '<div class="wl-tnew"><label class="sr-only" for="dpmWtn' + i + '">新类型名称</label><input class="fld" id="dpmWtn' + i + '" data-wtnew="' + i + '" value="' + esc(r.tdraft) + '" placeholder="新类型名称" maxlength="20" autocomplete="off"><button type="button" class="btn sm" data-wt-ok="' + i + '">确定</button></div>'
     const ts = this.linkTypes.includes(r.type) ? this.linkTypes : [...this.linkTypes, r.type]
-    return '<select class="fld" id="dpmWt' + i + '" data-wtype="' + i + '">' + ts.map((t) => '<option' + (t === r.type ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '<option value="__new">＋ 新增类型…</option></select>'
+    return '<select class="fld" id="dpmWt' + i + '" data-wtype="' + i + '">' + ts.map((t) => '<option' + (t === r.type ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>'
   }
   private wlRender(): void {
     const w = this.wl
@@ -532,47 +678,194 @@ export class BoardView {
     this.$('#dpmWlRows').innerHTML = rows.map((r, i) => '<div class="wl-row">'
       + (rows.length > 1 ? '<div class="wl-row-h">第 ' + (i + 1) + ' 条<span class="grow"></span><button type="button" class="ib sm" data-wl-rm="' + i + '" aria-label="移除第 ' + (i + 1) + ' 条">' + ic('x') + '</button></div>' : '')
       + '<div class="wl-grid"><div><label class="lbl" for="dpmWx' + i + '">显示文字</label><input class="fld" id="dpmWx' + i + '" data-wtext="' + i + '" value="' + esc(r.text) + '" placeholder="不填就用网址" maxlength="120" autocomplete="off"></div>'
-      + '<div><label class="lbl" for="' + (r.tnew ? 'dpmWtn' : 'dpmWt') + i + '">类型</label>' + this.wlTypeCtl(r, i) + '</div>'
+      + '<div><label class="lbl" for="dpmWt' + i + '">类型</label>' + this.wlTypeCtl(r, i) + '</div>'
       + '<div class="full"><label class="lbl" for="dpmWu' + i + '">完整链接</label><input class="fld' + (r.err ? ' bad' : '') + '" id="dpmWu' + i + '" data-wurl="' + i + '" value="' + esc(r.url) + '" placeholder="https://…" autocomplete="off" inputmode="url"' + (r.err ? ' aria-invalid="true" aria-describedby="dpmWe' + i + '"' : '') + '>'
-      + (r.err ? '<p class="wl-err" id="dpmWe' + i + '">' + esc(r.err) + '</p>' : '') + '</div></div></div>').join('')
+      + (r.err ? '<p class="wl-err" id="dpmWe' + i + '">' + esc(r.err) + '</p>' : '') + '<div class="wl-dup-slot" id="dpmWd' + i + '" aria-live="polite"></div></div></div></div>').join('')
     this.$('#dpmWlCount').textContent = w.mode === 'add' && rows.length > 1 ? '共 ' + rows.length + ' 条，空行不保存' : ''
+    this.wlDupAll()
     this.wlOkText()
   }
-  private wlOkText(): void { const w = this.wl; if (!w) return; const n = w.rows.filter((r) => r.url.trim()).length; this.$('#dpmWlOk').textContent = w.mode === 'add' && n > 1 ? '保存 ' + n + ' 条' : '保存' }
-  /** 新增全局类型：立刻存到服务端（任意卡片都能选），本条选上它。 */
-  private async wlAddType(i: number): Promise<void> {
+  /**
+   * 0.14 重复链接：和这张卡片已有的链接（编辑时不跟自己比）或本次前面的行是同一个 → 不能保存。
+   * 返回 { at: 已有链接序号 | -1, row: 本次的第几行 | -1 }；不重复 → null。
+   */
+  private wlDupOf(i: number): { at: number; row: number } | null {
     const w = this.wl
+    const c = w ? this.card(w.card) : undefined
     const r = w?.rows[i]
-    if (!w || !r) return
-    const v = r.tdraft.trim()
-    r.tnew = false
-    r.tdraft = ''
-    if (v) {
-      const had = this.linkTypes.includes(v)
-      try {
-        const res = await post<Snapshot & { result: string }>('linktype/add', { name: v })
-        if (this.disposed) return
-        this.snap = res
-        r.type = res.result
-        this.render()
-        if (!had) this.host.toast('已新增类型「' + res.result + '」，所有卡片都能选')
-      } catch (e) { this.host.toast('新增类型失败：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
+    if (!w || !c || !r) return null
+    const v = checkUrl(r.url)
+    if (!v.url) return null
+    const k = urlKey(v.url)
+    const at = (c.webLinks ?? []).findIndex((l, j) => !(w.mode === 'edit' && j === w.idx) && urlKey(l.url) === k)
+    if (at >= 0) return { at, row: -1 }
+    const row = w.rows.slice(0, i).findIndex((o) => { const x = checkUrl(o.url); return !!x.url && urlKey(x.url) === k })
+    return row >= 0 ? { at: -1, row } : null
+  }
+  private wlDupAll(): void {
+    const w = this.wl
+    const c = w ? this.card(w.card) : undefined
+    if (!w || !c) return
+    w.rows.forEach((_, i) => {
+      const slot = this.root.querySelector('#dpmWd' + i) as HTMLElement | null
+      const inp = this.root.querySelector('#dpmWu' + i) as HTMLInputElement | null
+      if (!slot || !inp) return
+      const d = this.wlDupOf(i)
+      const l = d && d.at >= 0 ? (c.webLinks ?? [])[d.at] : undefined
+      slot.innerHTML = !d ? '' : l
+        ? '<div class="wl-dup" role="alert"><p class="h">这张卡片已经添加过这个链接了，不能重复保存</p><dl><dt>显示文字</dt><dd>' + esc(l.text) + '</dd><dt>类型</dt><dd>' + esc(l.type) + '</dd><dt>完整链接</dt><dd>' + esc(l.url) + '</dd></dl>'
+          + '<div class="a"><button type="button" class="btn sm" data-wl-dup-edit="' + d.at + '">' + ic('pencil') + '直接编辑这条已添加的链接</button><button type="button" class="btn ghost sm" data-wl-dup-back="' + i + '">改成别的链接</button></div></div>'
+        : '<p class="wl-err" role="alert">和第 ' + (d.row + 1) + ' 条是同一个链接，删掉一条再保存</p>'
+      const bad = !!d || !!w.rows[i].err
+      inp.classList.toggle('bad', bad)
+      if (bad) inp.setAttribute('aria-invalid', 'true'); else inp.removeAttribute('aria-invalid')
+    })
+    const dup = w.rows.some((_, i) => !!this.wlDupOf(i))
+    this.$<HTMLButtonElement>('#dpmWlOk').disabled = dup
+  }
+  private wlOkText(): void { const w = this.wl; if (!w) return; const n = w.rows.filter((r) => r.url.trim()).length; this.$('#dpmWlOk').textContent = w.mode === 'add' && n > 1 ? '保存 ' + n + ' 条' : '保存' }
+  /** 0.13「管理类型」：列出全局类型（附在用条数），新增 / 改名；保存即全局生效（改名连带所有卡片的链接）。 */
+  private ty: { edit: number; err: string; addErr: string } | null = null
+  private typeUse(t: string): number { let n = 0; for (const c of this.cards) for (const l of c.webLinks ?? []) if (l.type === t) n++; return n }
+  private typesOpen(): void {
+    this.ty = { edit: -1, err: '', addErr: '' }
+    this.typesRender()
+    const d = this.$<HTMLDialogElement>('#dpmDlgTy')
+    d.returnValue = ''
+    d.showModal()
+    ;(this.root.querySelector('#dpmTyNew') as HTMLElement | null)?.focus()
+  }
+  private typesRender(focus?: string): void {
+    const y = this.ty
+    if (!y) return
+    const keep = (this.root.querySelector('#dpmTyNew') as HTMLInputElement | null)?.value ?? ''
+    this.$('#dpmTyList').innerHTML = this.linkTypes.map((t, i) => {
+      if (y.edit === i) return '<li class="ty-row editing"><label class="sr-only" for="dpmTyEd">类型名称</label><input class="fld' + (y.err ? ' bad' : '') + '" id="dpmTyEd" value="' + esc(t) + '" maxlength="20" autocomplete="off"' + (y.err ? ' aria-invalid="true" aria-describedby="dpmTyEdE"' : '') + '>'
+        + '<button type="button" class="btn sm" data-ty-cancel>取消</button><button type="button" class="btn sm primary" data-ty-save="' + i + '">保存</button></li>' + (y.err ? '<li class="wl-err" id="dpmTyEdE">' + esc(y.err) + '</li>' : '')
+      const n = this.typeUse(t)
+      return '<li class="ty-row" data-ty="' + i + '"><button type="button" class="ib sm ty-grip" data-tygrip="' + i + '" aria-label="调整「' + esc(t) + '」的顺序：按住拖动，或 Alt+上下方向键">' + ic('grip') + '</button><span class="nm">' + esc(t) + '</span><span class="use">' + (n ? n + ' 条链接在用' : '没有链接在用') + '</span><button type="button" class="ib sm" data-ty-edit="' + i + '" aria-label="改名 ' + esc(t) + '">' + ic('pencil') + '</button></li>'
+    }).join('') + '<li class="drop-line" id="dpmTyDrop" aria-hidden="true" hidden></li>'
+    const inp = this.$<HTMLInputElement>('#dpmTyNew')
+    inp.value = keep
+    inp.classList.toggle('bad', !!y.addErr)
+    if (y.addErr) { inp.setAttribute('aria-invalid', 'true'); inp.setAttribute('aria-describedby', 'dpmTyNewE') } else { inp.removeAttribute('aria-invalid'); inp.removeAttribute('aria-describedby') }
+    const e = this.$('#dpmTyNewE')
+    e.textContent = y.addErr
+    e.hidden = !y.addErr
+    if (focus) { const f = this.root.querySelector(focus) as HTMLInputElement | null; f?.focus(); if (f && focus === '#dpmTyEd') f.select() }
+  }
+  /** 前端先查一遍（空 / 超长 / 重名），服务端同样校验。 */
+  private typeErr(v: string, skip: number): string {
+    if (!v) return '类型名不能为空'
+    if (v.length > 20) return '类型名不能超过 20 字'
+    if (this.linkTypes.some((t, i) => t === v && i !== skip)) return '已经有「' + v + '」了'
+    return ''
+  }
+  private async typeAdd(): Promise<void> {
+    const y = this.ty
+    if (!y) return
+    const inp = this.$<HTMLInputElement>('#dpmTyNew')
+    const v = inp.value.replace(/\s+/g, ' ').trim()
+    y.addErr = this.typeErr(v, -1)
+    if (y.addErr) { this.typesRender('#dpmTyNew'); return }
+    try {
+      const r = await post<Snapshot & { result: string }>('linktype/add', { name: v })
+      if (this.disposed) return
+      this.snap = r
+      inp.value = ''
+      this.render()
+      this.typesRender('#dpmTyNew')
+      this.host.toast('已新增类型「' + r.result + '」，所有卡片都能选')
+    } catch (e) { y.addErr = e instanceof ApiError ? e.message : String(e); this.typesRender('#dpmTyNew') }
+  }
+  private async typeSave(i: number): Promise<void> {
+    const y = this.ty
+    const from = this.linkTypes[i]
+    if (!y || from === undefined) return
+    const v = (this.$<HTMLInputElement>('#dpmTyEd')?.value ?? '').replace(/\s+/g, ' ').trim()
+    if (v === from) { y.edit = -1; y.err = ''; this.typesRender(); return }
+    y.err = this.typeErr(v, i)
+    if (y.err) { this.typesRender('#dpmTyEd'); return }
+    try {
+      const r = await post<Snapshot & { result: { name: string; links: number } }>('linktype/rename', { from, to: v })
+      if (this.disposed) return
+      this.snap = r
+      y.edit = -1
+      y.err = ''
+      this.render()
+      this.typesRender()
+      ;(this.root.querySelector('[data-ty-edit="' + i + '"]') as HTMLElement | null)?.focus()
+      this.host.toast('「' + from + '」已改名为「' + r.result.name + '」' + (r.result.links ? '，' + r.result.links + ' 条链接一起更新' : ''))
+    } catch (e) { y.err = e instanceof ApiError ? e.message : String(e); this.typesRender('#dpmTyEd') }
+  }
+  /** 0.14 类型排序：拖把手（指针）或 Alt+↑↓；落点 = 两项之间空隙里的独立指示线。 */
+  private td: { i: number; y0: number; on: boolean; to: number } | null = null
+  private tdDown(e: PointerEvent): boolean {
+    const h = (e.target as HTMLElement).closest?.('[data-tygrip]') as HTMLElement | null
+    if (!h || e.button !== 0 || !this.ty || this.ty.edit >= 0) return false
+    e.preventDefault()
+    h.setPointerCapture(e.pointerId)
+    this.td = { i: Number(h.dataset.tygrip), y0: e.clientY, on: false, to: -1 }
+    return true
+  }
+  private tdMove(e: PointerEvent): void {
+    const td = this.td
+    if (!td) return
+    const rows = Array.from(this.root.querySelectorAll<HTMLElement>('#dpmTyList [data-ty]'))
+    if (!td.on) {
+      if (Math.abs(e.clientY - td.y0) < 4) return
+      td.on = true
+      this.root.classList.add('wdragging')
+      rows[td.i]?.classList.add('lifting')
     }
-    if (this.wl !== w) return
-    this.wlRender()
-    ;(this.root.querySelector('#dpmWt' + i) as HTMLElement | null)?.focus()
+    let at = rows.length
+    for (let k = 0; k < rows.length; k++) { const r = rows[k].getBoundingClientRect(); if (e.clientY < r.top + r.height / 2) { at = k; break } }
+    const line = this.root.querySelector('#dpmTyDrop') as HTMLElement | null
+    // 拖回原位（原位置前后）不显示指示线
+    if (at === td.i || at === td.i + 1 || !rows.length || !line) { td.to = -1; if (line) line.hidden = true; return }
+    td.to = at
+    const gap = rows.length > 1 ? rows[1].offsetTop - rows[0].offsetTop - rows[0].offsetHeight : 6
+    const y = at < rows.length ? rows[at].offsetTop - gap / 2 : rows[rows.length - 1].offsetTop + rows[rows.length - 1].offsetHeight + gap / 2
+    line.style.top = y + 'px'
+    line.hidden = false
+  }
+  private tdStop(commit: boolean): boolean {
+    const td = this.td
+    if (!td) return false
+    this.td = null
+    this.root.classList.remove('wdragging')
+    this.root.querySelectorAll('#dpmTyList .lifting').forEach((n) => n.classList.remove('lifting'))
+    const line = this.root.querySelector('#dpmTyDrop') as HTMLElement | null
+    if (line) line.hidden = true
+    if (commit && td.on && td.to >= 0) void this.typeMove(td.i, td.to > td.i ? td.to - 1 : td.to)
+    return true
+  }
+  private async typeMove(i: number, to: number): Promise<void> {
+    const name = this.linkTypes[i]
+    if (name === undefined || to < 0 || to >= this.linkTypes.length || to === i) return
+    try {
+      const r = await post<Snapshot>('linktype/move', { name, to })
+      if (this.disposed) return
+      this.snap = r
+      this.render()
+      this.typesRender()
+      const row = this.root.querySelector('#dpmTyList [data-ty="' + to + '"]') as HTMLElement | null
+      if (row) { row.classList.add('landed'); setTimeout(() => row.classList.remove('landed'), 450) }
+      ;(this.root.querySelector('[data-tygrip="' + to + '"]') as HTMLElement | null)?.focus({ preventScroll: true })
+      this.host.toast('「' + name + '」移到第 ' + (to + 1) + ' 位')
+    } catch (e) { this.host.toast('调整顺序失败：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
   }
   private async wlSave(): Promise<void> {
     const w = this.wl
     const c = w ? this.card(w.card) : undefined
     if (!w || !c) return
-    for (let i = 0; i < w.rows.length; i++) if (w.rows[i].tnew) await this.wlAddType(i)
     const rows = w.rows.filter((r) => w.mode === 'edit' || r.text.trim() || r.url.trim())
     if (!rows.length) { this.$<HTMLDialogElement>('#dpmDlgWl').close(''); return }
     let bad = 0
     for (const r of rows) { const v = checkUrl(r.url); r.err = v.err ?? ''; if (v.err) bad++; else r.url = v.url as string }
     w.rows = rows
     if (bad) { this.wlRender(); (this.root.querySelector('#dpmWlRows .fld.bad') as HTMLElement | null)?.focus(); return }
+    if (rows.some((_, i) => !!this.wlDupOf(i))) { this.wlRender(); (this.root.querySelector('#dpmWlRows .fld.bad') as HTMLElement | null)?.focus(); return }
     const items: WebLink[] = rows.map((r) => ({ text: r.text.trim(), type: r.type, url: r.url }))
     const cur = (c.webLinks ?? []).slice()
     if (w.mode === 'edit') cur[w.idx] = items[0]
@@ -634,11 +927,11 @@ export class BoardView {
 
   private syncNoteBar(c: Card, v: string): void {
     const dirty = v !== (c.notes ?? '')
-    const r = this.root.querySelector('[data-note-reset]') as HTMLButtonElement | null
     const s = this.root.querySelector('[data-note-save]') as HTMLButtonElement | null
     const n = this.root.querySelector('#dpmNoteN')
-    if (r) r.disabled = !dirty
     if (s) s.disabled = !dirty
+    const x = this.root.querySelector('[data-note-clear]') as HTMLButtonElement | null
+    if (x) x.hidden = v === ''
     if (n) n.textContent = v.length + ' 字' + (c.notes ? ' · 编辑中' : '')
   }
 
@@ -648,14 +941,88 @@ export class BoardView {
     const st = this.snap?.files ?? {}
     const rows = fs.map((p) => {
       const ok = st[p] !== false
-      return '<div class="frow-f' + (ok ? '' : ' gone') + '">' + ic(ok ? 'file' : 'filex') + '<div class="txt"><div class="nm">' + esc(folderName(p)) + '</div><span class="mono">' + esc(p) + '</span>'
+      return '<div class="frow-f' + (ok ? '' : ' gone') + '">' + ic(ok ? 'file' : 'filex') + '<div class="txt"><div class="nm mq">' + esc(folderName(p)) + '</div><span class="mono mq">' + esc(p) + '</span>'
         + (ok ? '<span class="chip ok">存在</span>' : '<span class="chip warn">已删除</span>') + '</div>'
         + (ro ? '' : '<button type="button" class="ib sm unl tipbtn" data-file-unlink="' + esc(p) + '" aria-label="解除关联 ' + esc(p) + '">' + ic('unlink') + '<span class="tip" aria-hidden="true">解除关联</span></button>') + '</div>'
-    }).join('') || '<p class="meta">' + (ro ? '没有相关文件。' : '还没有相关文件。点「添加文件」从系统里选，可多选。') + '</p>'
+    }).join('') || '<p class="meta">' + (ro ? '没有相关文件。' : '还没有相关文件。点「选择文件」从系统里选（可多选），或「粘贴路径」。') + '</p>'
     if (ro) return '<section class="sec"><h3>' + ic('file') + '相关文件 · ' + fs.length + '</h3>' + rows + '</section>'
-    const manual = this.fileManual ? '<form class="addtask" data-addfile><label class="sr-only" for="dpmFileIn">文件的绝对路径</label><input id="dpmFileIn" placeholder="输入文件的绝对路径，回车添加" autocomplete="off"><button class="btn" type="submit">添加</button></form>' : ''
-    return '<section class="sec"><h3>' + ic('file') + '相关文件 · ' + fs.length + '<span class="grow"></span><button type="button" class="btn ghost sm" data-file-add' + (this.filePicking ? ' disabled' : '') + '>' + ic('plus') + (this.filePicking ? '选择中…' : '添加文件') + '</button></h3>' + rows + manual + '</section>'
+    const fp = this.fp && this.fp.card === c.id ? this.fp : null
+    const paste = fp ? '<div class="fp" id="dpmFp"><label for="dpmFpIn">文件的绝对路径（可一次粘贴多行）</label>'
+      + '<textarea id="dpmFpIn" spellcheck="false" autocomplete="off" aria-describedby="dpmFpChk" placeholder="~/Desktop/方案.md&#10;/srv/demo/日志.zip">' + esc(fp.text) + '</textarea>'
+      + '<ul class="fp-chk" id="dpmFpChk" aria-live="polite">' + this.fpChkHtml(fp) + '</ul>'
+      + '<div class="fp-bar"><span class="meta" id="dpmFpSum">' + this.fpSum(fp) + '</span><span class="grow"></span><button type="button" class="btn sm" data-fp-cancel>取消</button><button type="button" class="btn primary sm" data-fp-ok' + (fp.res.some((r) => r.status === 'ok') ? '' : ' disabled') + '>' + this.fpOkText(fp) + '</button></div></div>' : ''
+    return '<section class="sec"><h3>' + ic('file') + '相关文件 · ' + fs.length + '<span class="grow"></span><span class="fseg" role="group" aria-label="添加文件的方式">'
+      + '<button type="button" class="btn ghost sm" data-file-add' + (this.filePicking ? ' disabled' : '') + '>' + ic('plus') + (this.filePicking ? '选择中…' : '选择文件') + '</button>'
+      + '<button type="button" class="btn ghost sm" data-fp-open aria-expanded="' + !!fp + '" aria-controls="dpmFp">' + ic('clip') + '粘贴路径</button></span></h3>' + rows + paste + '</section>'
   }
+  // ── 0.15 粘贴路径：逐行规整 + 存在性检测（宿主 stat），只添加通过的；有问题的行留在输入框 ──
+  private fpChkHtml(fp: NonNullable<BoardView['fp']>): string {
+    return fp.res.map((r) => '<li class="' + fpKind(r.status) + '">' + ic(FP_ICON[r.status]) + '<span class="p">' + esc(r.status === 'bad' ? r.raw : r.path) + '</span><span class="why">' + FP_WHY[r.status] + '</span></li>').join('')
+  }
+  private fpSum(fp: NonNullable<BoardView['fp']>): string {
+    if (!fp.res.length) return fp.text.trim() ? '检测中…' : ''
+    const n = fp.res.filter((r) => r.status === 'ok').length
+    const bad = fp.res.filter((r) => fpKind(r.status) === 'bad').length
+    return n + ' 个可添加' + (bad ? '，' + bad + ' 个有问题' : '')
+  }
+  private fpOkText(fp: NonNullable<BoardView['fp']>): string { const n = fp.res.filter((r) => r.status === 'ok').length; return n ? '添加 ' + n + ' 个' : '添加' }
+  /** 只更新检测结果区（不重绘详情，输入框光标不动）。 */
+  private fpPaint(): void {
+    const fp = this.fp
+    const box = this.root.querySelector('#dpmFp')
+    if (!fp || !box) return
+    this.$('#dpmFpChk').innerHTML = this.fpChkHtml(fp)
+    this.$('#dpmFpSum').textContent = this.fpSum(fp)
+    const ok = this.$<HTMLButtonElement>('[data-fp-ok]')
+    ok.disabled = !fp.res.some((r) => r.status === 'ok')
+    ok.textContent = this.fpOkText(fp)
+    this.lastDetail = ''
+  }
+  private async fpCheck(): Promise<void> {
+    const fp = this.fp
+    if (!fp) return
+    const lines = fp.text.split(/\r?\n/).filter((l) => l.trim())
+    const seq = ++fp.seq
+    if (!lines.length) { fp.res = []; this.fpPaint(); return }
+    try {
+      const r = await post<{ results: PathCheck[] }>('card/files-check', { id: fp.card, paths: lines })
+      if (this.fp !== fp || fp.seq !== seq) return
+      fp.res = r.results
+    } catch (e) {
+      if (this.fp !== fp || fp.seq !== seq) return
+      fp.res = []
+      this.host.toast('检测路径失败：' + (e instanceof ApiError ? e.message : String(e)), 'err')
+    }
+    this.fpPaint()
+  }
+  private fpOpen(c: Card, on: boolean): void {
+    this.fp = on ? { card: c.id, text: '', res: [], seq: 0 } : null
+    // 输入框聚焦时 renderDetail 不原地替换（防丢光标）→ 主动结构变化前先失焦
+    if (document.activeElement?.id === 'dpmFpIn') (document.activeElement as HTMLElement).blur()
+    this.lastDetail = ''
+    this.renderDetail()
+    if (on) (this.root.querySelector('#dpmFpIn') as HTMLElement | null)?.focus()
+    else (this.root.querySelector('[data-fp-open]') as HTMLElement | null)?.focus()
+  }
+  private async fpAdd(c: Card): Promise<void> {
+    const fp = this.fp
+    if (!fp) return
+    const add = fp.res.filter((r) => r.status === 'ok').map((r) => r.path)
+    if (!add.length) return
+    const left = fp.res.filter((r) => fpKind(r.status) === 'bad').map((r) => r.raw)
+    const ok = await this.act('card/files-add', { id: c.id, paths: add }, '已添加 ' + add.length + ' 个相关文件' + (left.length ? '，有问题的 ' + left.length + ' 行留在输入框里' : ''))
+    if (!ok || this.fp !== fp) return
+    if (!left.length) return this.fpOpen(c, false)
+    fp.text = left.join('\n')
+    fp.res = []
+    if (document.activeElement?.id === 'dpmFpIn') (document.activeElement as HTMLElement).blur()
+    this.lastDetail = ''
+    this.renderDetail()
+    const i = this.root.querySelector('#dpmFpIn') as HTMLTextAreaElement | null
+    i?.focus()
+    void this.fpCheck()
+  }
+
   private async pickFiles(c: Card): Promise<void> {
     if (this.filePicking) return
     this.filePicking = true
@@ -669,12 +1036,11 @@ export class BoardView {
       if (!r.result.cancelled) this.host.toast(r.result.added ? '已添加 ' + r.result.added + ' 个相关文件' + (r.result.skipped ? '，' + r.result.skipped + ' 个已关联过' : '') : '选的文件都已关联过')
     } catch (e) {
       this.filePicking = false
-      // 打不开系统对话框（非 macOS / osascript 失败）→ 降级为手输路径，原因点名
-      this.fileManual = true
+      // 打不开系统对话框（非 macOS / osascript 失败）→ 打开「粘贴路径」，原因点名
       this.render()
-      console.warn('[dsh-project-manager] card/files-pick 失败，改为手输路径：', e)
-      this.host.toast((e instanceof ApiError ? e.message : String(e)) + '。可以直接输入文件的绝对路径', 'err')
-      ;(this.root.querySelector('#dpmFileIn') as HTMLInputElement | null)?.focus()
+      console.warn('[dsh-project-manager] card/files-pick 失败，改为粘贴路径：', e)
+      this.host.toast((e instanceof ApiError ? e.message : String(e)) + '。可以直接粘贴文件的绝对路径', 'err')
+      this.fpOpen(c, true)
     }
   }
 
@@ -699,13 +1065,15 @@ export class BoardView {
     this.on(r, 'dragover', (e) => this.onDragOver(e))
     this.on(r, 'dragend', () => this.clearDrag())
     this.on(r, 'drop', (e) => void this.onDrop(e))
-    this.on(r, 'pointerdown', (e) => { if (!this.wdDown(e)) this.gdDown(e) })
-    this.on(r, 'pointermove', (e) => { if (this.wd) this.wdMove(e); else this.gdMove(e) })
-    this.on(r, 'pointerup', () => { if (!this.wdStop(true)) this.gdStop(true) })
-    this.on(r, 'pointercancel', () => { if (!this.wdStop(false)) this.gdStop(false) })
-    this.on(r, 'lostpointercapture', () => { if (!this.wdStop(false)) this.gdStop(false) })
+    this.on(r, 'pointerdown', (e) => { if (!this.tdDown(e) && !this.wdDown(e)) this.gdDown(e) })
+    this.on(r, 'pointermove', (e) => { if (this.td) this.tdMove(e); else if (this.wd) this.wdMove(e); else this.gdMove(e) })
+    this.on(r, 'pointerup', () => { if (!this.tdStop(true) && !this.wdStop(true)) this.gdStop(true) })
+    this.on(r, 'pointercancel', () => { if (!this.tdStop(false) && !this.wdStop(false)) this.gdStop(false) })
+    this.on(r, 'lostpointercapture', () => { if (!this.tdStop(false) && !this.wdStop(false)) this.gdStop(false) })
     this.on(r, 'paste', (e) => this.onPaste(e))
-    for (const id of ['dpmDlgSt', 'dpmDlgName', 'dpmDlgLink', 'dpmDlgImp', 'dpmDlgRepo', 'dpmDlgSess', 'dpmDlgCfm', 'dpmDlgSArc', 'dpmDlgWl']) {
+    // 0.15 候选仓库：吸顶标题 + 分组切换高亮（scroll 不冒泡，挂在列表上）
+    this.on(this.$('#dpmArList'), 'scroll', () => { if (!this.arStickRaf) this.arStickRaf = requestAnimationFrame(() => { this.arStickRaf = 0; this.arStick() }) })
+    for (const id of ['dpmDlgSt', 'dpmDlgName', 'dpmDlgLink', 'dpmDlgImp', 'dpmDlgRepo', 'dpmDlgSess', 'dpmDlgCfm', 'dpmDlgSArc', 'dpmDlgWl', 'dpmDlgTy']) {
       const d = this.$<HTMLDialogElement>('#' + id)
       this.on(d, 'close', () => void this.onDialogClose(id, d))
     }
@@ -732,6 +1100,14 @@ export class BoardView {
       if (b) { b.focus({ preventScroll: true }); if (!this.noteOpen.has(id)) b.closest('.sec')?.scrollIntoView({ block: 'nearest' }) }
       return
     }
+    if (d.more === 'sess' || d.more === 'mem') {
+      const k = d.more
+      this.more[k] = !this.more[k]
+      this.renderDetail()
+      const b = this.root.querySelector('[data-more="' + k + '"]') as HTMLElement | null
+      if (b) { b.focus({ preventScroll: true }); if (!this.more[k]) b.closest('.sec')?.scrollIntoView({ block: 'nearest' }) }
+      return
+    }
     if (d.memToggle !== undefined) {
       this.memOpen = !this.memOpen
       this.renderDetail()
@@ -739,24 +1115,70 @@ export class BoardView {
       return
     }
     if (d.wlAdd !== undefined && c) return this.wlOpen(c, 'add')
+    if (d.types !== undefined) return this.typesOpen()
+    if (d.tyEdit !== undefined && this.ty) { this.ty.edit = Number(d.tyEdit); this.ty.err = ''; this.typesRender('#dpmTyEd'); return }
+    if (d.tyCancel !== undefined && this.ty) { const i = this.ty.edit; this.ty.edit = -1; this.ty.err = ''; this.typesRender(); (this.root.querySelector('[data-ty-edit="' + i + '"]') as HTMLElement | null)?.focus(); return }
+    if (d.tySave !== undefined) return this.typeSave(Number(d.tySave))
+    if (d.tyAdd !== undefined) return this.typeAdd()
+    if (d.delSess) { const v = this.sessIndex().get(d.delSess); if (v) await this.host.deleteSession(v.id, v.title); return }
     if (d.wlEdit !== undefined && c) return this.wlOpen(c, 'edit', Number(d.wlEdit))
     if (d.wlDel !== undefined && c) return this.wlDelete(c, Number(d.wlDel))
     if (d.wlMore !== undefined && this.wl) { const last = this.wl.rows[this.wl.rows.length - 1]; this.wl.rows.push(this.blankRow(last?.type)); this.wlRender(); (this.root.querySelector('#dpmWx' + (this.wl.rows.length - 1)) as HTMLElement | null)?.focus(); return }
     if (d.wlRm !== undefined && this.wl) { this.wl.rows.splice(Number(d.wlRm), 1); this.wlRender(); return }
-    if (d.wtOk !== undefined && this.wl) return this.wlAddType(Number(d.wtOk))
     if (t.id === 'dpmWlOk') return this.wlSave()
-    if (d.card) { if (this.sel !== d.card) { this.noteEdit = null; this.fileManual = false } this.sel = d.card; this.render(); (this.root.querySelector('[data-card="' + d.card + '"]') as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); return }
-    if (d.close !== undefined) { this.sel = null; this.noteEdit = null; this.fileManual = false; return this.render() }
+    if (d.wlDupEdit !== undefined && this.wl) {
+      // 直接编辑已添加的那条（本次未保存的输入作废）
+      const c = this.card(this.wl.card)
+      if (!c) return
+      this.wlOpen(c, 'edit', Number(d.wlDupEdit))
+      this.$('#dpmWlP').textContent = '这是之前已添加的那条链接，改完点保存。'
+      ;(this.root.querySelector('#dpmWx0') as HTMLElement | null)?.focus()
+      return
+    }
+    if (d.wlDupBack !== undefined) { const i = this.root.querySelector('#dpmWu' + d.wlDupBack) as HTMLInputElement | null; i?.focus(); i?.select(); return }
+    if (d.copyUrl !== undefined) {
+      const url = d.copyUrl
+      try { await navigator.clipboard.writeText(url) } catch (e) { this.host.toast('复制失败：' + (e instanceof Error ? e.message : String(e)), 'err'); return }
+      t.classList.add('copied'); setTimeout(() => t.classList.remove('copied'), 1200)
+      this.host.toast('已复制链接：' + url)
+      return
+    }
+    if (d.card) { if (this.sel !== d.card) { this.noteEdit = null; this.fp = null } this.sel = d.card; this.render(); (this.root.querySelector('[data-card="' + d.card + '"]') as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); return }
+    if (d.close !== undefined) { this.sel = null; this.noteEdit = null; this.fp = null; return this.render() }
     if (d.themeToggle !== undefined) { this.host.setDark(!this.host.isDark()); return }
     if (d.toggle) return this.toggleGroup(d.toggle)
     if (d.gdrag) return
     if (d.newIn) return this.host.pickCard(t, d.newIn)
-    if (d.openCard !== undefined && c) return this.host.newSession(c.id)
+    if (d.openCard !== undefined && c) { if (this.creating) return; return this.host.newSession(c.id) }
+    if (d.lfRecall !== undefined && c) return this.lfSend(c, '回忆')
+    if (d.lfPersist !== undefined && c) return this.lfSend(c, '落盘项目')
+    if (d.lfUpgrade !== undefined) {
+      if (this.upgrading || !window.confirm('升级 ~/.ai/tools/ai-memory？\n\n会先把现有的备份到插件数据目录，再换成插件自带的新版（只新增 import / version 命令）。')) return
+      this.upgrading = true; this.render()
+      try { await this.act('landfill/upgrade-tool', {}, '已升级 ai-memory（原文件已备份）') } finally { this.upgrading = false; this.render() }
+      return
+    }
+    if (d.lfAdopt !== undefined) {
+      if (this.adopting || !window.confirm('接管 landfill-project skill？\n\n会先把现有的 SKILL.md 备份到插件数据目录，再换成指向插件里那份的链接。之后 Codex 等工具读到的也是插件这份。')) return
+      this.adopting = true; this.render()
+      try { await this.act('landfill/adopt-skill', {}, '已接管 skill（原文件已备份）') } finally { this.adopting = false; this.render() }
+      return
+    }
     if (d.openSess) return this.host.openSession(d.openSess)
     if (d.linkSess !== undefined && c) return this.openLinkSess(c)
     if (d.noteEdit !== undefined && c) { this.noteEdit = { card: c.id, draft: c.notes ?? '' }; this.renderDetail(); const i = this.root.querySelector('#dpmNoteIn') as HTMLTextAreaElement | null; if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length) } return }
     // 输入不触发重绘 → lastDetail 仍是输入前的 HTML，重置后可能「看起来没变」而被跳过，先作废缓存
-    if (d.noteReset !== undefined && c) { this.noteEdit = c.notes ? { card: c.id, draft: c.notes } : null; this.lastDetail = ''; this.renderDetail(); (this.root.querySelector('#dpmNoteIn') as HTMLElement | null)?.focus(); this.host.toast(c.notes ? '已恢复成上次保存的内容' : '已清空'); return }
+    if (d.noteClear !== undefined && c) {
+      const i = this.root.querySelector('#dpmNoteIn') as HTMLTextAreaElement | null
+      if (!i) return
+      // 用编辑命令清空：浏览器的撤销栈里有这一步，⌘Z 可以撤回
+      i.focus(); i.select()
+      if (!document.execCommand('delete')) i.value = ''
+      this.noteEdit = { card: c.id, draft: '' }
+      this.syncNoteBar(c, '')
+      i.focus()
+      return
+    }
     if (d.noteSave !== undefined && c) {
       const v = this.noteEdit && this.noteEdit.card === c.id ? this.noteEdit.draft : (this.root.querySelector('#dpmNoteIn') as HTMLTextAreaElement | null)?.value ?? ''
       const prev = this.noteEdit
@@ -765,6 +1187,9 @@ export class BoardView {
       return
     }
     if (d.fileAdd !== undefined && c) return this.pickFiles(c)
+    if (d.fpOpen !== undefined && c) return this.fpOpen(c, !(this.fp && this.fp.card === c.id))
+    if (d.fpCancel !== undefined && c) return this.fpOpen(c, false)
+    if (d.fpOk !== undefined && c) return this.fpAdd(c)
     if (d.fileUnlink && c) { await this.act('card/files-remove', { id: c.id, path: d.fileUnlink }, '已解除关联「' + folderName(d.fileUnlink) + '」，文件本身没动'); return }
     if (d.unbind) return this.askUnbind(d.unbind)
     if (d.restore) return this.restoreSession(d.restore)
@@ -805,12 +1230,23 @@ export class BoardView {
       const g = this.grp(this.editG)
       const r = g?.repos[Number(d.repodel)]
       if (!g || !r) return
-      if (await this.act('group/update', { id: g.id, repos: g.repos.filter((_, k) => k !== Number(d.repodel)) }, '已移除「' + r.name + '」，项目区软链接已更新')) this.renderGroupSettings()
+      if (await this.act('group/update', { id: g.id, repos: g.repos.filter((_, k) => k !== Number(d.repodel)) }, '已从卡片共用仓库移除「' + r.name + '」。已有卡片里的这个仓库不受影响')) this.renderGroupSettings()
       return
     }
     if (t.id === 'dpmArPick') return this.pickFolder()
     if (t.id === 'dpmArManualAdd') return this.addManualPath()
-    if (d.ardel !== undefined && this.ar) { this.ar.sel.splice(Number(d.ardel), 1); this.renderAddRepo(); return }
+    if (d.ardel !== undefined && this.ar) { this.ar.sel.splice(Number(d.ardel), 1); this.renderSel(); return }
+    if (d.arAll !== undefined) return this.arAddAllShared()
+    if (d.arJump) return this.arJump(d.arJump)
+    if (d.cardRepoAdd !== undefined) return this.openAddRepo('card')
+    if (d.cardRepoDel !== undefined) {
+      const c = this.sel ? this.card(this.sel) : undefined
+      const r = c?.repos?.[Number(d.cardRepoDel)]
+      if (!c || !r) return
+      const rest = (c.repos ?? []).filter((_, k) => k !== Number(d.cardRepoDel))
+      await this.act('card/repos', { id: c.id, repos: rest }, '已从这张卡片移除「' + r.name + '」。卡片组的共用仓库和其他卡片不受影响')
+      return
+    }
     if (t.id === 'dpmGroupDel') {
       const g = this.grp(this.editG ?? '')
       if (!g || !window.confirm('删除卡片组「' + g.name + '」？组里必须已经没有卡片。')) return
@@ -822,16 +1258,18 @@ export class BoardView {
     const t = e.target as HTMLInputElement
     if (t.id === 'dpmQ') { if ((e as InputEvent).isComposing) return; this.q = t.value.trim().toLowerCase(); this.render(); return }
     if (t.id === 'dpmAddIn') { this.addDraft = t.value; return }
+    if (t.id === 'dpmFpIn' && this.fp) { this.fp.text = t.value; clearTimeout(this.fpTimer); this.fpTimer = window.setTimeout(() => void this.fpCheck(), 250); return }
     if (t.id === 'dpmNoteIn') { const c = this.sel ? this.card(this.sel) : undefined; if (!c) return; this.noteEdit = { card: c.id, draft: t.value }; this.syncNoteBar(c, t.value); return }
+    if (t.id === 'dpmTyNew' && this.ty?.addErr) { this.ty.addErr = ''; t.classList.remove('bad'); t.removeAttribute('aria-invalid'); this.$('#dpmTyNewE').hidden = true; return }
     if (this.wl && t.closest('#dpmDlgWl')) {
       const w = this.wl
       const d = t.dataset
       if (d.wtext !== undefined) w.rows[Number(d.wtext)].text = t.value
-      if (d.wtnew !== undefined) w.rows[Number(d.wtnew)].tdraft = t.value
       if (d.wurl !== undefined) {
         const r = w.rows[Number(d.wurl)]
         r.url = t.value
-        if (r.err) { r.err = ''; t.classList.remove('bad'); t.removeAttribute('aria-invalid'); t.parentElement?.querySelector('.wl-err')?.remove() }
+        if (r.err) { r.err = ''; t.classList.remove('bad'); t.removeAttribute('aria-invalid'); t.parentElement?.querySelector(':scope > .wl-err')?.remove() }
+        this.wlDupAll()
         this.wlOkText()
       }
       return
@@ -839,7 +1277,7 @@ export class BoardView {
     if (t.id === 'dpmNameInput') { this.$<HTMLButtonElement>('#dpmNameOk').disabled = t.value.trim() === ''; return }
     if (t.id === 'dpmLkQ' && this.link) { this.link.q = t.value.trim().toLowerCase(); this.renderLink(); return }
     if (t.id === 'dpmLsQ' && this.ls) { if ((e as InputEvent).isComposing) return; this.ls.q = t.value; this.renderLinkSess(); return }
-    if (t.id === 'dpmArQ' && this.ar) { if ((e as InputEvent).isComposing) return; this.ar.q = t.value.trim().toLowerCase(); this.$('#dpmArList').innerHTML = this.arListHtml(); return }
+    if (t.id === 'dpmArQ' && this.ar) { if ((e as InputEvent).isComposing) return; this.ar.q = t.value.trim().toLowerCase(); this.$('#dpmArList').scrollTop = 0; this.arPaintList(); return }
     if (t.dataset.arname !== undefined && this.ar) { this.ar.sel[Number(t.dataset.arname)].name = t.value; this.arCheck(); return }
     if (t.dataset.arrole !== undefined && this.ar) { this.ar.sel[Number(t.dataset.arrole)].role = t.value; return }
   }
@@ -850,7 +1288,6 @@ export class BoardView {
     if (t.dataset.wtype !== undefined && this.wl) {
       const i = Number(t.dataset.wtype)
       const r = this.wl.rows[i]
-      if (t.value === '__new') { r.tnew = true; r.tdraft = ''; this.wlRender(); (this.root.querySelector('#dpmWtn' + i) as HTMLElement | null)?.focus(); return }
       r.type = t.value
       return
     }
@@ -859,24 +1296,20 @@ export class BoardView {
     if (t.dataset.stname !== undefined) return this.stEdit(() => undefined)
     if (t.dataset.ls !== undefined && this.ls) { const arch = !!t.closest('#dpmLsArch'); this.ls.sel.push(t.dataset.ls); this.renderLinkSess(); ((this.root.querySelector((arch ? '#dpmLsArch' : '#dpmLsActive') + ' [data-ls]') ?? this.root.querySelector('#dpmLsQ')) as HTMLElement | null)?.focus(); return }
     if (t.dataset.lsel !== undefined && this.ls) { this.ls.sel = this.ls.sel.filter((x) => x !== t.dataset.lsel); this.renderLinkSess(); ((this.root.querySelector('#dpmLsSel [data-lsel]') ?? this.root.querySelector('#dpmLsQ')) as HTMLElement | null)?.focus(); return }
-    if (t.dataset.ar !== undefined && this.ar) { if (t.checked) this.arAdd(t.dataset.ar); else this.ar.sel = this.ar.sel.filter((x) => x.path !== t.dataset.ar); this.renderAddRepo(); return }
+    if (t.dataset.ar !== undefined && this.ar) {
+      const p = t.dataset.ar
+      if (t.checked) { if (!this.arAdd(p)) t.checked = false } else this.ar.sel = this.ar.sel.filter((x) => x.path !== p)
+      this.renderSel(t.checked ? [p] : undefined)
+      return
+    }
     if ((t.dataset.rpname !== undefined || t.dataset.rprole !== undefined) && this.editG) return this.saveRepoField(t)
+    if (t.id === 'dpmGroupLf' && this.editG) { const v = t.value.trim().toLowerCase(); const g = this.grp(this.editG); if (g && v !== (g.lfProject ?? '')) { if (await this.act('group/update', { id: this.editG, lfProject: v }, v ? '落盘文件夹：~/.ai/projects/' + v + '/（第一次落盘时登记到 ~/.ai）' : '已清除落盘文件夹')) this.renderGroupSettings(); else t.value = g.lfProject ?? '' } return }
     if (t.id === 'dpmGroupName' && this.editG) { const v = t.value.trim(); if (v) await this.act('group/update', { id: this.editG, name: v }); this.renderGroupSettings() }
   }
 
   private async onSubmit(e: Event): Promise<void> {
     const f = e.target as HTMLFormElement
     if (f.dataset.addcard !== undefined) { e.preventDefault(); return this.submitCard() }
-    if (f.dataset.addfile !== undefined) {
-      e.preventDefault()
-      const c = this.sel ? this.card(this.sel) : undefined
-      const inp = this.$<HTMLInputElement>('#dpmFileIn')
-      const v = inp?.value.trim() ?? ''
-      if (!c || !v) return
-      if (!v.startsWith('/') && !v.startsWith('~/')) { this.host.toast('请输入绝对路径：' + v, 'err'); return }
-      if (await this.act('card/files-add', { id: c.id, paths: [v] }, '已添加相关文件')) (this.root.querySelector('#dpmFileIn') as HTMLInputElement | null)?.focus()
-      return
-    }
     if (f.dataset.addtask === undefined) return
     e.preventDefault()
     const c = this.sel ? this.card(this.sel) : undefined
@@ -900,13 +1333,22 @@ export class BoardView {
       if (c) await this.wlMove(c, i, e.key === 'ArrowUp' ? i - 1 : i + 1)
       return
     }
+    if (t.id === 'dpmFpIn' && !e.isComposing) {
+      const c = this.sel ? this.card(this.sel) : undefined
+      if (c && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.fpOpen(c, false); return }
+      // ⌘/Ctrl+Enter 添加（先等最新一次检测）
+      if (c && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); clearTimeout(this.fpTimer); await this.fpCheck(); await this.fpAdd(c); return }
+    }
+    if (this.td && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.tdStop(false); return }
+    if (this.ty && t.dataset?.tygrip !== undefined && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); const i = Number(t.dataset.tygrip); await this.typeMove(i, i + (e.key === 'ArrowUp' ? -1 : 1)); return }
+    if (this.ty && t.closest('#dpmDlgTy')) {
+      if (e.isComposing) return
+      if (t.id === 'dpmTyNew' && e.key === 'Enter') { e.preventDefault(); await this.typeAdd(); return }
+      if (t.id === 'dpmTyEd' && e.key === 'Enter') { e.preventDefault(); await this.typeSave(this.ty.edit); return }
+      if (t.id === 'dpmTyEd' && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); const i = this.ty.edit; this.ty.edit = -1; this.ty.err = ''; this.typesRender(); (this.root.querySelector('[data-ty-edit="' + i + '"]') as HTMLElement | null)?.focus(); return }
+      return
+    }
     if (this.wl && t.closest('#dpmDlgWl')) {
-      if (t.dataset.wtnew !== undefined) {
-        const k = Number(t.dataset.wtnew)
-        if (e.key === 'Enter') { e.preventDefault(); await this.wlAddType(k) }
-        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.wl.rows[k].tnew = false; this.wlRender(); (this.root.querySelector('#dpmWt' + k) as HTMLElement | null)?.focus() }
-        return
-      }
       if (e.key === 'Enter' && t.tagName === 'INPUT' && !e.isComposing) { e.preventDefault(); await this.wlSave() }
       return
     }
@@ -1142,6 +1584,7 @@ export class BoardView {
     if (id === 'dpmDlgRepo') { const a = this.ar; this.ar = null; if (ok && a && a.sel.length) await this.saveAddRepo(a); return }
     if (id === 'dpmDlgSt') this.editG = null
     if (id === 'dpmDlgWl') this.wl = null
+    if (id === 'dpmDlgTy') { this.ty = null; (this.root.querySelector('.detail [data-types]') as HTMLElement | null)?.focus({ preventScroll: true }) }
   }
   /** 批量添加：在「完整链接」里粘贴多行 → 自动拆成多条（沿用当前行的类型）。 */
   private onPaste(e: ClipboardEvent): void {
@@ -1186,8 +1629,12 @@ export class BoardView {
       + '<input class="fld" aria-label="阶段名 ' + (i + 1) + '" data-stname="' + i + '" value="' + esc(st.name) + '">'
       + '<button type="button" class="ib" data-stdel="' + i + '" aria-label="删除阶段 ' + esc(st.name) + '">' + ic('x') + '</button></div>').join('')
     this.$('#dpmStList').innerHTML = '<label class="lbl" for="dpmGroupName">组名</label><input class="fld" id="dpmGroupName" value="' + esc(g.name) + '">'
+      + '<label class="lbl" for="dpmGroupLf">落盘文件夹</label><div class="lf-fld"><span class="pre">~/.ai/projects/</span><input id="dpmGroupLf" value="' + esc(g.lfProject ?? '') + '" placeholder="还没设（第一次在这个组落盘时会请你确认）" spellcheck="false" autocomplete="off" maxlength="64"><span class="pre">/</span></div>'
+      + '<p class="meta mb">这个组新建、合并、迁移的落盘项目都放进这里；旧的落盘项目在下次落盘时自动迁过来（可在会话信息卡撤销）。改名不会搬已有文件。失焦即保存。</p>'
       + '<div class="lbl row" id="dpmStLinks">关联的落盘项目 · ' + g.links.length + '<span class="grow"></span><button type="button" class="btn ghost sm" data-link-group="' + esc(g.id) + '">' + ic('plus') + '关联</button></div>' + gl
-      + '<div class="lbl row">仓库 · ' + g.repos.length + '<span class="grow"></span><button type="button" class="btn ghost sm" id="dpmRepoAdd">' + ic('plus') + '添加</button></div>' + (repos ? repos + '<p class="meta">名称、角色改完离开输入框即保存；要换路径就移除后重新添加。</p>' : '<p class="meta">还没有挂载仓库。点「添加」从 dsh 已添加的工作区里选，或选一个文件夹；仓库会以软链接出现在项目区目录的 repos/' + esc(g.name) + '/ 下。</p>')
+      + '<div class="lbl row">卡片共用仓库 · ' + g.repos.length + '<span class="grow"></span><button type="button" class="btn ghost sm" id="dpmRepoAdd">' + ic('plus') + '添加卡片共用仓库</button></div>'
+      + '<p class="meta mb">在这个组里新建卡片时，会自动带上这些仓库。这里的改动只影响之后新建的卡片，组里已有的 ' + this.cardsOf(g.id) + ' 张卡片不变。</p>'
+      + (repos ? repos + '<p class="meta">名称、角色改完离开输入框即保存；要换路径就移除后重新添加。</p>' : '<p class="ar-empty">还没有卡片共用仓库。新建的卡片不会自动带仓库，可以在卡片详情里单独新增。</p>')
       + '<div class="lbl">阶段（点序号上移）</div>' + sts + '<button type="button" class="btn ghost sm" id="dpmStAdd">' + ic('plus') + '添加阶段</button><p class="meta">阶段下还有卡片时不能删除，先把卡片移走。</p>'
   }
   private readDrafts(): void {
@@ -1244,10 +1691,11 @@ export class BoardView {
   private sessIndex(): Map<string, SessionView> { const m = new Map<string, SessionView>(); for (const s of this.host.allSessions()) m.set(s.id, s); return m }
   private linkedHtml(c: Card, ro = false): string {
     const refs = (this.snap?.board.sessions ?? []).filter((s) => s.cardId === c.id)
+    const all = this.moreOf(c).sess
     if (!refs.length) return '<p class="meta">' + (ro ? '没有会话。' : '还没有会话。可以「以此卡片新建会话」，或关联已有会话。') + '</p>'
     const idx = this.sessIndex()
     const canRestore = this.snap?.caps?.unarchive !== false
-    return sortLinked(refs, idx).map((r) => {
+    return '<div id="dpmSessList">' + limitList(sortLinked(refs, idx), all).map((r) => {
       const v = idx.get(r.sessionId)
       const title = v?.title ?? r.title ?? '会话 ' + r.sessionId.slice(0, 8)
       const unl = ro ? '' : '<button type="button" class="ib sm unl tipbtn" data-unbind="' + esc(r.sessionId) + '" aria-label="解除关联 ' + esc(title) + '">' + ic('unlink') + '<span class="tip" aria-hidden="true">解除关联</span></button>'
@@ -1255,13 +1703,14 @@ export class BoardView {
       const name = v.archived
         ? '<span class="lname" title="已归档的会话不能打开，先「恢复活跃」">' + esc(title) + '</span>'
         : '<button type="button" class="lname" data-open-sess="' + esc(v.id) + '" title="打开会话：' + esc(title) + '">' + esc(title) + '</button>'
+      const sdel = !ro && !v.archived && v.blank && this.host.canDeleteSession() ? '<button type="button" class="ib sm sdel tipbtn" data-del-sess="' + esc(v.id) + '" aria-label="删除 ' + esc(title) + '">' + ic('trash') + '<span class="tip" aria-hidden="true">删除（还没有对话）</span></button>' : ''
       const sarc = ro || v.archived ? '' : '<button type="button" class="ib sm sarc tipbtn" data-archive-sess="' + esc(v.id) + '" aria-label="归档会话 ' + esc(title) + '">' + ic('archive') + '<span class="tip" aria-hidden="true">归档会话</span></button>'
       const restore = v.archived && !ro
         ? '<button type="button" class="btn ghost xs" data-restore="' + esc(v.id) + '"' + (canRestore && !this.restoring.has(v.id) ? '' : ' disabled') + ' title="' + (canRestore ? '恢复到工作区原来的位置' : '当前 DSH 没有恢复归档的能力（需要 dsh-manage-sessions）') + '">' + ic('restore') + (this.restoring.has(v.id) ? '恢复中…' : '恢复活跃') + '</button>'
         : ''
-      return '<div class="lsess' + (v.archived ? ' archived' : '') + '"><div class="l1">' + name + '<span class="acts">' + sarc + unl + '</span></div><div class="l2">'
-        + (v.archived ? '<span class="chip arch">已归档</span>' : '<span class="chip live">活跃</span>') + '<span class="sub2">' + esc(v.ws) + ' · ' + esc(ago(v.updatedAt)) + '</span>' + restore + '</div></div>'
-    }).join('')
+      return '<div class="lsess' + (v.archived ? ' archived' : '') + '"><div class="l1">' + name + '<span class="acts">' + sdel + sarc + unl + '</span></div><div class="l2">'
+        + (v.archived ? '<span class="chip arch">已归档</span>' : v.blank ? '<span class="chip">未开始</span>' : '<span class="chip live">活跃</span>') + '<span class="sub2">' + (v.forkOf ? '分叉自「' + esc(v.forkOf) + '」 · ' : '') + esc(v.ws) + ' · ' + esc(ago(v.updatedAt)) + '</span>' + restore + '</div></div>'
+    }).join('') + '</div>' + moreBtn('sess', all, refs.length, 'dpmSessList')
   }
   private openLinkSess(c: Card): void {
     this.ls = { card: c.id, q: '', sel: [], busy: false }
@@ -1370,57 +1819,162 @@ export class BoardView {
   }
 
   // ── 添加挂载仓库 ──
-  private openAddRepo(): void {
-    const g = this.grp(this.editG ?? '')
-    if (!g) return
-    this.ar = { g: g.id, q: '', sel: [], manual: false, busy: false }
+  private openAddRepo(mode: 'group' | 'card' = 'group'): void {
+    if (mode === 'group') {
+      const g = this.grp(this.editG ?? '')
+      if (!g) return
+      this.ar = { mode, id: g.id, q: '', sel: [], manual: false, busy: false }
+      this.$('#dpmArT').textContent = '添加卡片共用仓库'
+      this.$('#dpmArP').textContent = '之后在「' + g.name + '」里新建的卡片会自动带上这些仓库，已有的卡片不变。可以多选。'
+    } else {
+      const c = this.sel ? this.card(this.sel) : undefined
+      if (!c || c.archivedAt) return
+      this.ar = { mode, id: c.id, q: '', sel: [], manual: false, busy: false }
+      this.$('#dpmArT').textContent = '新增仓库'
+      this.$('#dpmArP').textContent = '只加到卡片「' + c.t + '」，不影响卡片组和其他卡片。可以多选。'
+    }
     this.$<HTMLInputElement>('#dpmArQ').value = ''
-    this.$('#dpmArP').textContent = '仓库会以软链接挂到「' + g.name + '」下，这个组里每张卡片的会话都能读写。可以多选。'
-    this.renderAddRepo()
     const d = this.$<HTMLDialogElement>('#dpmDlgRepo')
     d.returnValue = ''
     d.showModal()
+    this.$('#dpmArList').scrollTop = 0
+    this.$('#dpmArSel').scrollTop = 0
+    this.renderAddRepo()
     this.$<HTMLInputElement>('#dpmArQ').focus()
   }
-  private arMounted(path: string): boolean { const g = this.ar ? this.grp(this.ar.g) : undefined; return !!g && g.repos.some((r) => normPath(r.path) === normPath(path)) }
+  /** 弹窗目标当前的仓库清单。 */
+  private arRepos(): Array<{ name: string; role: string; path: string }> {
+    const a = this.ar
+    if (!a) return []
+    return a.mode === 'group' ? this.grp(a.id)?.repos ?? [] : this.card(a.id)?.repos ?? []
+  }
+  private arMounted(path: string): boolean { return this.arRepos().some((r) => normPath(r.path) === normPath(path)) }
+  private arWho(): string { const a = this.ar; return a?.mode === 'card' ? '这张卡片' : '本组的卡片共用仓库' }
   private arAdd(path: string): boolean {
     const a = this.ar
     if (!a) return false
-    if (this.arMounted(path)) { this.host.toast('「' + folderName(path) + '」已挂载在本组', 'err'); return false }
+    if (this.arMounted(path)) { this.host.toast('「' + folderName(path) + '」已在' + this.arWho() + '里', 'err'); return false }
     if (a.sel.some((x) => normPath(x.path) === normPath(path))) { this.host.toast('「' + folderName(path) + '」已在「已选」里', 'err'); return false }
-    a.sel.push({ path, name: folderName(path), role: '仓库' })
+    // 候选里带着历史上的名称 / 角色；没有就用文件夹名
+    const h = (this.snap?.board.repoHistory ?? []).find((x) => normPath(x.path) === normPath(path))
+    a.sel.push({ path, name: h?.name ?? folderName(path), role: h?.role ?? '仓库' })
     return true
   }
   private arErrs(): string[] {
     const a = this.ar
-    const g = a ? this.grp(a.g) : undefined
-    if (!a || !g) return []
+    if (!a) return []
+    const cur = this.arRepos()
     return a.sel.map((x, i) => {
       const n = x.name.replace(/\s+/g, ' ').trim()
       if (!n) return '名称不能为空'
       if (n.length > 120) return '名称超过 120 字'
-      if (g.repos.some((r) => r.name === n)) return '本组已有同名仓库「' + n + '」'
+      if (cur.some((r) => r.name === n)) return (a.mode === 'card' ? '这张卡片' : '卡片共用仓库里') + '已有同名仓库「' + n + '」'
       if (a.sel.slice(0, i).some((o) => o.name.replace(/\s+/g, ' ').trim() === n)) return '和上面的仓库重名，改一个名字'
       return ''
     })
   }
+  private arPk(r: { name: string; path: string; at?: string }): string {
+    const a = this.ar
+    if (!a) return ''
+    const m = this.arMounted(r.path)
+    const on = m || a.sel.some((x) => normPath(x.path) === normPath(r.path))
+    const tail = m ? '<span class="chip plain">已添加</span>' : r.at ? '<span class="when">' + esc(addedAgo(r.at)) + '</span>' : ''
+    return '<label class="pk' + (m ? ' lock' : '') + '"><input type="checkbox" data-ar="' + esc(r.path) + '"' + (on ? ' checked' : '') + (m ? ' disabled' : '') + '><span class="txt"><span class="nm">' + esc(r.name) + '</span><span class="mono" title="' + esc(r.path) + '">' + esc(r.path) + '</span></span>' + tail + '</label>'
+  }
+  /** 0.14 候选仓库 = 任意卡片组 / 卡片添加过的仓库（移除了也在），最近添加的在前；卡片模式把本组共用仓库单列一组。
+   *  0.15：每组一个 .ar-grp，组标题 sticky 吸顶（下一组标题把上一组顶走）；候选标题行的分组切换跟随滚动高亮。 */
   private arListHtml(): string {
     const a = this.ar
     if (!a) return ''
-    const all = this.host.workspaces()
-    const list = all.filter((w) => !a.q || (w.title + ' ' + w.path).toLowerCase().includes(a.q))
-    if (!all.length) return '<p class="ar-empty">dsh 里还没有添加过工作区。点「选择文件夹…」直接选一个。</p>'
-    return list.map((w) => {
-      const m = this.arMounted(w.path)
-      const on = m || a.sel.some((x) => normPath(x.path) === normPath(w.path))
-      return '<label class="pk' + (m ? ' lock' : '') + '"><input type="checkbox" data-ar="' + esc(w.path) + '"' + (on ? ' checked' : '') + (m ? ' disabled' : '') + '><span class="txt"><span class="nm">' + esc(w.title) + '</span><span class="mono">' + esc(w.path) + '</span></span>' + (m ? '<span class="chip plain">已挂载</span>' : '') + '</label>'
-    }).join('') || '<p class="meta">没有匹配的工作区</p>'
+    const hist = (this.snap?.board.repoHistory ?? []).slice().sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0))
+    const hit = (r: { name: string; path: string }): boolean => !a.q || (r.name + ' ' + r.path).toLowerCase().includes(a.q)
+    const block = (all: Array<{ name: string; path: string; at?: string }>, none: string, miss: string): string => (all.length ? (all.filter(hit).length ? '<div class="pk-list ar-list">' + all.filter(hit).map((r) => this.arPk(r)).join('') + '</div>' : '<p class="ar-empty">' + miss + '</p>') : '<p class="ar-empty">' + none + '</p>')
+    const head = (id: string, title: string, n: number, extra: string): string => '<div class="ar-sub" id="' + id + 'H"><button type="button" class="ar-jump" data-ar-jump="' + id + '" aria-label="回到「' + title + '」开头">' + title + ' · ' + n + '<svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>' + extra + '</div>'
+    if (a.mode === 'group') {
+      this.arSpy = []
+      this.arTotal = hist.length
+      return '<section class="ar-grp" id="dpmArG0" aria-labelledby="dpmArG0H">' + head('dpmArG0', '任意卡片组、卡片添加过的仓库', hist.filter(hit).length, '<span class="grow"></span><span class="meta tail">最近添加的在前</span>') + block(hist, '还没有添加过任何仓库。点「选择文件夹…」选一个。', '没有匹配的候选仓库') + '</section>'
+    }
+    const c = this.card(a.id)
+    const g = c ? this.grp(c.g) : undefined
+    if (!c || !g) return ''
+    const shared = g.repos.map((r) => ({ ...r, at: hist.find((h) => normPath(h.path) === normPath(r.path))?.at }))
+    const others = hist.filter((h) => !g.repos.some((r) => normPath(r.path) === normPath(h.path)))
+    const ns = shared.filter(hit).length
+    const no = others.filter(hit).length
+    this.arTotal = shared.length + others.length
+    this.arSpy = [{ id: 'dpmArG1', label: '本组共用 · ' + ns, n: ns }, { id: 'dpmArG2', label: '其他 · ' + no, n: no }]
+    return '<section class="ar-grp" id="dpmArG1" aria-labelledby="dpmArG1H">'
+      + head('dpmArG1', '本组共用仓库', ns, '<span class="meta tail">卡片组「' + esc(g.name) + '」</span><span class="grow"></span>' + (shared.length ? '<button type="button" class="btn ghost sm" data-ar-all>' + ic('plus') + '<span data-ar-all-t></span></button>' : ''))
+      + block(shared, '卡片组「' + esc(g.name) + '」还没有设置卡片共用仓库。', '没有匹配的本组共用仓库') + '</section>'
+      + '<section class="ar-grp" id="dpmArG2" aria-labelledby="dpmArG2H">'
+      + head('dpmArG2', '其他候选仓库', no, '<span class="grow"></span><span class="meta tail">最近添加的在前</span>')
+      + block(others, '没有其他候选仓库。', '没有匹配的候选仓库') + '</section>'
+  }
+  /** 分组切换（只在卡片模式、有两组时出现）；arTotal = 候选总数（标题旁显示）。 */
+  private arSpy: Array<{ id: string; label: string; n: number }> = []
+  private arTotal = 0
+  /** 候选列表整块重画（打开 / 搜索 / 保存后才调；勾选不调，滚动位置不动）。 */
+  private arPaintList(): void {
+    this.$('#dpmArList').innerHTML = this.arListHtml()
+    this.$('#dpmArCandN').textContent = '· ' + this.arTotal
+    const spy = this.$('#dpmArSpy')
+    spy.innerHTML = this.arSpy.map((s) => '<button type="button" data-ar-jump="' + s.id + '"' + (s.n ? '' : ' disabled') + '>' + s.label + '</button>').join('')
+    spy.hidden = !this.arSpy.length
+    this.arSyncChecks()
+    this.arStick()
+  }
+  /** 只同步勾选状态与「全部加入已选」按钮（不重画列表）。 */
+  private arSyncChecks(): void {
+    const a = this.ar
+    if (!a) return
+    this.root.querySelectorAll<HTMLInputElement>('#dpmArList input[data-ar]:not([disabled])').forEach((i) => { i.checked = a.sel.some((x) => normPath(x.path) === normPath(i.dataset.ar as string)) })
+    const b = this.root.querySelector('[data-ar-all]') as HTMLButtonElement | null
+    if (b) {
+      const n = this.arAddable().length
+      b.disabled = !n
+      ;(b.querySelector('[data-ar-all-t]') as HTMLElement).textContent = n ? '全部加入已选（' + n + '）' : '都已选上'
+    }
+  }
+  /** 本组共用仓库里还能加入「已选」的（没挂、没选）。 */
+  private arAddable(): Array<{ name: string; role: string; path: string }> {
+    const a = this.ar
+    const g = a?.mode === 'card' ? this.grp(this.card(a.id)?.g ?? '') : undefined
+    if (!a || !g) return []
+    return g.repos.filter((r) => !this.arMounted(r.path) && !a.sel.some((x) => normPath(x.path) === normPath(r.path)))
+  }
+  /** 吸顶状态 + 分组切换高亮（滚动事件 rAF 合并后调）。 */
+  private arStickRaf = 0
+  private arStick(): void {
+    const box = this.root.querySelector('#dpmArList') as HTMLElement | null
+    if (!box) return
+    const top = box.getBoundingClientRect().top
+    const gs = Array.from(box.querySelectorAll<HTMLElement>('.ar-grp'))
+    for (const g of gs) {
+      const h = g.querySelector('.ar-sub') as HTMLElement
+      const r = g.getBoundingClientRect(), hr = h.getBoundingClientRect()
+      h.classList.toggle('stuck', box.scrollTop > 0 && Math.abs(hr.top - top) < 1 && r.bottom > hr.bottom + 1)
+    }
+    let on = gs[0]
+    for (const g of gs) if (g.getBoundingClientRect().top <= top + 1) on = g
+    if (box.scrollTop > 0 && box.scrollTop + box.clientHeight >= box.scrollHeight - 2) on = gs[gs.length - 1]
+    this.root.querySelectorAll<HTMLElement>('#dpmArSpy [data-ar-jump]').forEach((b) => b.setAttribute('aria-current', String(!!on && b.dataset.arJump === on.id)))
+  }
+  /** 跳到分组开头（平滑；尊重减少动态效果），首行闪一下、焦点给首个可勾选项。 */
+  private arJump(id: string): void {
+    const box = this.$('#dpmArList')
+    const g = this.root.querySelector('#' + id) as HTMLElement | null
+    if (!g) return
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
+    box.scrollTo({ top: g.offsetTop - (box.firstElementChild as HTMLElement).offsetTop, behavior: reduce ? 'auto' : 'smooth' })
+    const first = (g.querySelector('.pk:not(.lock)') ?? g.querySelector('.pk')) as HTMLElement | null
+    if (first) { first.classList.remove('flash'); void first.offsetWidth; first.classList.add('flash'); (first.querySelector('input:not([disabled])') as HTMLElement | null)?.focus({ preventScroll: true }) }
   }
   private arSelHtml(): string {
     const a = this.ar
     if (!a) return ''
-    return a.sel.map((x, i) => '<div class="rp-row"><input class="fld" data-arname="' + i + '" aria-label="仓库名 ' + (i + 1) + '" aria-describedby="dpmArE' + i + '" maxlength="120" value="' + esc(x.name) + '"><input class="fld" data-arrole="' + i + '" aria-label="仓库角色 ' + (i + 1) + '" maxlength="40" value="' + esc(x.role) + '"><span class="mono" title="' + esc(x.path) + '">' + esc(x.path) + '</span><button type="button" class="ib" data-ardel="' + i + '" aria-label="从已选移除 ' + esc(x.name || x.path) + '">' + ic('x') + '</button><p class="rp-err" id="dpmArE' + i + '" hidden></p></div>').join('')
-      || '<p class="ar-empty">还没有选择仓库。勾选上面的工作区，或点「选择文件夹…」。</p>'
+    return a.sel.map((x, i) => '<div class="rp-row" data-path="' + esc(x.path) + '"><input class="fld" data-arname="' + i + '" aria-label="仓库名 ' + (i + 1) + '" aria-describedby="dpmArE' + i + '" maxlength="120" value="' + esc(x.name) + '"><input class="fld" data-arrole="' + i + '" aria-label="仓库角色 ' + (i + 1) + '" maxlength="40" value="' + esc(x.role) + '"><span class="mono" title="' + esc(x.path) + '">' + esc(x.path) + '</span><button type="button" class="ib" data-ardel="' + i + '" aria-label="从已选移除 ' + esc(x.name || x.path) + '">' + ic('x') + '</button><p class="rp-err" id="dpmArE' + i + '" hidden></p></div>').join('')
+      || '<p class="ar-empty">还没有选择仓库。勾选上面的候选仓库，或点「选择文件夹…」。</p>'
   }
   private arCheck(): void {
     const a = this.ar
@@ -1433,14 +1987,27 @@ export class BoardView {
       if (p) { p.textContent = m; p.hidden = !m }
     })
     this.$('#dpmArSelN').textContent = String(a.sel.length)
-    this.$('#dpmArCount').textContent = a.sel.length ? '将挂载 ' + a.sel.length + ' 个仓库' : ''
+    this.$('#dpmArCount').textContent = a.sel.length ? '将添加 ' + a.sel.length + ' 个仓库' : ''
     this.$<HTMLButtonElement>('#dpmArOk').disabled = a.busy || !a.sel.length || errs.some(Boolean)
   }
+  /** 整个弹窗重画（打开 / 保存失败重开）；勾选与「已选」增删只走 renderSel。 */
   private renderAddRepo(): void {
     const a = this.ar
     if (!a) return
-    this.$('#dpmArList').innerHTML = this.arListHtml()
+    this.arPaintList()
+    this.renderSel()
+  }
+  /** 0.15：只重画「已选」+ 同步候选勾选（候选列表不重画 → 滚动位置不动）。fresh = 新加入的路径（滚到可见、闪一下）。 */
+  private renderSel(fresh?: string[]): void {
+    const a = this.ar
+    if (!a) return
     this.$('#dpmArSel').innerHTML = this.arSelHtml()
+    this.arSyncChecks()
+    if (fresh?.length) {
+      const rows = Array.from(this.root.querySelectorAll<HTMLElement>('#dpmArSel .rp-row')).filter((r) => fresh.some((p) => normPath(p) === normPath(r.dataset.path ?? '')))
+      rows.forEach((r) => r.classList.add('fresh'))
+      rows[rows.length - 1]?.scrollIntoView({ block: 'nearest' })
+    }
     this.$('#dpmArManual').hidden = !a.manual
     this.$<HTMLButtonElement>('#dpmArPick').hidden = a.manual
     this.arCheck()
@@ -1460,18 +2027,31 @@ export class BoardView {
       this.host.toast('当前 dsh 打不开系统选文件夹对话框，请直接输入文件夹的绝对路径', 'err')
     } finally { a.busy = false }
     if (this.ar !== a) return
-    if (path && this.arAdd(path)) { this.renderAddRepo(); this.focusLastSel() } else this.arCheck()
+    if (path && this.arAdd(path)) { this.renderSel([path]); this.focusLastSel() } else this.arCheck()
   }
   private addManualPath(): void {
     const inp = this.root.querySelector('#dpmArPath') as HTMLInputElement | null
     const v = inp?.value.trim() ?? ''
     if (!inp || !v) return
     if (!v.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(v)) { this.host.toast('请输入绝对路径：' + v, 'err'); return }
-    if (this.arAdd(v)) { inp.value = ''; this.renderAddRepo(); this.focusLastSel() }
+    if (this.arAdd(v)) { inp.value = ''; this.renderSel([v]); this.focusLastSel() }
+  }
+  /** 0.15「全部加入已选」：只把本组共用仓库（没挂、没选的）放进「已选」，用户还能取消勾选 / 改名，点保存才写入。 */
+  private arAddAllShared(): void {
+    const a = this.ar
+    if (!a || a.busy) return
+    const add = this.arAddable()
+    if (!add.length) return
+    for (const r of add) { const h = (this.snap?.board.repoHistory ?? []).find((x) => normPath(x.path) === normPath(r.path)); a.sel.push({ path: r.path, name: r.name || h?.name || folderName(r.path), role: r.role || h?.role || '仓库' }) }
+    this.renderSel(add.map((r) => r.path))
+    this.host.toast('已把 ' + add.length + ' 个本组共用仓库放进「已选」，确认后点保存')
   }
   private async saveAddRepo(a: NonNullable<BoardView['ar']>): Promise<void> {
     const repos = a.sel.map((x) => ({ name: x.name.replace(/\s+/g, ' ').trim(), role: x.role.trim() || '仓库', path: x.path }))
-    const ok = await this.act('group/repos-add', { id: a.g, repos }, '已挂载 ' + repos.length + ' 个仓库，项目区软链接已更新')
+    const n = a.mode === 'group' ? this.cardsOf(a.id) : 0
+    const ok = a.mode === 'group'
+      ? await this.act('group/repos-add', { id: a.id, repos }, '已添加 ' + repos.length + ' 个卡片共用仓库。组里已有的 ' + n + ' 张卡片不变，之后新建的卡片会自动带上')
+      : await this.act('card/repos-add', { id: a.id, repos }, '已给这张卡片添加 ' + repos.length + ' 个仓库，卡片组和其他卡片不变')
     if (!ok) {
       // 服务端拒绝（例如别处刚挂了同名仓库）：重开弹窗保留已选，让用户改名后再存
       this.ar = { ...a, busy: false }
@@ -1481,9 +2061,12 @@ export class BoardView {
       d.showModal()
       return
     }
-    if (this.$<HTMLDialogElement>('#dpmDlgSt').open) this.renderGroupSettings()
-    ;(this.root.querySelector('#dpmRepoAdd') as HTMLElement | null)?.focus()
+    if (a.mode === 'group') {
+      if (this.$<HTMLDialogElement>('#dpmDlgSt').open) this.renderGroupSettings()
+      ;(this.root.querySelector('#dpmRepoAdd') as HTMLElement | null)?.focus()
+    } else (this.root.querySelector('.detail [data-card-repo-add]') as HTMLElement | null)?.focus()
   }
+  private cardsOf(gId: string): number { return this.cards.filter((c) => c.g === gId).length }
 
   // ── 关联落盘项目 ──
   private openLink(kind: 'group' | 'card', id: string): void {
@@ -1558,17 +2141,21 @@ const DIALOGS = String.raw`
   <div class="dlg-b" id="dpmStList"></div>
   <div class="dlg-f"><button class="btn ghost danger" type="button" id="dpmGroupDel">删除卡片组</button><span class="sp"></span><button class="btn primary" type="submit" value="ok">完成</button></div>
 </form></dialog>
-<dialog class="dpm-dialog wide" id="dpmDlgRepo" aria-labelledby="dpmArT"><form method="dialog">
-  <div class="dlg-h"><h2 id="dpmArT">添加挂载仓库</h2><p id="dpmArP"></p></div>
-  <div class="dlg-b">
-    <div class="ar-top"><label class="sr-only" for="dpmArQ">搜索 dsh 已添加的工作区</label><input class="fld" id="dpmArQ" placeholder="搜索 dsh 已添加的工作区" autocomplete="off"><button type="button" class="btn" id="dpmArPick">%FOLDER%选择文件夹…</button></div>
+<dialog class="dpm-dialog wide ar-dlg" id="dpmDlgRepo" aria-labelledby="dpmArT"><form method="dialog">
+  <div class="ar-head">
+    <h2 id="dpmArT">添加挂载仓库</h2><p id="dpmArP"></p>
+    <div class="ar-top"><label class="sr-only" for="dpmArQ">搜索候选仓库</label><input class="fld" id="dpmArQ" placeholder="搜索候选仓库（名称或路径）" autocomplete="off"><button type="button" class="btn" id="dpmArPick">%FOLDER%选择文件夹…</button></div>
     <div class="ar-manual" id="dpmArManual" hidden><label class="sr-only" for="dpmArPath">仓库文件夹的绝对路径</label><input class="fld" id="dpmArPath" placeholder="输入文件夹绝对路径，例如 ~/code/repo 展开后的完整路径" autocomplete="off"><button type="button" class="btn" id="dpmArManualAdd">添加</button></div>
-    <div class="ar-sec">dsh 已添加的工作区</div>
-    <div class="pk-list ar-list" id="dpmArList"></div>
-    <div class="ar-sec"><span>已选 · <span id="dpmArSelN">0</span></span><span class="grow"></span><span class="meta">默认名称是文件夹名，可以改</span></div>
-    <div id="dpmArSel"></div>
   </div>
-  <div class="dlg-f"><span class="meta" id="dpmArCount"></span><span class="sp"></span><button class="btn" type="button" data-dlg-cancel>取消</button><button class="btn primary" id="dpmArOk" type="submit" value="ok" disabled>保存</button></div>
+  <section class="ar-cand" aria-labelledby="dpmArCandH">
+    <div class="ar-h"><span id="dpmArCandH">候选仓库</span><span class="meta" id="dpmArCandN"></span><span class="grow"></span><nav class="ar-spy" id="dpmArSpy" aria-label="跳到分组"></nav></div>
+    <div class="ar-scroll" id="dpmArList"></div>
+  </section>
+  <section class="ar-picked" aria-labelledby="dpmArSelH">
+    <div class="ar-h"><span id="dpmArSelH">已选 · <span id="dpmArSelN">0</span></span><span class="grow"></span><span class="meta">默认名称是文件夹名，可以改</span></div>
+    <div class="ar-scroll" id="dpmArSel"></div>
+    <div class="dlg-f"><span class="meta" id="dpmArCount"></span><span class="sp"></span><button class="btn" type="button" data-dlg-cancel>取消</button><button class="btn primary" id="dpmArOk" type="submit" value="ok" disabled>保存</button></div>
+  </section>
 </form></dialog>
 <dialog class="dpm-dialog xwide" id="dpmDlgSess" aria-labelledby="dpmLsT"><form method="dialog">
   <div class="dlg-h"><h2 id="dpmLsT">关联已有会话</h2><p id="dpmLsP"></p></div>
@@ -1597,6 +2184,13 @@ const DIALOGS = String.raw`
   <div class="dlg-h"><h2 id="dpmWlT">添加相关链接</h2><p id="dpmWlP"></p></div>
   <div class="dlg-b"><div class="wl-rows" id="dpmWlRows"></div><button type="button" class="btn ghost sm wl-add" id="dpmWlMore" data-wl-more>%PLUS%再加一条</button></div>
   <div class="dlg-f"><span class="meta" id="dpmWlCount"></span><span class="sp"></span><button class="btn" type="button" data-dlg-cancel>取消</button><button class="btn primary" type="button" id="dpmWlOk">保存</button></div>
+</form></dialog>
+<dialog class="dpm-dialog" id="dpmDlgTy" aria-labelledby="dpmTyT"><form method="dialog">
+  <div class="dlg-h"><h2 id="dpmTyT">管理类型</h2><p>所有卡片的「相关链接」共用这些类型。拖动左侧把手调整顺序，添加 / 编辑链接时的类型下拉按这个顺序显示；改名后，用这个类型的链接会一起改过来。</p></div>
+  <div class="dlg-b"><ul class="ty-list" id="dpmTyList" aria-label="已有类型"></ul>
+    <div class="ty-add"><label class="sr-only" for="dpmTyNew">新类型名称</label><input class="fld" id="dpmTyNew" placeholder="新类型名称，比如「设计稿」" maxlength="20" autocomplete="off"><button type="button" class="btn" data-ty-add>%PLUS%新增</button></div>
+    <p class="wl-err" id="dpmTyNewE" hidden></p></div>
+  <div class="dlg-f"><span class="sp"></span><button class="btn" type="submit" value="">完成</button></div>
 </form></dialog>
 <dialog class="dpm-dialog" id="dpmDlgImp" aria-labelledby="dpmImT"><form method="dialog">
   <div class="dlg-h"><h2 id="dpmImT">导入落盘项目</h2><p>每个选中的落盘项目生成一张卡片并自动关联。只读扫描 ~/.ai，不会修改 STATE。</p></div>

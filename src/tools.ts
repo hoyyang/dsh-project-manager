@@ -6,12 +6,14 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import * as M from './model.js'
 import type { BoardStore } from './store.js'
 import type { StateCatalog } from './states.js'
+import { Landfill, LandfillError } from './landfill.js'
+import type { MergeEngine } from './merge.js'
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue }
 type JsonObj = Record<string, JsonValue>
 type ToolCtx = { agent?: { id?: string; session?: { id?: string } } }
 
-export const TOOL_NAMES = ['card_manage', 'repo_manage', 'phase_move', 'task_manage'] as const
+export const TOOL_NAMES = ['card_manage', 'repo_manage', 'phase_move', 'task_manage', 'landfill'] as const
 
 const toJson = (x: unknown): JsonObj => JSON.parse(JSON.stringify(x ?? null)) as JsonObj
 const err = (e: unknown): JsonObj => e instanceof M.BoardError ? { ok: false, code: e.code, error: e.message } : { ok: false, code: 'TOOL_FAILED', error: e instanceof Error ? e.message : String(e) }
@@ -76,7 +78,7 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
 
   host.register(defineTool({
     name: 'repo_manage',
-    description: 'Set the repositories mounted on a card group (full list replace). repos: [{name, path (absolute), role?}]. Repos appear under the project hub as repos/<group>/<name>/.',
+    description: 'Set a card group\'s shared repositories (full list replace). New cards copy them at creation; existing cards are unaffected. repos: [{name, path (absolute), role?}].',
     parameters: {
       group: { type: 'string', required: true, description: 'group id' },
       repos: { type: 'array', required: true, description: '[{name,path,role?}]' },
@@ -86,7 +88,7 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
       const a = args as Record<string, unknown>
       const c = exec as unknown as ToolCtx
       try {
-        const g = await store.mutate((b) => { const g = M.group(b, String(a.group ?? '')); g.repos = M.cleanRepos(a.repos); return g }, () => [{ at: new Date().toISOString(), actor: actor(c), kind: 'repo_manage', group: String(a.group) }])
+        const g = await store.mutate((b) => { const g = M.group(b, String(a.group ?? '')); const next = M.cleanRepos(a.repos); M.noteRepos(b, next.filter((r) => !g.repos.some((o) => o.path === r.path))); g.repos = next; return g }, () => [{ at: new Date().toISOString(), actor: actor(c), kind: 'repo_manage', group: String(a.group) }])
         return toJson({ ok: true, repos: g.repos })
       } catch (e) { return err(e) }
     },
@@ -145,5 +147,67 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
       } catch (e) { return err(e) }
     },
     timeoutMs: 10_000,
+  }))
+}
+
+/** 0.16：落盘项目读写（经 ~/.ai/tools/ai-memory）。失败返回 {ok:false,code,error,inbox?}，冲突不重试。 */
+export function registerLandfillTool(host: { register(t: unknown): void }, lf: Landfill, mg?: MergeEngine): void {
+  host.register(defineTool({
+    name: 'landfill',
+    description: 'Landfill-project memory (~/.ai, via ai-memory). One project = one folder (STATE.md + plans/ notes/ evidence/). slug defaults to the card\'s STATE. op: recall{slug?,file?,offset?} (chunked; complete:true = STATE + all [必读] docs read; follow next / pending) | persist{slug?,content,drop?,newState?} (full rewritten STATE; needs full read; every folder file indexed) | write{slug?,file,content} (text doc in the folder) | retire{slug?,file} (move to inbox/retired) | import{slug?,src,dest?} (local file → evidence/) | append{file,text} | list | register{projectId,path,aliases?,confirm} (ask the user first) | validate | merge{action:plan|note|commit, id, slug?, content?, drop?} (only after the user clicked 合并 in the session card).',
+    parameters: {
+      op: { type: 'string', required: true, description: 'recall|persist|write|retire|import|append|list|register|validate|merge' },
+      action: { type: 'string', description: 'merge: plan|note|commit' },
+      id: { type: 'string', description: 'merge id' },
+      slug: { type: 'string', description: 'STATE slug or <project>/<slug> (default: card\'s STATE)' },
+      project: { type: 'string', description: 'project id' },
+      content: { type: 'string', description: 'full STATE markdown for persist' },
+      expectedHash: { type: 'string', description: 'hash from recall (optional)' },
+      offset: { type: 'number', description: 'recall: chunk start (from next)' },
+      drop: { type: 'array', description: 'persist: commits/paths/versions/IDs removed on purpose (substring)' },
+      file: { type: 'string', description: 'recall/write/retire: path inside the project folder; append: path under memory/' },
+      src: { type: 'string', description: 'import: absolute local file' },
+      dest: { type: 'string', description: 'import: evidence/<name>' },
+      newState: { type: 'boolean', description: 'persist: allow a second STATE for this card' },
+      text: { type: 'string', description: 'append: text' },
+      projectId: { type: 'string', description: 'register' },
+      path: { type: 'string', description: 'register: absolute project root' },
+      aliases: { type: 'array', description: 'register' },
+      confirm: { type: 'boolean', description: 'register: user agreed' },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v) }] },
+    execute: async (args, exec) => {
+      const a = args as Record<string, unknown>
+      const c = exec as unknown as ToolCtx & { agent?: { session?: { header?: { cwd?: string } } } }
+      const s = { id: c.agent?.session?.id, cwd: c.agent?.session?.header?.cwd }
+      const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+      const need = (v: unknown, f: string): string => { const x = str(v); if (!x) throw new LandfillError('BAD_ARG', '缺少参数 ' + f); return x }
+      try {
+        switch (a.op) {
+          case 'recall': return toJson({ ok: true, ...(await lf.recall(s, str(a.slug), str(a.project), a.offset === undefined ? 0 : Number(a.offset), undefined, str(a.file))) })
+          case 'persist': return toJson({ ok: true, ...(await lf.persist(s, str(a.slug), a.content, str(a.project), str(a.expectedHash), a.drop ?? [], a.newState === true)) })
+          case 'write': return toJson({ ok: true, ...(await lf.write(s, str(a.slug), a.file, a.content, str(a.project), str(a.expectedHash))) })
+          case 'retire': return toJson({ ok: true, ...(await lf.retire(s, str(a.slug), a.file, str(a.project))) })
+          case 'import': return toJson({ ok: true, ...(await lf.importFile(s, str(a.slug), a.src, a.dest, str(a.project))) })
+          case 'append': return toJson({ ok: true, ...(await lf.append(s, a.file, a.text, str(a.project))) })
+          case 'list': return toJson({ ok: true, ...lf.list(str(a.project)) })
+          case 'register': return toJson({ ok: true, ...(await lf.register(a.projectId, a.path, a.aliases, a.confirm)) })
+          case 'validate': return toJson({ ok: true, ...(await lf.validate()) })
+          case 'merge': {
+            if (!mg) throw new LandfillError('MERGE_OFF', '合并不可用')
+            const id = need(a.id, 'id')
+            if (a.action === 'plan') return toJson({ ok: true, ...mg.plan(s.id, id) })
+            if (a.action === 'note') return toJson({ ok: true, ...mg.note(s.id, id, need(a.slug, 'slug'), a.content) })
+            if (a.action === 'commit') return toJson({ ok: true, ...(await mg.commit(s.id, id, a.content, a.drop ?? [])) })
+            throw new LandfillError('BAD_ARG', 'merge 的 action 是 plan | note | commit')
+          }
+          default: throw new LandfillError('BAD_OP', '未知 op ' + String(a.op))
+        }
+      } catch (e) {
+        if (e instanceof LandfillError) return toJson({ ok: false, code: e.code, error: e.message, ...e.extra })
+        return err(e)
+      }
+    },
+    timeoutMs: 60_000,
   }))
 }

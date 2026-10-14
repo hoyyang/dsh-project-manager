@@ -1,0 +1,1244 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+
+# Bumped when commands are added; dsh-project-manager compares it to decide whether to offer an upgrade.
+VERSION = 3
+
+ROOT = Path(os.environ.get("AI_MEMORY_ROOT", str(Path.home() / ".ai"))).expanduser().resolve()
+REGISTRY = ROOT / "projects" / "REGISTRY.md"
+CANONICAL_MODE = 0o444
+WRITE_MODE = 0o644
+DEFAULT_ROOT = (Path.home() / ".ai").resolve()
+
+class AiMemoryError(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def now_iso():
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def sha256_path(path: Path):
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_text(text: str):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def assert_inside(child: Path, parent: Path):
+    child_real = child.resolve(strict=False)
+    parent_real = parent.resolve(strict=False)
+    if parent_real != child_real and parent_real not in child_real.parents:
+        raise AiMemoryError(f"path escapes memory root: {child}", 2)
+
+
+def reject_symlink_target(path: Path):
+    for candidate in [path, *path.parents]:
+        if candidate == ROOT.parent:
+            break
+        if candidate.exists() and candidate.is_symlink():
+            raise AiMemoryError(f"refuse to write through symlink: {candidate}", 2)
+
+
+@contextmanager
+def file_lock(lock_path: Path, timeout_seconds: float = 10.0):
+    ensure_dir(lock_path.parent)
+    with lock_path.open("a+") as fh:
+        import time
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise AiMemoryError(f"lock timeout: {lock_path}", 75)
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def parse_registry():
+    if not REGISTRY.exists():
+        return []
+    rows = []
+    for line in REGISTRY.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or stripped.startswith("|---") or "project_id" in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 6:
+            continue
+        rows.append({
+            "project_id": cells[0],
+            "canonical_path": cells[1],
+            "git_remote": cells[2],
+            "aliases": [a.strip() for a in cells[3].split(",") if a.strip()],
+            "memory_path": cells[4],
+            "policy": cells[5],
+        })
+    return rows
+
+
+def expand_memory_path(value: str):
+    if value.startswith("~/"):
+        return Path.home() / value[2:]
+    return Path(value).expanduser()
+
+
+def registry_memory_path_for(project_id: str):
+    path = ROOT / "projects" / project_id / "memory"
+    if ROOT == DEFAULT_ROOT:
+        return f"~/.ai/projects/{project_id}/memory"
+    return str(path)
+
+
+def git_remote_for(cwd: Path):
+    try:
+        out = subprocess.check_output(["git", "-C", str(cwd), "remote", "get-url", "origin"], stderr=subprocess.DEVNULL, text=True).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def git_toplevel_for(cwd: Path):
+    try:
+        out = subprocess.check_output(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL, text=True).strip()
+        return Path(out).resolve(strict=False) if out else None
+    except Exception:
+        return None
+
+
+def normalize_path(path: Path):
+    return path.expanduser().resolve(strict=False)
+
+
+def is_relative_to(path: Path, parent: Path):
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def path_stays_under(path: Path, parent: Path):
+    path_real = path.resolve(strict=False)
+    parent_real = parent.resolve(strict=False)
+    return path_real == parent_real or is_relative_to(path_real, parent_real)
+
+
+def write_candidate(cwd: Path, reason: str):
+    ensure_dir(ROOT / "tmp" / "unregistered-projects")
+    slug = hashlib.sha256(str(cwd).encode("utf-8")).hexdigest()[:12]
+    candidate = ROOT / "tmp" / "unregistered-projects" / f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{slug}.md"
+    remote = git_remote_for(cwd) or ""
+    candidate.write_text(
+        "# Unregistered Project Candidate\n\n"
+        f"- cwd: `{cwd}`\n"
+        f"- git_remote: `{remote}`\n"
+        f"- reason: {reason}\n"
+        f"- created_at: {now_iso()}\n\n"
+        "Suggested registry row:\n\n"
+        "```markdown\n"
+        f"| TODO-project-id | {cwd} | {remote} | TODO-alias | ~/.ai/projects/TODO-project-id/memory | personal |\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    return candidate
+
+
+def resolve_project(cwd=None, project=None, allow_candidate=True):
+    rows = parse_registry()
+    if project:
+        for row in rows:
+            if row["project_id"] == project or project in row["aliases"]:
+                return row
+        raise AiMemoryError(f"unknown project: {project}", 2)
+    cwd_path = normalize_path(Path(cwd or os.getcwd()))
+    path_matches = []
+    for row in rows:
+        canonical = normalize_path(Path(row["canonical_path"]))
+        if is_relative_to(cwd_path, canonical):
+            path_matches.append((len(str(canonical)), row))
+    if path_matches:
+        return sorted(path_matches, reverse=True, key=lambda item: item[0])[0][1]
+
+    cwd_toplevel = git_toplevel_for(cwd_path)
+    for row in rows:
+        canonical = normalize_path(Path(row["canonical_path"]))
+        registered_toplevel = git_toplevel_for(canonical)
+        if cwd_toplevel and registered_toplevel and cwd_toplevel == registered_toplevel and is_relative_to(cwd_path, registered_toplevel) and not is_relative_to(cwd_path, canonical):
+            candidate = write_candidate(cwd_path, "under registered monorepo parent but not registered subproject") if allow_candidate else None
+            suffix = f"; candidate={candidate}" if candidate else ""
+            raise AiMemoryError(f"unregistered monorepo subproject: {cwd_path}{suffix}", 4)
+
+    remote = git_remote_for(cwd_path)
+    if remote:
+        remote_matches = [row for row in rows if row["git_remote"] == remote]
+        if len(remote_matches) == 1:
+            return remote_matches[0]
+        if len(remote_matches) > 1:
+            raise AiMemoryError(f"ambiguous git remote for {cwd_path}: {remote}", 4)
+
+    candidate = write_candidate(cwd_path, "no registry match") if allow_candidate else None
+    suffix = f"; candidate={candidate}" if candidate else ""
+    raise AiMemoryError(f"unregistered project: {cwd_path}{suffix}", 4)
+
+
+def project_root(row):
+    return (ROOT / "projects" / row["project_id"]).resolve(strict=False)
+
+
+def memory_root(row):
+    return expand_memory_path(row["memory_path"]).resolve(strict=False)
+
+
+def ensure_project_skeleton(row):
+    project = row["project_id"]
+    project_dir = project_root(row)
+    mem_dir = memory_root(row)
+    if not path_stays_under(mem_dir, project_dir):
+        raise AiMemoryError(f"memory path must stay under project dir for {project}: {mem_dir}", 2)
+    for directory in [
+        mem_dir / "designs",
+        project_dir / "inbox" / "conflicts",
+        project_dir / "inbox" / "out-of-band",
+        project_dir / "inbox" / "claude",
+        project_dir / "inbox" / "codex",
+        project_dir / "inbox" / "kiro",
+        project_dir / "locks",
+        project_dir / "log",
+        project_dir / "adapters",
+    ]:
+        ensure_dir(directory)
+    project_md = project_dir / "PROJECT.md"
+    if not project_md.exists():
+        atomic_replace_text(project_md, f"# {project}\n\nCanonical project memory for `{row['canonical_path']}`.\n")
+    index_md = mem_dir / "MEMORY_INDEX.md"
+    if not index_md.exists():
+        atomic_replace_text(index_md, "# Memory Index\n\n- `DECISIONS.md` — append-only decisions and notes.\n- `designs/<slug>/STATE.md` — active design state.\n")
+    journal = project_dir / "log" / "events.jsonl"
+    if not journal.exists():
+        atomic_replace_text(journal, "")
+    return project_dir, mem_dir
+
+
+def lock_name_for(relative_file: str):
+    safe = relative_file.replace("/", "__").replace("..", "__")
+    return f"{safe}.lock"
+
+
+def last_hash_for(project: str, file_rel: str):
+    events = ROOT / "projects" / project / "log" / "events.jsonl"
+    if not events.exists():
+        return None
+    last = None
+    with events.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("file") != file_rel:
+                continue
+            if event.get("op") in {"retire", "delete"}:
+                last = None
+            elif event.get("hash_after"):
+                last = event.get("hash_after")
+    return last
+
+
+
+def journal_expected_hashes(project: str):
+    events = ROOT / "projects" / project / "log" / "events.jsonl"
+    expected = {}
+    if not events.exists():
+        return expected
+    with events.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            file_rel = event.get("file")
+            if not file_rel:
+                continue
+            if event.get("op") in {"retire", "delete"}:
+                expected[file_rel] = None
+            elif event.get("hash_after"):
+                expected[file_rel] = event["hash_after"]
+    return expected
+
+
+def global_journal_expected_hash(file_rel: str):
+    events = ROOT / "log" / "events.jsonl"
+    if not events.exists():
+        return None
+    last = None
+    with events.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("file") != file_rel:
+                continue
+            if event.get("op") in {"retire", "delete"}:
+                last = None
+            elif event.get("hash_after"):
+                last = event.get("hash_after")
+    return last
+
+
+def global_journal_expected_hashes():
+    events = ROOT / "log" / "events.jsonl"
+    expected = {}
+    if not events.exists():
+        return expected
+    with events.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            file_rel = event.get("file")
+            if not file_rel:
+                continue
+            if event.get("op") in {"retire", "delete"}:
+                expected[file_rel] = None
+            elif event.get("hash_after"):
+                expected[file_rel] = event.get("hash_after")
+    return expected
+
+def append_journal(project: str, event: dict):
+    log_dir = ROOT / "projects" / project / "log"
+    ensure_dir(log_dir)
+    journal = log_dir / "events.jsonl"
+    lock = ROOT / "projects" / project / "locks" / "journal.lock"
+    with file_lock(lock):
+        if journal.exists():
+            os.chmod(journal, WRITE_MODE)
+        with journal.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(journal, CANONICAL_MODE)
+
+
+def copy_out_of_band(project: str, target: Path, file_rel: str, expected: str, actual: str):
+    inbox = ROOT / "projects" / project / "inbox" / "out-of-band"
+    ensure_dir(inbox)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe = file_rel.replace("/", "__")
+    dest = inbox / f"{stamp}-{safe}"
+    if target.exists():
+        shutil.copy2(target, dest)
+    append_journal(project, {
+        "ts": now_iso(),
+        "writer": "ai-memory",
+        "op": "out-of-band",
+        "project": project,
+        "file": file_rel,
+        "expected_hash": expected,
+        "actual_hash": actual,
+        "copy": str(dest),
+    })
+    raise AiMemoryError(f"out-of-band change detected for {file_rel}; copied to {dest}", 5)
+
+
+def write_conflict(project: str, file_rel: str, attempted_text: str, expected: str, actual: str):
+    inbox = ROOT / "projects" / project / "inbox" / "conflicts"
+    ensure_dir(inbox)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe = file_rel.replace("/", "__")
+    dest = inbox / f"{stamp}-{safe}.conflict.md"
+    dest.write_text(
+        "# Memory Write Conflict\n\n"
+        f"- file: `{file_rel}`\n"
+        f"- expected_hash: `{expected}`\n"
+        f"- actual_hash: `{actual}`\n"
+        f"- created_at: {now_iso()}\n\n"
+        "## Attempted Content\n\n"
+        f"{attempted_text}\n",
+        encoding="utf-8",
+    )
+    append_journal(project, {
+        "ts": now_iso(),
+        "writer": "ai-memory",
+        "op": "conflict",
+        "project": project,
+        "file": file_rel,
+        "expected_hash": expected,
+        "actual_hash": actual,
+        "conflict": str(dest),
+    })
+    raise AiMemoryError(f"hash conflict for {file_rel}; wrote {dest}", 6)
+
+
+def atomic_replace_text(path: Path, text: str):
+    ensure_dir(path.parent)
+    fd = None
+    tmp_name = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = None
+            fh.write(text)
+            fh.flush()
+            os.fchmod(fh.fileno(), CANONICAL_MODE)
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+        tmp_name = None
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        os.chmod(path, CANONICAL_MODE)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp_name and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def mutate_file(row, file_rel: str, new_text_builder, op: str, expected_hash=None, attempted_text=""):
+    project = row["project_id"]
+    project_dir, _mem_dir = ensure_project_skeleton(row)
+    target = (project_dir / file_rel).resolve(strict=False)
+    assert_inside(target, project_dir)
+    reject_symlink_target(target)
+    ensure_dir(project_dir / "locks")
+    lock_path = project_dir / "locks" / lock_name_for(file_rel)
+    with file_lock(project_dir / "locks" / "project.lock"):
+        with file_lock(lock_path):
+            current_hash = sha256_path(target)
+            journal_hash = last_hash_for(project, file_rel)
+            if journal_hash and current_hash != journal_hash:
+                copy_out_of_band(project, target, file_rel, journal_hash, current_hash or "<missing>")
+            normalized_expected = None if expected_hash is None else expected_hash.strip()
+            if normalized_expected == "absent":
+                if current_hash is not None:
+                    write_conflict(project, file_rel, attempted_text, "absent", current_hash)
+            elif normalized_expected and current_hash != normalized_expected:
+                write_conflict(project, file_rel, attempted_text, expected_hash, current_hash or "<missing>")
+            current = target.read_text(encoding="utf-8") if target.exists() else ""
+            new_text = new_text_builder(current)
+            atomic_replace_text(target, new_text)
+            hash_after = sha256_path(target)
+            append_journal(project, {
+                "ts": now_iso(),
+                "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+                "op": op,
+                "project": project,
+                "file": file_rel,
+                "hash_before": current_hash,
+                "hash_after": hash_after,
+                "source": "cli",
+            })
+            return target, hash_after
+
+
+def mutate_global_file(file_rel: str, new_text_builder, op: str, expected_hash=None, attempted_text=""):
+    file_rel = file_rel.strip("/")
+    if not file_rel.startswith("memory/"):
+        file_rel = f"memory/{file_rel}"
+    target = (ROOT / file_rel).resolve(strict=False)
+    assert_inside(target, ROOT)
+    reject_symlink_target(target)
+    lock_path = ROOT / "locks" / lock_name_for(file_rel)
+    with file_lock(ROOT / "locks" / "global.lock"):
+        with file_lock(lock_path):
+            current_hash = sha256_path(target)
+            journal_hash = global_journal_expected_hash(file_rel)
+            if journal_hash and current_hash != journal_hash:
+                inbox = ROOT / "inbox" / "out-of-band"
+                ensure_dir(inbox)
+                stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                safe = file_rel.replace("/", "__")
+                dest = inbox / f"{stamp}-{safe}"
+                if target.exists():
+                    shutil.copy2(target, dest)
+                append_global_journal({
+                    "ts": now_iso(),
+                    "writer": "ai-memory",
+                    "op": "out-of-band",
+                    "project": None,
+                    "file": file_rel,
+                    "expected_hash": journal_hash,
+                    "actual_hash": current_hash or "<missing>",
+                    "copy": str(dest),
+                })
+                raise AiMemoryError(f"out-of-band change detected for {file_rel}; copied to {dest}", 5)
+            normalized_expected = None if expected_hash is None else expected_hash.strip()
+            if normalized_expected == "absent":
+                if current_hash is not None:
+                    write_global_conflict(file_rel, attempted_text, "absent", current_hash)
+            elif normalized_expected and current_hash != normalized_expected:
+                write_global_conflict(file_rel, attempted_text, normalized_expected, current_hash or "<missing>")
+            current = target.read_text(encoding="utf-8") if target.exists() else ""
+            new_text = new_text_builder(current)
+            atomic_replace_text(target, new_text)
+            hash_after = sha256_path(target)
+            append_global_journal({
+                "ts": now_iso(),
+                "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+                "op": op,
+                "project": None,
+                "file": file_rel,
+                "hash_before": current_hash,
+                "hash_after": hash_after,
+                "source": "cli",
+            })
+            return target, hash_after
+
+
+def retire_file(row, file_rel: str, expected_hash=None):
+    project = row["project_id"]
+    project_dir, _mem_dir = ensure_project_skeleton(row)
+    target = (project_dir / file_rel).resolve(strict=False)
+    assert_inside(target, project_dir)
+    reject_symlink_target(target)
+    lock_path = project_dir / "locks" / lock_name_for(file_rel)
+    with file_lock(project_dir / "locks" / "project.lock"):
+        with file_lock(lock_path):
+            current_hash = sha256_path(target)
+            if current_hash is None:
+                raise AiMemoryError(f"cannot retire missing file: {file_rel}", 2)
+            journal_hash = last_hash_for(project, file_rel)
+            if journal_hash and current_hash != journal_hash:
+                copy_out_of_band(project, target, file_rel, journal_hash, current_hash)
+            normalized_expected = None if expected_hash is None else expected_hash.strip()
+            if normalized_expected and current_hash != normalized_expected:
+                write_conflict(project, file_rel, "", normalized_expected, current_hash)
+            inbox = project_dir / "inbox" / "retired"
+            ensure_dir(inbox)
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            safe = file_rel.replace("/", "__")
+            retired = inbox / f"{stamp}-{safe}"
+            os.chmod(target, WRITE_MODE)
+            os.replace(target, retired)
+            os.chmod(retired, CANONICAL_MODE)
+            append_journal(project, {
+                "ts": now_iso(),
+                "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+                "op": "retire",
+                "project": project,
+                "file": file_rel,
+                "hash_before": current_hash,
+                "hash_after": None,
+                "retired": str(retired),
+                "source": "cli",
+            })
+            return retired, current_hash
+
+
+def retire_global_file(file_rel: str, expected_hash=None):
+    file_rel = file_rel.strip("/")
+    if not file_rel.startswith("memory/"):
+        file_rel = f"memory/{file_rel}"
+    target = (ROOT / file_rel).resolve(strict=False)
+    assert_inside(target, ROOT)
+    reject_symlink_target(target)
+    lock_path = ROOT / "locks" / lock_name_for(file_rel)
+    with file_lock(ROOT / "locks" / "global.lock"):
+        with file_lock(lock_path):
+            current_hash = sha256_path(target)
+            if current_hash is None:
+                raise AiMemoryError(f"cannot retire missing file: {file_rel}", 2)
+            journal_hash = global_journal_expected_hash(file_rel)
+            if journal_hash and current_hash != journal_hash:
+                inbox = ROOT / "inbox" / "out-of-band"
+                ensure_dir(inbox)
+                stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                safe = file_rel.replace("/", "__")
+                dest = inbox / f"{stamp}-{safe}"
+                shutil.copy2(target, dest)
+                append_global_journal({
+                    "ts": now_iso(),
+                    "writer": "ai-memory",
+                    "op": "out-of-band",
+                    "project": None,
+                    "file": file_rel,
+                    "expected_hash": journal_hash,
+                    "actual_hash": current_hash,
+                    "copy": str(dest),
+                })
+                raise AiMemoryError(f"out-of-band change detected for {file_rel}; copied to {dest}", 5)
+            normalized_expected = None if expected_hash is None else expected_hash.strip()
+            if normalized_expected and current_hash != normalized_expected:
+                write_global_conflict(file_rel, "", normalized_expected, current_hash)
+            inbox = ROOT / "inbox" / "retired"
+            ensure_dir(inbox)
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            safe = file_rel.replace("/", "__")
+            retired = inbox / f"{stamp}-{safe}"
+            os.chmod(target, WRITE_MODE)
+            os.replace(target, retired)
+            os.chmod(retired, CANONICAL_MODE)
+            append_global_journal({
+                "ts": now_iso(),
+                "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+                "op": "retire",
+                "project": None,
+                "file": file_rel,
+                "hash_before": current_hash,
+                "hash_after": None,
+                "retired": str(retired),
+                "source": "cli",
+            })
+            return retired, current_hash
+
+
+def write_global_conflict(file_rel: str, attempted_text: str, expected: str, actual: str):
+    inbox = ROOT / "inbox" / "conflicts"
+    ensure_dir(inbox)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe = file_rel.replace("/", "__")
+    dest = inbox / f"{stamp}-{safe}.conflict.md"
+    dest.write_text(
+        "# Global Memory Write Conflict\n\n"
+        f"- file: `{file_rel}`\n"
+        f"- expected_hash: `{expected}`\n"
+        f"- actual_hash: `{actual}`\n"
+        f"- created_at: {now_iso()}\n\n"
+        "## Attempted Content\n\n"
+        f"{attempted_text}\n",
+        encoding="utf-8",
+    )
+    append_global_journal({
+        "ts": now_iso(),
+        "writer": "ai-memory",
+        "op": "conflict",
+        "project": None,
+        "file": file_rel,
+        "expected_hash": expected,
+        "actual_hash": actual,
+        "conflict": str(dest),
+    })
+    raise AiMemoryError(f"hash conflict for {file_rel}; wrote {dest}", 6)
+
+
+def cmd_path(args):
+    row = resolve_project(cwd=args.cwd, allow_candidate=args.emit_candidate)
+    print(json.dumps({
+        "project_id": row["project_id"],
+        "memory_path": str(memory_root(row)),
+        "canonical_path": row["canonical_path"],
+    }, ensure_ascii=False, sort_keys=True))
+
+
+def read_payload(use_stdin: bool, text: str | None, command_name: str):
+    if text is not None:
+        return text
+    if use_stdin:
+        return sys.stdin.read()
+    raise AiMemoryError(f"{command_name} requires explicit --stdin or --text", 2)
+
+
+def cmd_append(args):
+    incoming = read_payload(args.stdin, args.text, "append")
+    file_rel = args.file.strip("/")
+    block = incoming.rstrip() + "\n"
+    def builder(current):
+        prefix = current
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        if prefix and not prefix.endswith("\n\n"):
+            prefix += "\n"
+        return prefix + block
+    if args.global_memory:
+        target, h = mutate_global_file(file_rel, builder, "append", args.expected_hash, block)
+    else:
+        row = resolve_project(project=args.project, cwd=args.cwd)
+        if not file_rel.startswith("memory/"):
+            file_rel = f"memory/{file_rel}"
+        target, h = mutate_file(row, file_rel, builder, "append", args.expected_hash, block)
+    print(json.dumps({"file": str(target), "hash_after": h}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_write(args):
+    incoming = read_payload(args.stdin, args.text, "write")
+    file_rel = args.file.strip("/")
+    text = incoming.rstrip() + "\n"
+    expected_hash = args.expected_hash
+    if args.global_memory:
+        if not file_rel.startswith("memory/"):
+            file_rel = f"memory/{file_rel}"
+        target = (ROOT / file_rel).resolve(strict=False)
+        current_hash = sha256_path(target)
+        if expected_hash is None:
+            if current_hash is None:
+                expected_hash = "absent"
+            else:
+                raise AiMemoryError(
+                    f"write requires --expected-hash for existing file {file_rel}; current_hash={current_hash}",
+                    8,
+                )
+        target, h = mutate_global_file(file_rel, lambda _current: text, "write", expected_hash, text)
+    else:
+        row = resolve_project(project=args.project, cwd=args.cwd)
+        if not file_rel.startswith("memory/"):
+            file_rel = f"memory/{file_rel}"
+        project_dir, _mem_dir = ensure_project_skeleton(row)
+        target = (project_dir / file_rel).resolve(strict=False)
+        current_hash = sha256_path(target)
+        if expected_hash is None:
+            if current_hash is None:
+                expected_hash = "absent"
+            else:
+                raise AiMemoryError(
+                    f"write requires --expected-hash for existing file {file_rel}; current_hash={current_hash}",
+                    8,
+                )
+        target, h = mutate_file(row, file_rel, lambda _current: text, "write", expected_hash, text)
+    print(json.dumps({"file": str(target), "hash_after": h}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_update_state(args):
+    row = resolve_project(project=args.project, cwd=args.cwd)
+    slug = args.slug.strip("/")
+    file_rel = f"memory/designs/{slug}/STATE.md"
+    project_dir, _mem_dir = ensure_project_skeleton(row)
+    target = (project_dir / file_rel).resolve(strict=False)
+    current_hash = sha256_path(target)
+    if args.expected_hash is None:
+        if current_hash is None:
+            args.expected_hash = "absent"
+        else:
+            raise AiMemoryError(
+                f"update-state requires --expected-hash for existing file {file_rel}; current_hash={current_hash}",
+                8,
+            )
+    incoming = read_payload(args.stdin, args.text, "update-state")
+    text = incoming.rstrip() + "\n"
+    target, h = mutate_file(row, file_rel, lambda _current: text, "update-state", args.expected_hash, text)
+    print(json.dumps({"file": str(target), "hash_after": h}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_version(_args):
+    print(json.dumps({"version": VERSION}, sort_keys=True))
+
+
+def cmd_import(args):
+    """Copy a local file (text or binary) into a project's memory under the same locks + journal as write."""
+    src = Path(args.src).expanduser()
+    if not src.is_file():
+        raise AiMemoryError(f"import source is not a file: {src}", 2)
+    file_rel = args.file.strip("/")
+    if not file_rel.startswith("memory/"):
+        file_rel = f"memory/{file_rel}"
+    row = resolve_project(project=args.project, cwd=args.cwd)
+    project = row["project_id"]
+    project_dir, _mem_dir = ensure_project_skeleton(row)
+    target = (project_dir / file_rel).resolve(strict=False)
+    assert_inside(target, project_dir)
+    reject_symlink_target(target)
+    ensure_dir(project_dir / "locks")
+    with file_lock(project_dir / "locks" / "project.lock"):
+        with file_lock(project_dir / "locks" / lock_name_for(file_rel)):
+            if target.exists():
+                raise AiMemoryError(f"import target already exists: {file_rel}", 6)
+            ensure_dir(target.parent)
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+            try:
+                with os.fdopen(fd, "wb") as out, src.open("rb") as inp:
+                    shutil.copyfileobj(inp, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.chmod(tmp_name, CANONICAL_MODE)
+                os.replace(tmp_name, target)
+                tmp_name = None
+            finally:
+                if tmp_name and os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            hash_after = sha256_path(target)
+            append_journal(project, {
+                "ts": now_iso(),
+                "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+                "op": "import",
+                "project": project,
+                "file": file_rel,
+                "hash_before": None,
+                "hash_after": hash_after,
+                "source": str(src),
+            })
+    print(json.dumps({"file": str(target), "hash_after": hash_after}, ensure_ascii=False, sort_keys=True))
+
+
+def _designs_dir(project_dir: Path, rel: str):
+    rel = rel.strip("/")
+    if not rel.startswith("memory/designs/") or rel.count("/") != 2 or ".." in rel.split("/"):
+        raise AiMemoryError(f"--dir must be memory/designs/<slug>: {rel}", 2)
+    target = (project_dir / rel).resolve(strict=False)
+    assert_inside(target, project_dir / "memory" / "designs")
+    reject_symlink_target(target)
+    return rel, target
+
+
+def _retired_dir(project_dir: Path, rel: str):
+    rel = rel.strip("/")
+    parts = rel.split("/")
+    if not rel or ".." in parts or any(not p or p.startswith(".") for p in parts):
+        raise AiMemoryError(f"bad retired path: {rel}", 2)
+    base = project_dir / "inbox" / "retired"
+    target = (base / rel).resolve(strict=False)
+    if target == base.resolve(strict=False):
+        raise AiMemoryError("refuse to touch inbox/retired itself", 2)
+    assert_inside(target, base)
+    reject_symlink_target(target)
+    return target
+
+
+def _files_under(root: Path):
+    out = []
+    for dirpath, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            p = Path(dirpath) / name
+            if not p.is_symlink():
+                out.append(p)
+    return sorted(out)
+
+
+def cmd_retire_dir(args):
+    """Move a whole memory/designs/<slug>/ folder to inbox/retired/<dest>/<slug>/ (merge sources; restorable)."""
+    row = resolve_project(project=args.project, cwd=args.cwd)
+    project = row["project_id"]
+    project_dir, _mem = ensure_project_skeleton(row)
+    rel, src = _designs_dir(project_dir, args.dir)
+    slug = rel.split("/")[-1]
+    dest = _retired_dir(project_dir, args.dest.strip("/") + "/" + slug)
+    with file_lock(project_dir / "locks" / "project.lock"):
+        if not src.is_dir():
+            raise AiMemoryError(f"no such folder: {rel}", 2)
+        if dest.exists():
+            raise AiMemoryError(f"retired target already exists: {dest}", 6)
+        state = src / "STATE.md"
+        if args.expected_hash and sha256_path(state) != args.expected_hash.strip():
+            raise AiMemoryError(f"STATE changed since it was read: {rel}/STATE.md expected {args.expected_hash.strip()} actual {sha256_path(state)}", 6)
+        files = [(p, p.relative_to(project_dir).as_posix(), sha256_path(p)) for p in _files_under(src)]
+        for _p, frel, h in files:
+            journal_hash = last_hash_for(project, frel)
+            if journal_hash and journal_hash != h:
+                raise AiMemoryError(f"out-of-band change detected for {frel}; not moved", 5)
+        ensure_dir(dest.parent)
+        os.replace(src, dest)
+        for p, frel, h in files:
+            append_journal(project, {"ts": now_iso(), "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"), "op": "retire", "project": project, "file": frel, "hash_before": h, "hash_after": None, "retired": str(dest / p.relative_to(src)), "source": "cli"})
+    print(json.dumps({"retired": str(dest), "files": len(files)}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_restore_dir(args):
+    """Move inbox/retired/<from>/ back to memory/designs/<slug>/ (undo a merge). Target must not exist."""
+    row = resolve_project(project=args.project, cwd=args.cwd)
+    project = row["project_id"]
+    project_dir, _mem = ensure_project_skeleton(row)
+    rel, dest = _designs_dir(project_dir, args.dir)
+    src = _retired_dir(project_dir, args.src)
+    with file_lock(project_dir / "locks" / "project.lock"):
+        if not src.is_dir():
+            raise AiMemoryError(f"no such retired folder: {src}", 2)
+        if dest.exists():
+            raise AiMemoryError(f"restore target already exists: {rel}", 6)
+        ensure_dir(dest.parent)
+        os.replace(src, dest)
+        files = _files_under(dest)
+        for p in files:
+            append_journal(project, {"ts": now_iso(), "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"), "op": "restore", "project": project, "file": p.relative_to(project_dir).as_posix(), "hash_before": None, "hash_after": sha256_path(p), "restored_from": str(src / p.relative_to(dest)), "source": "cli"})
+    print(json.dumps({"restored": str(dest), "files": len(files)}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_purge_retired(args):
+    """Permanently delete a folder under inbox/retired/ (only there)."""
+    row = resolve_project(project=args.project, cwd=args.cwd)
+    project = row["project_id"]
+    project_dir, _mem = ensure_project_skeleton(row)
+    target = _retired_dir(project_dir, args.path)
+    with file_lock(project_dir / "locks" / "project.lock"):
+        if not target.exists():
+            print(json.dumps({"purged": str(target), "files": 0, "existed": False}, ensure_ascii=False, sort_keys=True))
+            return
+        files = _files_under(target) if target.is_dir() else [target]
+        for dirpath, dirs, names in os.walk(target):
+            os.chmod(dirpath, 0o755)
+            for n in names:
+                q = Path(dirpath) / n
+                if not q.is_symlink():
+                    os.chmod(q, WRITE_MODE)
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        append_journal(project, {"ts": now_iso(), "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"), "op": "purge", "project": project, "file": None, "path": str(target), "files": len(files), "source": "cli"})
+    print(json.dumps({"purged": str(target), "files": len(files), "existed": True}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_hash(args):
+    file_rel = args.file.strip("/")
+    if not file_rel.startswith("memory/"):
+        file_rel = f"memory/{file_rel}"
+    if args.global_memory:
+        base = ROOT
+    else:
+        row = resolve_project(project=args.project, cwd=args.cwd, allow_candidate=args.emit_candidate)
+        base = project_root(row)
+    target = (base / file_rel).resolve(strict=False)
+    assert_inside(target, base)
+    reject_symlink_target(target)
+    current_hash = sha256_path(target)
+    print(json.dumps({"file": str(target), "hash": current_hash, "exists": current_hash is not None}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_retire(args):
+    file_rel = args.file.strip("/")
+    if args.global_memory:
+        retired, retired_hash = retire_global_file(file_rel, args.expected_hash)
+    else:
+        row = resolve_project(project=args.project, cwd=args.cwd)
+        if not file_rel.startswith("memory/"):
+            file_rel = f"memory/{file_rel}"
+        retired, retired_hash = retire_file(row, file_rel, args.expected_hash)
+    print(json.dumps({"retired": str(retired), "hash_before": retired_hash}, ensure_ascii=False, sort_keys=True))
+
+
+
+def append_global_journal(event: dict):
+    log_dir = ROOT / "log"
+    ensure_dir(log_dir)
+    journal = log_dir / "events.jsonl"
+    lock = ROOT / "locks" / "global-journal.lock"
+    with file_lock(lock):
+        if journal.exists():
+            os.chmod(journal, WRITE_MODE)
+        with journal.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(journal, CANONICAL_MODE)
+
+def cmd_register(args):
+    ensure_dir(REGISTRY.parent)
+    lock = ROOT / "locks" / "registry.lock"
+    ensure_dir(lock.parent)
+    memory_path_value = registry_memory_path_for(args.project_id)
+    row = f"| {args.project_id} | {args.canonical_path} | {args.git_remote or ''} | {args.aliases or ''} | {memory_path_value} | {args.policy} |\n"
+    with file_lock(lock):
+        if REGISTRY.exists():
+            content = REGISTRY.read_text(encoding="utf-8")
+        else:
+            content = "# Project Registry\n\n| project_id | canonical_path | git_remote | aliases | memory_path | policy |\n|---|---|---|---|---|---|\n"
+        if f"| {args.project_id} |" in content:
+            raise AiMemoryError(f"project already registered: {args.project_id}", 2)
+        before = sha256_text(content)
+        new_content = content.rstrip() + "\n" + row
+        atomic_replace_text(REGISTRY, new_content)
+        after = sha256_path(REGISTRY)
+        ensure_project_skeleton({
+            "project_id": args.project_id,
+            "canonical_path": args.canonical_path,
+            "git_remote": args.git_remote or "",
+            "aliases": [a.strip() for a in (args.aliases or "").split(",") if a.strip()],
+            "memory_path": memory_path_value,
+            "policy": args.policy,
+        })
+        append_global_journal({
+            "ts": now_iso(),
+            "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+            "op": "register",
+            "project": args.project_id,
+            "file": "projects/REGISTRY.md",
+            "hash_before": before,
+            "hash_after": after,
+            "source": "cli",
+        })
+    print(str(REGISTRY))
+
+
+def cmd_aliases(args):
+    requested = [value.strip() for value in args.add_aliases.split(",") if value.strip()]
+    if not requested:
+        raise AiMemoryError("aliases requires at least one --add-aliases value", 2)
+    for alias in requested:
+        if any(character in alias for character in ("|", ",", "\n", "\r")):
+            raise AiMemoryError(f"invalid project alias: {alias!r}", 2)
+
+    lock = ROOT / "locks" / "registry.lock"
+    ensure_dir(lock.parent)
+    with file_lock(lock):
+        if not REGISTRY.exists():
+            raise AiMemoryError("project registry does not exist", 2)
+        content = REGISTRY.read_text(encoding="utf-8")
+        current_hash = sha256_text(content)
+        journal_hash = global_journal_expected_hash("projects/REGISTRY.md")
+        if journal_hash and current_hash != journal_hash:
+            raise AiMemoryError(
+                f"out-of-band registry change detected: expected {journal_hash}, actual {current_hash}",
+                5,
+            )
+        if current_hash != args.expected_hash.strip():
+            raise AiMemoryError(
+                f"registry CAS mismatch: expected {args.expected_hash.strip()}, actual {current_hash}",
+                6,
+            )
+
+        rows = parse_registry()
+        target = next((row for row in rows if row["project_id"] == args.project_id), None)
+        if target is None:
+            raise AiMemoryError(f"unknown project: {args.project_id}", 2)
+        for alias in requested:
+            for row in rows:
+                if row["project_id"] == args.project_id:
+                    continue
+                if alias == row["project_id"] or alias in row["aliases"]:
+                    raise AiMemoryError(
+                        f"project alias already belongs to {row['project_id']}: {alias}",
+                        2,
+                    )
+
+        merged = list(target["aliases"])
+        for alias in requested:
+            if alias != args.project_id and alias not in merged:
+                merged.append(alias)
+        lines = content.splitlines()
+        replaced = False
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("|") or stripped.startswith("|---") or "project_id" in stripped:
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) >= 6 and cells[0] == args.project_id:
+                cells[3] = ",".join(merged)
+                lines[index] = "| " + " | ".join(cells[:6]) + " |"
+                replaced = True
+                break
+        if not replaced:
+            raise AiMemoryError(f"registry row disappeared for project: {args.project_id}", 5)
+
+        new_content = "\n".join(lines).rstrip() + "\n"
+        atomic_replace_text(REGISTRY, new_content)
+        hash_after = sha256_path(REGISTRY)
+        append_global_journal({
+            "ts": now_iso(),
+            "writer": os.environ.get("AI_MEMORY_WRITER", "ai-memory"),
+            "op": "update-project-aliases",
+            "project": args.project_id,
+            "file": "projects/REGISTRY.md",
+            "hash_before": current_hash,
+            "hash_after": hash_after,
+            "source": "cli",
+            "aliases_added": [alias for alias in requested if alias not in target["aliases"]],
+        })
+    print(json.dumps({
+        "file": str(REGISTRY),
+        "project_id": args.project_id,
+        "aliases": merged,
+        "hash_after": hash_after,
+    }, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_validate(args):
+    rows = parse_registry()
+    problems = []
+    registry_expected_hash = global_journal_expected_hash("projects/REGISTRY.md")
+    registry_actual_hash = sha256_path(REGISTRY)
+    if registry_expected_hash and registry_actual_hash != registry_expected_hash:
+        problems.append(
+            f"registry hash mismatch: expected {registry_expected_hash}, actual {registry_actual_hash or '<missing>'}"
+        )
+    for file_rel, expected_hash in global_journal_expected_hashes().items():
+        if file_rel.startswith("projects/"):
+            continue
+        target = ROOT / file_rel
+        actual_hash = sha256_path(target)
+        if expected_hash is None:
+            if actual_hash is not None:
+                problems.append(f"retired global file still exists for {file_rel}: actual {actual_hash}")
+        elif actual_hash != expected_hash:
+            problems.append(f"global hash mismatch for {file_rel}: expected {expected_hash}, actual {actual_hash or '<missing>'}")
+    seen = set()
+    for row in rows:
+        pid = row["project_id"]
+        if pid in seen:
+            problems.append(f"duplicate project_id: {pid}")
+        seen.add(pid)
+        mem = memory_root(row)
+        if not path_stays_under(mem, ROOT):
+            problems.append(f"memory outside ~/.ai for {pid}: {mem}")
+        project_dir = project_root(row)
+        for file_rel, expected_hash in journal_expected_hashes(pid).items():
+            target = project_dir / file_rel
+            actual_hash = sha256_path(target)
+            if expected_hash is None:
+                if actual_hash is not None:
+                    problems.append(f"retired file still exists for {pid}:{file_rel}: actual {actual_hash}")
+            elif actual_hash != expected_hash:
+                problems.append(f"hash mismatch for {pid}:{file_rel}: expected {expected_hash}, actual {actual_hash or '<missing>'}")
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        raise AiMemoryError("validation failed", 7)
+    print(json.dumps({"ok": True, "projects": [row["project_id"] for row in rows]}, ensure_ascii=False, sort_keys=True))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="ai-memory")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("path")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--emit-candidate", action="store_true", help="write an unregistered-project candidate on miss")
+    p.set_defaults(func=cmd_path)
+
+    p = sub.add_parser("hash")
+    p.add_argument("file")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--emit-candidate", action="store_true", help="write an unregistered-project candidate on miss")
+    p.add_argument("--global", dest="global_memory", action="store_true", help="hash under ~/.ai/memory instead of a project")
+    p.set_defaults(func=cmd_hash)
+
+    p = sub.add_parser("append")
+    p.add_argument("file", nargs="?", default=None)
+    p.add_argument("--file", dest="file_opt")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--text")
+    p.add_argument("--expected-hash")
+    p.add_argument("--global", dest="global_memory", action="store_true", help="write under ~/.ai/memory instead of a project")
+    p.set_defaults(func=lambda args: (setattr(args, "file", args.file_opt or args.file), cmd_append(args))[1])
+
+    p = sub.add_parser("write")
+    p.add_argument("file", nargs="?", default=None)
+    p.add_argument("--file", dest="file_opt")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--text")
+    p.add_argument("--expected-hash")
+    p.add_argument("--global", dest="global_memory", action="store_true", help="write under ~/.ai/memory instead of a project")
+    p.set_defaults(func=lambda args: (setattr(args, "file", args.file_opt or args.file), cmd_write(args))[1])
+
+    p = sub.add_parser("update-state")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--slug", required=True)
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--text")
+    p.add_argument("--expected-hash")
+    p.set_defaults(func=cmd_update_state)
+
+    p = sub.add_parser("retire")
+    p.add_argument("file", nargs="?", default=None)
+    p.add_argument("--file", dest="file_opt")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--expected-hash")
+    p.add_argument("--global", dest="global_memory", action="store_true", help="retire under ~/.ai/memory instead of a project")
+    p.set_defaults(func=lambda args: (setattr(args, "file", args.file_opt or args.file), cmd_retire(args))[1])
+
+    p = sub.add_parser("register")
+    p.add_argument("--project-id", required=True)
+    p.add_argument("--canonical-path", required=True)
+    p.add_argument("--git-remote", default="")
+    p.add_argument("--aliases", default="")
+    p.add_argument("--policy", default="personal")
+    p.set_defaults(func=cmd_register)
+
+    p = sub.add_parser("aliases")
+    p.add_argument("--project-id", required=True)
+    p.add_argument("--add-aliases", required=True)
+    p.add_argument("--expected-hash", required=True)
+    p.set_defaults(func=cmd_aliases)
+
+    p = sub.add_parser("version")
+    p.set_defaults(func=cmd_version)
+
+    p = sub.add_parser("import")
+    p.add_argument("--file", required=True)
+    p.add_argument("--src", required=True)
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("retire-dir")
+    p.add_argument("--dir", required=True, help="memory/designs/<slug>")
+    p.add_argument("--dest", required=True, help="folder name under inbox/retired/")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--expected-hash", help="current STATE.md hash")
+    p.set_defaults(func=cmd_retire_dir)
+
+    p = sub.add_parser("restore-dir")
+    p.add_argument("--src", required=True, help="path under inbox/retired/")
+    p.add_argument("--dir", required=True, help="memory/designs/<slug>")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.set_defaults(func=cmd_restore_dir)
+
+    p = sub.add_parser("purge-retired")
+    p.add_argument("--path", required=True, help="path under inbox/retired/")
+    p.add_argument("--project")
+    p.add_argument("--cwd", default=os.getcwd())
+    p.set_defaults(func=cmd_purge_retired)
+
+    p = sub.add_parser("validate")
+    p.set_defaults(func=cmd_validate)
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    if getattr(args, "global_memory", False) and getattr(args, "project", None):
+        raise AiMemoryError(f"{args.cmd} cannot combine --global and --project", 2)
+    if getattr(args, "cmd", None) in {"append", "write", "retire"} and not (args.file_opt or args.file):
+        raise AiMemoryError(f"{args.cmd} requires file path", 2)
+    args.func(args)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except AiMemoryError as exc:
+        print(f"ai-memory: {exc}", file=sys.stderr)
+        sys.exit(exc.code)

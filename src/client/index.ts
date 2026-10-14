@@ -3,12 +3,13 @@
  * 生命周期：所有 DOM/监听都挂在 ctx.effect 上，卸载即净（样式、按钮、浮层、toast 全部移除）。
  */
 import { createElement as h, useEffect, useRef, useState } from 'react'
-import { ApiError, getSession, getState, post, SessionInfo, Snapshot } from './api.js'
+import { ApiError, getState, post, Snapshot } from './api.js'
 import { ago, ArchiveActivity, BoardView, SessionView } from './board.js'
 import { esc, ic } from './icons.js'
-import { SidebarBridge } from './sidebar.js'
+import { blankRows, SidebarBridge } from './sidebar.js'
 import { CSS as STYLE } from './style.gen.js'
 import { BoardEntry, doingCount } from './entry.js'
+import { marquee, SessionCard } from './dock.js'
 
 const PANEL = 'dsh-project-manager:board'
 let HUB_TITLE = '项目区'
@@ -19,7 +20,7 @@ type Ctx = {
   layout: { selectPanel(id: string | null): void; panelInfo?: { getSnapshot(): { activePanelId: string | null }; subscribe(fn: () => void): () => void } }
   uiWorkspace: { openSession(id: string): void; pickDirectory?: () => Promise<string | null> }
   workspaces: { archiveSession?: (id: string, opts?: { stopActivity?: boolean }) => Promise<void>; unarchiveSession?: (id: string) => Promise<void>; list: { subscribe(fn: () => void): () => void; getSnapshot(): { items: Array<{ workspaceId: string; path: string; title: string; sessionIds?: string[] }>; archivedSessionIds?: string[] } } }
-  sessions: { create(opts: { workspaceId: string }): Promise<string>; list: { subscribe(fn: () => void): () => void; getSnapshot(): { ids: string[]; byId: Record<string, { id: string; title?: string; displayTitle: string; cwd?: string; updatedAt: number; parentId?: string; origin?: string; blank?: boolean }> } } }
+  sessions: { create(opts: { workspaceId: string }): Promise<string>; using?<T>(id: string, o: { source: string }, fn: (r: { binding: { session: { prompt(c: Array<{ type: 'text'; text: string }>, mode: 'queue' | 'steer'): Promise<{ ok: boolean; error?: { code?: string; message?: string } }> } } }) => Promise<T>): Promise<T>; list: { subscribe(fn: () => void): () => void; getSnapshot(): { ids: string[]; byId: Record<string, { id: string; title?: string; displayTitle: string; cwd?: string; updatedAt: number; parentId?: string; origin?: string; blank?: boolean; retainedBy?: Record<string, number> }> } } }
   theme: Theme
   effect(fn: () => (() => void) | void, label?: string): void
   on(name: string, fn: (...a: unknown[]) => void): () => void
@@ -72,20 +73,29 @@ export function apply(ctx: Ctx): void {
 
   // ── 新建项目会话：准备「项目区」工作区 → 新建会话 → 绑定卡片（权限+标题）→ 打开 ──
   let creating = false
+  // 0.20：点了立刻反馈（看板按钮进入「正在新建」并锁住、侧栏先出现占位行）；建好后先刷新看板快照再打开，
+  // 侧栏补画行第一次出现就带卡片标题（宿主那行只会写「新会话」）
   const newSession = async (cardId: string): Promise<void> => {
-    if (creating) return
+    if (creating) { toast('正在新建会话，稍等一下'); return }
     creating = true
     closeNs()
+    boardView?.setCreating(cardId)
+    const card = live.snap?.board.cards.find((c) => c.id === cardId)
+    const gws = card ? live.snap?.hub.groups?.[card.g] : undefined
+    if (gws && card) bridge.setPending({ ws: gws, title: card.t })
     try {
       const { workspaceId, workspaceTitle } = await post<{ workspaceId: string; workspaceTitle: string }>('session/prepare', { cardId })
+      if (!gws && card) bridge.setPending({ ws: workspaceId, title: card.t })
       const sessionId = await ctx.sessions.create({ workspaceId })
       const r = await post<{ title: string | null; permission: boolean }>('session/bind', { sessionId, cardId, tree: treeMode() })
+      await live.refresh().catch(() => undefined)
+      bridge.setPending(null)
       openAndReveal(sessionId, workspaceId)
-      void live.refresh()
       toast('已在「' + workspaceTitle + '」新建' + (r.title ? '「' + r.title + '」' : '会话') + (r.permission ? ' · 完全权限' : ''))
     } catch (e) {
+      bridge.setPending(null)
       toast('新建项目会话失败：' + (e instanceof ApiError ? e.message : String(e)), 'err')
-    } finally { creating = false }
+    } finally { creating = false; boardView?.setCreating(null) }
   }
 
   // ── 选卡片浮层 ──
@@ -303,6 +313,9 @@ export function apply(ctx: Ctx): void {
   const bridge = new SidebarBridge({
     rows: () => { const h = live.snap?.hub; const groups: Record<string, string> = {}; for (const [g, w] of Object.entries(h?.groups ?? {})) groups[w] = g; return { hub: h?.workspaceId ?? null, groups } },
     pickCard: (a, g) => void pickCard(a, g),
+    open: (id) => ctx.uiWorkspace.openSession(id),
+    canDelete: () => canDelete,
+    del: (id, title) => void deleteSession(id, title),
   })
   ctx.effect(() => { bridge.start(); return () => bridge.stop() }, 'dsh-project-manager: sidebar')
 
@@ -320,22 +333,107 @@ export function apply(ctx: Ctx): void {
     void bridge.reveal(sessionId, ws, h.workspaceId ?? null)
   }
 
+  // ── 0.13：删除还没对话的会话（数据层面）——借用 dsh-manage-sessions 的事务删除（停空闲会话 → 写锁 → 移走会话目录 → 官方 forgetSession 清登记）。
+  //    没装它 / 它报告不能删时不显示删除按钮。只对 blank（还没对话）的会话开放。
+  const DSM = '/dsh-manage-sessions'
+  let canDelete = false
+  ctx.effect(() => {
+    let dead = false
+    fetch(DSM + '/capabilities', { cache: 'no-store' }).then((r) => r.json()).then((b: { ok?: boolean; capabilities?: { delete?: boolean } }) => {
+      if (dead || !(b?.ok && b.capabilities?.delete)) return
+      canDelete = true
+      for (const f of live.subs) f()
+    }).catch(() => { /* 没装 dsh-manage-sessions：不提供删除 */ })
+    return () => { dead = true; canDelete = false }
+  }, 'dsh-project-manager: delete capability')
+  const DEL_HINT: Record<string, string> = { blocked: '会话正在运行或被别的窗口占用，先停止再删', 'capability-missing': '当前 DSH 不支持删除会话（dsh-manage-sessions 缺少宿主能力）', 'unknown-session': '会话已经不存在了' }
+  let delDlg: HTMLDialogElement | null = null
+  const closeDel = (): void => { if (delDlg?.open) delDlg.close(''); delDlg?.remove(); delDlg = null }
+  ctx.effect(() => closeDel, 'dsh-project-manager: delete dialog')
+  const doDelete = async (id: string, title: string): Promise<boolean> => {
+    const s = ctx.sessions.list.getSnapshot().byId[id]
+    if (!s) { toast('会话「' + title + '」已经不存在了', 'err'); return false }
+    if (!s.blank) { toast('「' + title + '」已经有对话了，不能删除，可以归档', 'err'); return false }
+    let r: { ok?: boolean; error?: { code?: string; message?: string } }
+    try {
+      r = await (await fetch(DSM + '/delete', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id] }) })).json()
+    } catch (e) { toast('删除「' + title + '」失败：连不上 dsh-manage-sessions（' + String(e) + '）', 'err'); return false }
+    if (!r?.ok) { const c = r?.error?.code ?? ''; toast('删除「' + title + '」失败：' + (DEL_HINT[c] ?? r?.error?.message ?? '未知错误') + (c ? '（' + c + '）' : ''), 'err'); return false }
+    // 会话已删；卡片上的关联一并去掉（不然详情里会剩一行「会话已删除」）
+    if (live.snap?.board.sessions.some((x) => x.sessionId === id)) { try { await post('session/unlink', { sessionId: id }) } catch (e) { toast('会话已删除，但解除卡片关联失败：' + (e instanceof ApiError ? e.message : String(e)), 'err') } }
+    void live.refresh()
+    toast('已删除「' + title + '」')
+    return true
+  }
+  /** 确认后删除；返回是否真的删了（取消 / 失败 = false）。 */
+  const deleteSession = (id: string, title: string): Promise<boolean> => new Promise((done) => {
+    closeDel()
+    const dlg = document.createElement('dialog')
+    dlg.className = 'dpm-dialog'
+    dlg.setAttribute('aria-labelledby', 'dpmDelT')
+    dlg.innerHTML = '<form method="dialog"><div class="dlg-h"><h2 id="dpmDelT">删除「' + esc(title) + '」？</h2><p>这个会话还没有对话。删除后会从 DSH 里彻底移除（会话文件一起删掉），不能恢复。</p></div>'
+      + '<div class="dlg-f"><span class="sp"></span><button class="btn" type="submit" value="">取消</button><button class="btn primary danger-fill" type="submit" value="ok" data-del-ok>' + ic('trash') + '删除</button></div></form>'
+    document.body.append(dlg)
+    delDlg = dlg
+    dlg.addEventListener('close', () => {
+      const ok = dlg.returnValue === 'ok'
+      if (delDlg === dlg) { delDlg = null; dlg.remove() }
+      if (!ok) { done(false); return }
+      void doDelete(id, title).then(done)
+    })
+    dlg.showModal()
+    ;(dlg.querySelector('button[value=""]') as HTMLElement | null)?.focus()
+  })
+
+  // ── 0.15：0.14 之前分出的分叉会话补关联到源会话的卡片（宿主 fork 后子会话带 parentId；服务端写盘前备份） ──
+  ctx.effect(() => {
+    const tried = new Set<string>()
+    let busy = false
+    const run = (): void => {
+      const snap = live.snap
+      if (busy || !snap) return
+      const refs = new Set(snap.board.sessions.map((s) => s.sessionId))
+      const byId = ctx.sessions.list.getSnapshot().byId
+      const pairs: Array<{ child: string; parent: string }> = []
+      for (const [id, s] of Object.entries(byId)) {
+        if (!s || s.origin === 'subagent' || !s.parentId || s.parentId === id || tried.has(id) || refs.has(id) || !refs.has(s.parentId)) continue
+        pairs.push({ child: id, parent: s.parentId })
+      }
+      if (!pairs.length) return
+      for (const p of pairs) tried.add(p.child)
+      busy = true
+      post<Snapshot & { result: { bound: Array<{ child: string; card: string }> } }>('session/fork-backfill', { pairs })
+        .then((r) => { if (r.result.bound.length) { live.snap = r; for (const f of live.subs) f() } })
+        .catch((e) => console.warn('[dsh-project-manager] 分叉会话补关联失败：', pairs, e))
+        .finally(() => { busy = false })
+    }
+    const a = ctx.sessions.list.subscribe(run)
+    live.subs.add(run)
+    run()
+    return () => { a(); live.subs.delete(run) }
+  }, 'dsh-project-manager: fork backfill')
+
   // ── 0.11：卡片组行的活跃会话数（= 该子工作区里没归档的会话，不含子代理），会话 / 工作区 / 看板一变就重画 ──
   ctx.effect(() => {
     let raf = 0
     const paint = (): void => {
       raf = 0
       const h = live.snap?.hub
-      if (!h) return bridge.paint(null, {})
+      if (!h) { bridge.setBlanks({}); return bridge.paint(null, {}) }
       const ws = ctx.workspaces.list.getSnapshot()
       const arch = new Set(ws.archivedSessionIds ?? [])
       const byId = ctx.sessions.list.getSnapshot().byId
       const counts: Record<string, number> = {}
       for (const wid of Object.values(h.groups ?? {})) {
         const w = ws.items.find((x) => x.workspaceId === wid)
-        counts[wid] = (w?.sessionIds ?? []).filter((id) => !arch.has(id) && !byId[id]?.parentId && byId[id]?.origin !== 'subagent').length
+        // 0.15：分叉会话也带 parentId（源会话 id），只有 origin = subagent 才是子代理
+        counts[wid] = (w?.sessionIds ?? []).filter((id) => !arch.has(id) && byId[id] !== undefined && byId[id].origin !== 'subagent').length
       }
       bridge.paint(h.workspaceId ?? null, counts)
+      // 0.12：只针对「项目区」及其卡片组子工作区
+      const titles: Record<string, string | undefined> = {}
+      for (const r of live.snap?.board.sessions ?? []) titles[r.sessionId] = r.title
+      bridge.setBlanks(blankRows(ws.items, byId, arch, [...(h.workspaceId ? [h.workspaceId] : []), ...Object.values(h.groups ?? {})], titles))
     }
     const on = (): void => { if (!raf) raf = requestAnimationFrame(paint) }
     const a = ctx.sessions.list.subscribe(on)
@@ -361,6 +459,15 @@ export function apply(ctx: Ctx): void {
     return () => { off?.(); off = null }
   }
 
+  // ── 0.19 从会话信息卡直达看板：打开面板、选中卡片、闪一下 ──
+  let boardView: BoardView | null = null
+  let pendingCard: string | null = null
+  const openBoardAt = (cardId: string): void => {
+    pendingCard = cardId
+    ctx.layout.selectPanel(PANEL)
+    if (boardView) { void boardView.focusCard(cardId); pendingCard = null }
+  }
+
   // ── 主区看板面板 ──
   const Board = (props: { usePanelInfo?: <T>(sel: (i: { activePanelId: string | null }) => T) => T }): unknown => {
     const ref = useRef<HTMLDivElement | null>(null)
@@ -368,28 +475,51 @@ export function apply(ctx: Ctx): void {
     useEffect(() => {
       const el = ref.current
       if (!el) return
+      let vref: BoardView | null = null
       const view: BoardView = new BoardView(el, {
         newSession, openSession: (id) => openAndReveal(id), isDark, setDark, toast, pickCard: (a, g) => void pickCard(a, g),
-        // 挂载仓库候选 = dsh 侧栏里已添加的工作区（排除插件自己的「项目区」及其下的卡片组子工作区）
-        workspaces: (): Array<{ title: string; path: string }> => {
-          const items = ctx.workspaces.list.getSnapshot().items
-          const hubPath: string | undefined = view.snap?.hub.path
-          const inHub = (p: string): boolean => !!hubPath && (p === hubPath || p.startsWith(hubPath.replace(/[/\\]+$/, '') + '/') || p.startsWith(hubPath.replace(/[/\\]+$/, '') + '\\'))
-          return items.filter((w) => !inHub(w.path)).map((w) => ({ title: w.title, path: w.path }))
+        canDeleteSession: () => canDelete,
+        // 0.15：先用侧栏轮询已有的快照立刻画出（不等第一次请求），之后看板自己同步
+        seed: () => live.snap,
+        deleteSession,
+        // 0.16：回忆 / 落盘 按钮 → 发到卡片最近的活跃会话（没有就新建一个）并打开
+        sendToCard: async (cardId, text) => {
+          const s = ctx.sessions
+          if (typeof s.using !== 'function') throw new Error('当前 dsh 版本不能从看板给会话发消息（sessions.using 不存在）')
+          const snap = live.snap ?? await getState()
+          const arch = new Set(ctx.workspaces.list.getSnapshot().archivedSessionIds ?? [])
+          const byId = s.list.getSnapshot().byId
+          let id = snap.board.sessions.filter((r) => r.cardId === cardId && byId[r.sessionId] && !arch.has(r.sessionId)).map((r) => r.sessionId).sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0))[0]
+          let ws: string | undefined
+          if (!id) {
+            const p = await post<{ workspaceId: string }>('session/prepare', { cardId })
+            id = await s.create({ workspaceId: p.workspaceId })
+            await post('session/bind', { sessionId: id, cardId, tree: treeMode() })
+            ws = p.workspaceId
+          }
+          const r = await s.using(id, { source: 'dsh-project-manager' }, (ref) => ref.binding.session.prompt([{ type: 'text', text }], 'queue'))
+          if (!r.ok) throw new Error((r.error?.message ?? '发送失败') + (r.error?.code ? '（' + r.error.code + '）' : ''))
+          openAndReveal(id, ws)
+          void live.refresh()
+          const v = s.list.getSnapshot().byId[id]
+          return v?.title || v?.displayTitle || '新会话'
         },
         // 全部会话 = ctx.sessions 列表（含冷会话与已归档），工作区归属与归档状态来自 ctx.workspaces；不列子代理会话
         allSessions: (): SessionView[] => {
           const ws = ctx.workspaces.list.getSnapshot()
           const arch = new Set(ws.archivedSessionIds ?? [])
           const owner = new Map<string, { title: string; id: string }>()
-          for (const w of ws.items) for (const id of w.sessionIds ?? []) owner.set(id, { title: w.path === view.snap?.hub.path ? HUB_TITLE : w.title, id: w.workspaceId })
+          // 构造函数里就会首绘（0.15 用 seed 快照）→ 此时 view 还没赋值，只能读 live 快照
+          const hubPath = (vref ?? live).snap?.hub.path
+          for (const w of ws.items) for (const id of w.sessionIds ?? []) owner.set(id, { title: w.path === hubPath ? HUB_TITLE : w.title, id: w.workspaceId })
           const st = ctx.sessions.list.getSnapshot()
           const out: SessionView[] = []
           for (const id of st.ids) {
             const s = st.byId[id]
-            if (!s || s.parentId || s.origin === 'subagent') continue
+            if (!s || s.origin === 'subagent') continue
             const o = owner.get(id)
-            out.push({ id, title: s.title || s.displayTitle || id, ws: o?.title ?? (s.cwd ? s.cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || s.cwd : '未分组'), wsId: o?.id ?? null, updatedAt: s.updatedAt, archived: arch.has(id) })
+            const fork = s.parentId && s.parentId !== id ? st.byId[s.parentId] : undefined
+            out.push({ id, ...(s.parentId && s.parentId !== id ? { forkOf: fork ? (fork.title || fork.displayTitle || s.parentId) : '已删除的会话' } : {}), blank: !!s.blank, title: s.title || (s.blank ? '新会话' : s.displayTitle) || id, ws: o?.title ?? (s.cwd ? s.cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || s.cwd : '未分组'), wsId: o?.id ?? null, updatedAt: s.updatedAt, archived: arch.has(id) })
           }
           return out
         },
@@ -415,71 +545,52 @@ export function apply(ctx: Ctx): void {
           return ctx.uiWorkspace.pickDirectory()
         },
       })
+      vref = view
+      boardView = view
+      if (pendingCard) { void view.focusCard(pendingCard); pendingCard = null }
       const off = ctx.on('theme/change', () => { view.render(); bump((n) => n + 1) })
       // 会话改名 / 归档 / 恢复后，详情里的会话名与状态跟着变（只在详情打开时重绘，合并到一帧）
       let raf = 0
       const onStore = (): void => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; view.onSessionsChanged() }) }
       const offS = ctx.sessions.list.subscribe(onStore)
       const offW = ctx.workspaces.list.subscribe(onStore)
-      return () => { off(); offS(); offW(); if (raf) cancelAnimationFrame(raf); view.dispose(); void live.refresh() }
+      return () => { off(); offS(); offW(); if (raf) cancelAnimationFrame(raf); if (boardView === view) boardView = null; view.dispose(); void live.refresh() }
     }, [])
     return h('div', { ref, style: { height: '100%', minHeight: 0 } })
   }
   ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL }, Board)), 'dsh-project-manager: panel')
 
   // ── 全局面板「项目看板」主按钮：与「插件」同一组（官方 sidebar.panellist），行由宿主画，插件给图标块 + 整行光效层 + 徽标 ──
+  const liveSess = (id: string): boolean => { const s = ctx.sessions.list.getSnapshot().byId[id]; return !!s && s.origin !== 'subagent' && !(ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []).includes(id) }
+  const doing = (): number => (live.snap ? doingCount(live.snap.board, liveSess) : 0)
   const Entry = (p: { size?: number; active?: boolean }): unknown => {
-    const [n, setN] = useState(() => (live.snap ? doingCount(live.snap.board) : 0))
-    useEffect(() => { const f = (): void => setN(live.snap ? doingCount(live.snap.board) : 0); live.subs.add(f); f(); return () => { live.subs.delete(f) } }, [])
+    const [n, setN] = useState(doing)
+    // 会话归档 / 恢复（workspaces 推送）、会话增删（sessions 推送）、看板变化都会立刻重算
+    useEffect(() => { const f = (): void => setN(doing()); live.subs.add(f); const a = ctx.sessions.list.subscribe(f); const b = ctx.workspaces.list.subscribe(f); f(); return () => { live.subs.delete(f); a(); b() } }, [])
     return h(BoardEntry, { active: !!p.active, compact: (p.size ?? 16) > 16, count: n })
   }
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL, order: 5, label: '项目看板' }, Entry)), 'dsh-project-manager: board entry')
 
-  // ── 会话界面：已自动读取的记忆 ──
+  // ── 0.19 会话信息卡（会话输入框上方）──
+  const sendTo = async (id: string, text: string): Promise<void> => {
+    const s = ctx.sessions
+    if (typeof s.using !== 'function') throw new Error('当前 dsh 版本不能从界面给会话发消息（sessions.using 不存在）')
+    const r = await s.using(id, { source: 'dsh-project-manager' }, (ref) => ref.binding.session.prompt([{ type: 'text', text }], 'queue'))
+    if (!r.ok) throw new Error((r.error?.message ?? '发送失败') + (r.error?.code ? '（' + r.error.code + '）' : ''))
+  }
   const Dock = (props: { sessionId?: string; useSession?: <T>(sel: (s: { id?: string; sessionId?: string }) => T) => T }): unknown => {
     const viaHook = props.useSession ? props.useSession((s) => s?.id ?? s?.sessionId) : undefined
     const sessionId = props.sessionId ?? viaHook
-    const [info, setInfo] = useState<SessionInfo | null>(null)
-    const [open, setOpen] = useState(false)
+    const ref = useRef<HTMLDivElement | null>(null)
     useEffect(() => {
-      let dead = false
-      const id = sessionId
-      if (!id) return
-      const load = (): void => { getSession(id).then((r) => { if (!dead) setInfo(r) }).catch(() => { if (!dead) setInfo(null) }) }
-      load()
-      const t = setInterval(load, 8000)
-      return () => { dead = true; clearInterval(t) }
+      const el = ref.current
+      if (!el || !sessionId) return
+      const card = new SessionCard(el, sessionId, { toast, send: sendTo, openBoard: (cardId) => openBoardAt(cardId) })
+      return () => card.dispose()
     }, [sessionId])
-    if (!info?.card) return null
-    const mem = info.memory ?? []
-    const ma = info.materials
-    const maList = ma ? [ma.notes ? '相关说明' : '', ma.links ? ma.links + ' 条相关链接' : '', ma.files ? ma.files + ' 个相关文件' : ''].filter(Boolean) : []
-    if (!mem.length) {
-      const sug = info.suggest
-      const link = async (): Promise<void> => {
-        try {
-          const st = await getState()
-          const c = st.board.cards.find((x) => x.id === info.card!.id)
-          if (!c || !sug) return
-          await post('card/update', { id: c.id, links: [...c.links, sug.key] })
-          setInfo(await getSession(sessionId as string))
-          toast('已关联落盘项目，下一轮起自动读取')
-        } catch (e) { toast('关联失败：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
-      }
-      return h('div', { className: 'dpm-dock nolink' },
-        h('div', { className: 'dock-h' },
-          h('span', { className: 'grow', title: info.card.group + ' / ' + info.card.title, dangerouslySetInnerHTML: { __html: ic('mem') + esc((sug ? '这张卡片还没关联落盘项目，发现同名的 ' + sug.slug : '这张卡片没有关联落盘项目，会话不读取记忆') + (maList.length ? '；卡片资料（' + maList.join('、') + '）照常带上' : '')) } }),
-          sug ? h('button', { type: 'button', className: 'btn xs', onClick: () => void link(), dangerouslySetInnerHTML: { __html: ic('link') + '关联' } }) : null))
-    }
-    const readN = mem.filter((m) => m.read).length
-    const fresh = mem.length - readN
-    const head = (fresh ? '已自动读取 ' + fresh + ' 个落盘项目的记忆' : '关联的落盘项目本会话都读过了') + (readN ? '，' + readN + ' 个已读过不重复读取' : '') + (maList.length ? '，并带上卡片资料' : '')
-    return h('div', { className: 'dpm-dock' + (open ? ' open' : '') },
-      h('button', { type: 'button', className: 'dock-h', 'aria-expanded': open, onClick: () => setOpen(!open) },
-        h('span', { className: 'grow', title: info.card.group + ' / ' + info.card.title, dangerouslySetInnerHTML: { __html: ic('mem') + esc(head) } }),
-        h('span', { className: 'chev', dangerouslySetInnerHTML: { __html: ic('chev') } })),
-      open ? h('ul', null, mem.map((m) => h('li', { key: m.key }, h('b', null, m.slug), h('span', null, m.read ? '本会话已读过，不重复读取' : m.found ? (m.next || '暂无下一步') : '未找到 STATE'))),
-        maList.length ? h('li', { key: '__materials' }, h('b', null, '卡片资料'), h('span', null, maList.join('、'))) : null) : null)
+    return h('div', { ref, hidden: true })
   }
   ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'dsh-project-manager:memory', order: 30 }, Dock)), 'dsh-project-manager: memory dock')
+  // 截断文字悬停走马灯（会话信息卡 + 看板详情）
+  ctx.effect(() => marquee('.dpm-sic .mq, .dpm .detail .mq'), 'dsh-project-manager: marquee')
 }
