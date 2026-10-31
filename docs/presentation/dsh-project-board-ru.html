@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Презентация: Проектная доска DSH</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+    code, pre {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .slide-enter {
+      animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between selection:bg-emerald-500 selection:text-white antialiased relative">
+
+  <!-- Большие плавающие боковые стрелки для быстрого переключения -->
+  <button id="side-prev-btn" title="Предыдущий слайд (Стрелка влево)" class="fixed left-3 sm:left-6 top-1/2 -translate-y-1/2 z-30 w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-slate-900/90 hover:bg-emerald-600 text-slate-200 hover:text-white border-2 border-slate-700 hover:border-emerald-400 shadow-2xl flex items-center justify-center transition-all duration-200 disabled:opacity-20 disabled:pointer-events-none group">
+    <svg class="w-6 h-6 transform group-hover:-translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/>
+    </svg>
+  </button>
+
+  <button id="side-next-btn" title="Следующий слайд (Стрелка вправо или Пробел)" class="fixed right-3 sm:right-6 top-1/2 -translate-y-1/2 z-30 w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-slate-900/90 hover:bg-emerald-600 text-slate-200 hover:text-white border-2 border-slate-700 hover:border-emerald-400 shadow-2xl flex items-center justify-center transition-all duration-200 disabled:opacity-20 disabled:pointer-events-none group">
+    <svg class="w-6 h-6 transform group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+    </svg>
+  </button>
+
+  <!-- Шапка -->
+  <header class="border-b border-slate-800/80 bg-slate-900/80 backdrop-blur px-6 py-3.5 flex items-center justify-between sticky top-0 z-20">
+    <div class="flex items-center gap-3">
+      <div class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></div>
+      <h1 class="text-sm font-semibold tracking-wide text-slate-200">
+        Проектная доска DSH <span class="text-slate-500 font-mono text-xs ml-1">v0.20.1</span>
+      </h1>
+    </div>
+    
+    <div class="flex items-center gap-4 text-xs text-slate-400">
+      <span>Слайд <strong id="slide-num" class="text-emerald-400 font-mono text-sm">1</strong> из <span id="total-slides" class="font-mono text-sm">10</span></span>
+      <div class="w-28 sm:w-36 bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
+        <div id="progress-bar" class="bg-emerald-500 h-full transition-all duration-300 w-[10%]"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Контейнер для слайдов -->
+  <main class="flex-1 flex items-center justify-center px-14 sm:px-20 py-6 max-w-5xl mx-auto w-full">
+        </p>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-slate-800 text-sm">
+          <div class="flex items-center gap-2 text-slate-300">
+            <span class="text-emerald-400">✓</span> Сессии в карточках
+          </div>
+          <div class="flex items-center gap-2 text-slate-300">
+            <span class="text-emerald-400">✓</span> Контроль ИИ-агентом
+          </div>
+          <div class="flex items-center gap-2 text-slate-300">
+            <span class="text-emerald-400">✓</span> Без переключения окон
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 2: Зачем нужна доска -->
+    <div class="slide hidden w-full slide-enter" data-slide="2">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">01. Концепция</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-6 text-white">Зачем мне эта доска?</h2>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div class="p-5 rounded-xl bg-slate-800/40 border border-slate-700/50">
+            <div class="text-emerald-400 text-xl font-bold mb-2">01</div>
+            <h3 class="font-semibold text-slate-200 mb-1">Все задачи в одном месте</h3>
+            <p class="text-sm text-slate-400">Больше никакой путаницы в разрозненных блокнотах и сохранённых вкладках.</p>
+          </div>
+          <div class="p-5 rounded-xl bg-slate-800/40 border border-slate-700/50">
+            <div class="text-emerald-400 text-xl font-bold mb-2">02</div>
+            <h3 class="font-semibold text-slate-200 mb-1">Связь с сессиями агента</h3>
+            <p class="text-sm text-slate-400">Каждая карточка хранит свои сессии: можно мгновенно вернуться в рабочий контекст.</p>
+          </div>
+          <div class="p-5 rounded-xl bg-slate-800/40 border border-slate-700/50">
+            <div class="text-emerald-400 text-xl font-bold mb-2">03</div>
+            <h3 class="font-semibold text-slate-200 mb-1">Наглядный прогресс</h3>
+            <p class="text-sm text-slate-400">Сразу видно, где задача: на анализе, в коде или уже на стадии тестирования.</p>
+          </div>
+          <div class="p-5 rounded-xl bg-slate-800/40 border border-slate-700/50">
+            <div class="text-emerald-400 text-xl font-bold mb-2">04</div>
+            <h3 class="font-semibold text-slate-200 mb-1">Прямо в среде DSH</h3>
+            <p class="text-sm text-slate-400">Работает прямо в приложении — без переключения в сторонние таск-трекеры.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 3: Три кита -->
+    <div class="slide hidden w-full slide-enter" data-slide="3">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">02. Структура</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-6 text-white">Три кита плагина</h2>
+        <div class="space-y-4">
+          <div class="p-5 rounded-xl bg-slate-800/40 border-l-4 border-emerald-500 border-t border-r border-b border-slate-700/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span class="text-xs font-mono text-slate-400 uppercase">Уровень 1</span>
+              <h3 class="text-lg font-bold text-white">Группа карточек</h3>
+            </div>
+            <div class="text-sm text-slate-300 max-w-md">
+              <strong>Проект верхнего уровня</strong> (например: «Компас-3D», «Роутер Bitray»). Имеет общие репозитории и настройки.
+            </div>
+          </div>
+          <div class="p-5 rounded-xl bg-slate-800/40 border-l-4 border-sky-500 border-t border-r border-b border-slate-700/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span class="text-xs font-mono text-slate-400 uppercase">Уровень 2</span>
+              <h3 class="text-lg font-bold text-white">Карточка</h3>
+            </div>
+            <div class="text-sm text-slate-300 max-w-md">
+              <strong>Конкретная задача</strong> внутри проекта. Содержит сессии, заметки, чек-листы, ссылки и файлы.
+            </div>
+          </div>
+          <div class="p-5 rounded-xl bg-slate-800/40 border-l-4 border-amber-500 border-t border-r border-b border-slate-700/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span class="text-xs font-mono text-slate-400 uppercase">Уровень 3</span>
+              <h3 class="text-lg font-bold text-white">Этап (колонка)</h3>
+            </div>
+            <div class="text-sm text-slate-300 max-w-md">
+              <strong>Текущая стадия:</strong> Анализ → Планирование → Реализация → Тестирование → Готово.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 4: Ограничения Windows -->
+    <div class="slide hidden w-full slide-enter" data-slide="4">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-amber-400 uppercase tracking-widest font-semibold">03. Важный нюанс</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-6 text-white">Особенности работы на Windows</h2>
+        <div class="grid sm:grid-cols-2 gap-6">
+          <div class="p-5 rounded-xl bg-emerald-950/20 border border-emerald-800/40">
+            <div class="flex items-center gap-2 mb-3">
+              <span class="text-lg">✅</span>
+              <h3 class="font-bold text-emerald-300">Полностью работает:</h3>
+            </div>
+            <ul class="text-sm space-y-2 text-slate-300">
+              <li class="flex items-center gap-2">• Канбан-доска, группы и карточки</li>
+              <li class="flex items-center gap-2">• Этапы и чек-листы подзадач</li>
+              <li class="flex items-center gap-2">• Заметки, URL-ссылки и привязка файлов</li>
+              <li class="flex items-center gap-2">• Репозитории и рабочие пространства</li>
+              <li class="flex items-center gap-2">• Сессии чата и архив карточек</li>
+            </ul>
+          </div>
+          <div class="p-5 rounded-xl bg-rose-950/20 border border-rose-800/40">
+            <div class="flex items-center gap-2 mb-3">
+              <span class="text-lg">❌</span>
+              <h3 class="font-bold text-rose-300">Не поддерживается:</h3>
+            </div>
+            <p class="text-sm text-slate-300 mb-3">
+              Модуль <strong>«Проекты на диске» (landfill)</strong>: автопамять проектов, импорт/слияние через <code class="text-rose-300 bg-rose-900/30 px-1 py-0.5 rounded">ai-memory</code>.
+            </p>
+            <div class="text-xs bg-slate-900/80 p-3 rounded-lg border border-slate-800 text-slate-400">
+              <strong>Причина:</strong> требует Unix-функцию <code class="text-amber-300">fcntl</code> для блокировки файлов. Жёлтую плашку на Windows можно просто игнорировать.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 5: Быстрый старт -->
+    <div class="slide hidden w-full slide-enter" data-slide="5">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">04. Инструкция</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-6 text-white">Быстрый старт за 30 секунд</h2>
+        <div class="grid gap-3 sm:grid-cols-5 text-center sm:text-left">
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center mb-3 mx-auto sm:mx-0">1</div>
+            <p class="text-xs text-slate-300 font-medium">Сайдбар → <strong>«Проектная доска»</strong></p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center mb-3 mx-auto sm:mx-0">2</div>
+            <p class="text-xs text-slate-300 font-medium"><strong>«Новая группа»</strong> → Ввести имя → Enter</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center mb-3 mx-auto sm:mx-0">3</div>
+            <p class="text-xs text-slate-300 font-medium"><strong>«+ Добавить карточку»</strong> в колонке</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center mb-3 mx-auto sm:mx-0">4</div>
+            <p class="text-xs text-slate-300 font-medium">Открыть задачу → <strong>«Новая сессия»</strong></p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center mb-3 mx-auto sm:mx-0">5</div>
+            <p class="text-xs text-slate-300 font-medium">Работать в чате: всё сохраняется в задаче</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 6: Что внутри карточки -->
+    <div class="slide hidden w-full slide-enter" data-slide="6">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">05. Анатомия</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-6 text-white">Что хранит карточка</h2>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-emerald-400 font-semibold text-sm mb-1">💬 Сессии</div>
+            <p class="text-xs text-slate-400">Активные и архивные диалоги, привязка существующих сессий.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-sky-400 font-semibold text-sm mb-1">📝 Заметки</div>
+            <p class="text-xs text-slate-400">Любой объём текста, авто-распознавание кликабельных ссылок.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-purple-400 font-semibold text-sm mb-1">🔗 Ссылки</div>
+            <p class="text-xs text-slate-400">Текст + тип + URL, поддержка пакетного добавления.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-amber-400 font-semibold text-sm mb-1">📂 Файлы</div>
+            <p class="text-xs text-slate-400">Выбор через диалог или вставка путей с проверкой наличия.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-emerald-400 font-semibold text-sm mb-1">☑️ Подзадачи</div>
+            <p class="text-xs text-slate-400">Интерактивный чек-лист прямо внутри карточки.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+            <div class="text-rose-400 font-semibold text-sm mb-1">📦 Репозитории</div>
+            <p class="text-xs text-slate-400">Индивидуальные папки кода + общие репозитории всей группы.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 7: Инструменты ИИ-агента -->
+    <div class="slide hidden w-full slide-enter" data-slide="7">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">06. Автоматизация</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-4 text-white">Как агент управляет доской</h2>
+        <div class="grid sm:grid-cols-2 gap-3 mb-4">
+          <div class="p-3.5 rounded-lg bg-slate-800/50 border border-slate-700/60 font-mono text-xs">
+            <span class="text-emerald-400 font-bold block mb-1">card_manage</span>
+            <span class="text-slate-300">Создать, переименовать или удалить карточку</span>
+          </div>
+          <div class="p-3.5 rounded-lg bg-slate-800/50 border border-slate-700/60 font-mono text-xs">
+            <span class="text-sky-400 font-bold block mb-1">phase_move</span>
+            <span class="text-slate-300">Перевести задачу на следующий/нужный этап</span>
+          </div>
+          <div class="p-3.5 rounded-lg bg-slate-800/50 border border-slate-700/60 font-mono text-xs">
+            <span class="text-amber-400 font-bold block mb-1">task_manage</span>
+            <span class="text-slate-300">Добавить чек-лист, вычеркнуть пункт подзадачи</span>
+          </div>
+          <div class="p-3.5 rounded-lg bg-slate-800/50 border border-slate-700/60 font-mono text-xs">
+            <span class="text-purple-400 font-bold block mb-1">repo_manage</span>
+            <span class="text-slate-300">Привязать папку проекта к карточке или группе</span>
+          </div>
+        </div>
+        <div class="p-4 rounded-xl bg-emerald-950/20 border border-emerald-800/40 text-xs">
+          <span class="text-emerald-300 font-semibold block mb-1">💡 Пример прямого запроса в чат:</span>
+          <p class="text-slate-300 italic">«Переведи эту карточку на этап "Тестирование" и добавь подзадачу "прогнать регресс"»</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 8: Сайдбар Проектная зона -->
+    <div class="slide hidden w-full slide-enter" data-slide="8">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">07. Интерфейс</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-5 text-white">Сайдбар «Проектная зона»</h2>
+        <ul class="space-y-3 text-sm text-slate-300">
+          <li class="flex items-start gap-3 p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <span class="text-emerald-400 mt-0.5 font-bold">1.</span>
+            <span><strong>Иерархия:</strong> Сверху рабочее пространство хаба, внутри — дочерние пространства каждой группы.</span>
+          </li>
+          <li class="flex items-start gap-3 p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <span class="text-emerald-400 mt-0.5 font-bold">2.</span>
+            <span><strong>Счётчики:</strong> В строках групп наглядно видно число активных (незаархивированных) сессий.</span>
+          </li>
+          <li class="flex items-start gap-3 p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <span class="text-emerald-400 mt-0.5 font-bold">3.</span>
+            <span><strong>Быстрое действие:</strong> Кнопка «+» в сайдбаре позволяет сразу выбрать карточку и создать сессию.</span>
+          </li>
+          <li class="flex items-start gap-3 p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <span class="text-amber-400 mt-0.5 font-bold">!</span>
+            <span><strong>Первый запуск:</strong> Если хаба нет в сайдбаре — он появится автоматически после запуска первой проектной сессии.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Слайд 9: Хранилище данных -->
+    <div class="slide hidden w-full slide-enter" data-slide="9">
+      <div class="p-8 sm:p-10 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl">
+        <span class="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold">08. Под капотом</span>
+        <h2 class="text-2xl sm:text-3xl font-bold mt-1 mb-4 text-white">Где хранятся данные</h2>
+        <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-xs text-emerald-400 mb-5 break-all">
+          C:\Users\user\.dsh\dsh-project-manager\
+        </div>
+        <div class="space-y-3 text-sm">
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <code class="text-sky-300 font-semibold">board.json</code>
+            <span class="text-slate-300 text-xs sm:text-sm">Вся структура: группы, задачи, колонки, репозитории</span>
+          </div>
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <code class="text-sky-300 font-semibold">events.jsonl</code>
+            <span class="text-slate-300 text-xs sm:text-sm">Журнал изменений (атомарная запись, кто/когда)</span>
+          </div>
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
+            <code class="text-sky-300 font-semibold">hub\</code>
+            <span class="text-slate-300 text-xs sm:text-sm">Рабочее пространство хаба и файлы <code class="text-slate-400">AGENTS.md</code></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Слайд 10: Финал -->
+    <div class="slide hidden w-full slide-enter" data-slide="10">
+      <div class="p-8 sm:p-12 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/40 border border-emerald-900/40 shadow-2xl text-center">
+        <div class="inline-block p-3 rounded-2xl bg-emerald-500/10 text-emerald-400 mb-4 border border-emerald-500/20 text-2xl">
+          🚀
+        </div>
+        <h2 class="text-3xl sm:text-4xl font-extrabold text-white mb-4">
+          Готовый рабочий цикл
+        </h2>
+        <p class="text-slate-300 max-w-xl mx-auto text-sm sm:text-base mb-8">
+          Группа → Карточка → Сессия чата → Движение по этапам → Архив.
+          Контекст никогда не теряется, а агент всегда видит ваши задачи.
+        </p>
+        <button onclick="goToSlide(1)" class="px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition-all shadow-lg shadow-emerald-500/20">
+          Смотреть с начала ↺
+        </button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Нижняя панель управления (поднята и сделана ярче) -->
+  <footer class="border-t border-slate-800 bg-slate-900/90 backdrop-blur px-6 py-3 flex items-center justify-between sticky bottom-0 z-20">
+    <div class="text-xs text-slate-400 flex items-center gap-2">
+      <span>Управление:</span>
+      <span class="inline-flex gap-1 items-center">
+        <kbd class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-emerald-400 font-mono text-xs">←</kbd>
+        <kbd class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-emerald-400 font-mono text-xs">→</kbd>
+        <span class="text-slate-500">или</span>
+        <kbd class="px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-emerald-400 font-mono text-xs">Пробел</kbd>
+      </span>
+    </div>
+    
+    <div class="flex items-center gap-3">
+      <button id="prev-btn" class="px-4 py-2 rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors text-xs font-semibold disabled:opacity-30 disabled:pointer-events-none flex items-center gap-1.5">
+        <span>←</span> Назад
+      </button>
+      <button id="next-btn" class="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold transition-all text-xs disabled:opacity-30 disabled:pointer-events-none flex items-center gap-1.5 shadow-md shadow-emerald-500/20">
+        Вперёд <span>→</span>
+      </button>
+    </div>
+  </footer>
+
+  <script>
+    const totalSlides = 10;
+    let currentSlide = 1;
+
+    const slideNumEl = document.getElementById('slide-num');
+    const progressBarEl = document.getElementById('progress-bar');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const sidePrevBtn = document.getElementById('side-prev-btn');
+    const sideNextBtn = document.getElementById('side-next-btn');
+
+    function renderSlide(index) {
+      document.querySelectorAll('.slide').forEach(el => {
+        el.classList.add('hidden');
+      });
+      const active = document.querySelector(`.slide[data-slide="${index}"]`);
+      if (active) {
+        active.classList.remove('hidden');
+      }
+
+      slideNumEl.textContent = index;
+      progressBarEl.style.width = `${(index / totalSlides) * 100}%`;
+
+      const isFirst = index === 1;
+      const isLast = index === totalSlides;
+
+      prevBtn.disabled = isFirst;
+      sidePrevBtn.disabled = isFirst;
+
+      nextBtn.disabled = isLast;
+      sideNextBtn.disabled = isLast;
+    }
+
+    function goToSlide(n) {
+      if (n >= 1 && n <= totalSlides) {
+        currentSlide = n;
+        renderSlide(currentSlide);
+      }
+    }
+
+    prevBtn.addEventListener('click', () => goToSlide(currentSlide - 1));
+    nextBtn.addEventListener('click', () => goToSlide(currentSlide + 1));
+    sidePrevBtn.addEventListener('click', () => goToSlide(currentSlide - 1));
+    sideNextBtn.addEventListener('click', () => goToSlide(currentSlide + 1));
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault();
+        goToSlide(currentSlide + 1);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        goToSlide(currentSlide - 1);
+      }
+    });
+
+    renderSlide(currentSlide);
+  </script>
+</body>
+</html>
