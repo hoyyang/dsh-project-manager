@@ -7,12 +7,26 @@
  * - 「查看 AI 收到的原文」：系统提示里本卡片那一段 + 注入会话的全文（与插件发给 AI 的逐字一致）。
  * 数据来自 GET session（与喂给 AI 的同一份看板 / 磁盘数据）。DOM 全部挂在 root 上，dispose 即净。
  */
-import { ApiError, getMatch, getMergePreview, getRaw, getSession, post, type LfRun, type MatchResult, type MemDetail, type MergePreview, type MergeView, type MigView, type SessionInfo } from './api.js'
-import { BOARD_GLYPH, CHECK_SVG, COPY_SVG, esc, ic } from './icons.js'
+import { ApiError, getMatch, getMergePreview, getRaw, getSession, poll, post, type LfRun, type MatchResult, type MemDetail, type MergePreview, type MergeView, type MigView, type SessionInfo } from './api.js'
+import { detailState } from './board.js'
+import { CHECK_SVG, COPY_SVG, esc, ic } from './icons.js'
+import { QuoteMenu, type ActiveGroup, type InputActions } from './qmenu.js'
 
 export interface DockHost {
-  toast(msg: string, kind?: 'ok' | 'err', action?: { label: string; run: () => void }): void
+  toast(msg: string, kind?: 'ok' | 'err', action?: { label: string; run: () => void } | Array<{ label: string; run: () => void }>): void
+  /** 0.27 宿主给会话插槽的输入框操作（插入引用文本）；拿不到 = undefined。 */
+  actions(): InputActions | undefined
+  /** 0.27 前端会话列表里的会话（标题 / 归档 / cwd）；不在列表 = null。 */
+  sess(id: string): { title: string; archived: boolean; cwd: string } | null
+  /** 0.27.2 引用列表「活跃会话」：按卡片组分组的没归档会话。 */
+  active(): ActiveGroup[]
   openBoard(cardId: string): void
+  /** 3(2)：会话信息卡上的卡片跳转 → 只打开全局卡片详情，不切到项目看板。 */
+  openDetail(cardId: string): void
+  /** 3(3)-③：详情开着时切会话，详情跟着切到这个会话的卡片。 */
+  detailOpen(): boolean
+  /** v143（5.2）：「卡片详情」= 开关，详情开着再点 = 关闭。 */
+  closeDetail?(): void
   /** 把一条消息排进这个会话（AI 正在跑就排队）。 */
   send(sessionId: string, text: string): Promise<void>
 }
@@ -26,6 +40,10 @@ const home = (p: string): string => p.replace(/^\/Users\/[^/]+\//, '~/').replace
 const when = (iso: string): string => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }
 const tok = (s: string): number => Math.round(s.length * 0.55)
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+/** v101：信息卡「打开卡片详情」按钮的图标（面板 + 右箭头；原来的柱状图看不出功能）。 */
+/** v140（6）：拆出来的「卡片详情」按钮图标 = 面板 + 右侧栏（悬停右侧栏滑出、箭头前推）。 */
+const SIC_SPLIT_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect class="pn" x="3.2" y="4.6" width="17.6" height="14.8" rx="3"/><rect class="pf" x="12.6" y="4.6" width="8.2" height="14.8" rx="2"/><path class="pn" d="M12.6 4.6v14.8"/><path class="ar" d="M6.4 12h3.6M8.6 9.9 10.7 12l-2.1 2.1"/></svg>'
+const SIC_OPEN_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.4" y="5.2" width="10.6" height="13.6" rx="2.6"/><path d="M17.4 12h3.4"/><path d="m18.6 9.4 2.6 2.6-2.6 2.6"/></svg>'
 const copyBtn = (v: string, what: string): string => '<button type="button" class="ib cp" data-copy="' + esc(v) + '" data-what="' + esc(what) + '" aria-label="复制' + esc(what) + '" title="复制' + esc(what) + '">' + COPY_SVG + CHECK_SVG + '</button>'
 
 /** 新建落盘项目：第一个不含中文的名字当文件名（小写，非法字符换成 -），其余都是别名。 */
@@ -51,7 +69,7 @@ function reveal(el: Element | null | undefined): void {
 export class SessionCard {
   private info: SessionInfo | null = null
   private sig = ''
-  private timer = 0
+  private timer: (() => void) | null = null
   private dead = false
   private mg: Mg | null = null
   private pvTimer = 0
@@ -71,41 +89,153 @@ export class SessionCard {
   private wasMerging = ''
   private ov: HTMLElement | null = null
   private rawTab: 'sys' | 'inj' = 'sys'
+  private quote: QuoteMenu
+  private nc: HTMLDialogElement | null = null
+  private ncFresh = false
 
-  constructor(readonly root: HTMLElement, readonly sid: string, readonly host: DockHost) {
+  /** v140（6）：「打开卡片详情」= 信息卡右边同一行的独立小按钮（side），row = 两者的外层（跟着信息卡显隐）。 */
+  private side: HTMLButtonElement | null = null
+  private row: HTMLElement | null = null
+  constructor(readonly root: HTMLElement, readonly sid: string, readonly host: DockHost, layout?: { row: HTMLElement; side: HTMLButtonElement }) {
     root.className = 'dpm-dock dpm-sic'
     root.hidden = true
+    if (layout) {
+      this.row = layout.row; this.side = layout.side
+      const b = layout.side
+      b.type = 'button'; b.className = 'dpm-sopen'; b.dataset.board = ''
+      b.innerHTML = '<span class="so-ic">' + SIC_SPLIT_GLYPH + '</span><span class="so-l">卡片详情</span>'
+      b.addEventListener('click', this.onSideClick)
+      new MutationObserver(() => this.syncRow()).observe(root, { attributes: true, attributeFilter: ['hidden', 'class'] })
+      this.syncRow()
+    }
     root.addEventListener('click', this.onClick)
     root.addEventListener('change', this.onChange)
     root.addEventListener('input', this.onInput)
     root.addEventListener('keydown', this.onKey)
+    root.addEventListener('mousedown', this.keepCaret)
+    root.addEventListener('pointerover', this.onSicOver)
+    root.addEventListener('pointerout', this.onSicOut)
+    root.addEventListener('focusin', this.onSicOver)
+    root.addEventListener('focusout', this.onSicOut)
+    // v87：详情里改了说明开关 / 任何看板改动 → 信息卡立刻重读，引用菜单同一拍生效（不等 4s 轮询）
+    document.addEventListener('dpm:board-changed', this.onBoardChanged)
+    detailState.subs.add(this.onDetailSub)
+    this.quote = new QuoteMenu(root, { sid, info: () => this.info, actions: () => host.actions(), sess: (id) => host.sess(id), active: () => host.active(), toast: (m, k) => host.toast(m, k) })
     void this.load()
-    this.timer = window.setInterval(() => { if (!document.hidden) void this.load() }, 4000)
+    this.timer = poll(4000, () => { void this.load() })
   }
   dispose(): void {
     this.dead = true
-    clearInterval(this.timer)
+    this.timer?.()
     clearTimeout(this.pvTimer)
     clearTimeout(this.mtTimer)
+    if (this.animTimer) clearTimeout(this.animTimer)
     this.closeRaw()
+    this.quote.dispose()
+    this.nc?.remove(); this.nc = null
     this.root.removeEventListener('click', this.onClick)
     this.root.removeEventListener('change', this.onChange)
     this.root.removeEventListener('input', this.onInput)
     this.root.removeEventListener('keydown', this.onKey)
+    this.root.removeEventListener('mousedown', this.keepCaret)
+    this.root.removeEventListener('pointerover', this.onSicOver)
+    this.root.removeEventListener('pointerout', this.onSicOut)
+    this.root.removeEventListener('focusin', this.onSicOver)
+    this.root.removeEventListener('focusout', this.onSicOut)
+    this.sicTip?.remove(); this.sicTip = null
+    this.side?.removeEventListener('click', this.onSideClick)
+    document.removeEventListener('dpm:board-changed', this.onBoardChanged)
+    detailState.subs.delete(this.onDetailSub)
     this.root.innerHTML = ''
+  }
+  private onBoardChanged = (): void => { if (!this.dead) void this.load(true) }
+  private onDetailSub = (): void => { if (!this.dead) this.syncOpenBtn() }
+  private firstLoad = true
+  /** v87：信息卡折叠 / 展开动画期间（360ms）延后数据重画，避免打断高度动画产生二次闪动。 */
+  private animUntil = 0
+  private animTimer = 0
+  /** 3(3)-③：会话窗口被切回来时（不一定重挂载），如果详情开着就切到这个会话的卡片。 */
+  syncDetail(): void { if (this.host.detailOpen() && this.info?.card?.id) this.host.openDetail(this.info.card.id) }
+  /** v101：这张卡的详情正开着吗（按钮的已打开态）。 */
+  private isOpenFor(): boolean {
+    const c = this.info?.card
+    return !!(c && detailState.open && detailState.sel === c.id)
+  }
+  private syncOpenBtn(): void {
+    const b = this.side ?? this.root.querySelector('[data-board]')
+    if (!b) return
+    const on = this.isOpenFor()
+    b.setAttribute('aria-pressed', String(on))
+    b.classList.toggle('on', on)
+    if (this.side) { const l = this.side.querySelector('.so-l'); if (l) l.textContent = on ? '详情已开' : '卡片详情'; const lab = on ? '卡片详情已打开 · 再点一下关闭' : (this.info?.card ? '打开卡片详情（右侧面板，不切看板）' : '这个会话还没有关联卡片'); this.side.title = lab; this.side.setAttribute('aria-label', lab) }
+  }
+  /** row 跟着信息卡显隐；没关联卡片 = 半透明（不可点）。 */
+  private syncRow(): void {
+    if (!this.row || !this.side) return
+    this.row.hidden = this.root.hidden
+    const dis = !this.info?.card
+    this.side.classList.toggle('dis', dis)
+    this.side.setAttribute('aria-disabled', String(dis))
+    this.syncOpenBtn()
+  }
+  private onSideClick = (): void => {
+    const i = this.info
+    if (!i?.card) { this.host.toast('这个会话还没有关联卡片：先「创建会话卡片」'); return }
+    /* v143（5.2）：开关 —— 这张卡的详情开着时再点 = 关闭详情，按钮回到没按下（「卡片详情」） */
+    if (this.isOpenFor() && this.host.closeDetail) { this.host.closeDetail(); setTimeout(() => this.syncOpenBtn(), 40); return }
+    this.host.openDetail(i.card.id)
+    setTimeout(() => {
+      this.syncOpenBtn()
+      const el = document.querySelector('.dpm-global-detail')
+      if (el) { el.classList.remove('sic-flash'); void (el as HTMLElement).offsetWidth; el.classList.add('sic-flash'); setTimeout(() => el.classList.remove('sic-flash'), 700) }
+    }, 80)
+  }
+  private sicTip: HTMLElement | null = null
+  private sicTipShow(btn: HTMLElement): void {
+    if (!this.sicTip) { this.sicTip = document.createElement('div'); this.sicTip.className = 'dpm-sic-tip'; this.sicTip.id = 'dpmSicTip'; this.sicTip.setAttribute('role', 'tooltip'); document.body.append(this.sicTip) }
+    this.sicTip.textContent = this.isOpenFor() ? '详情已打开 · 再点一下关闭' : '打开卡片详情'
+    this.sicTip.hidden = false
+    const r = btn.getBoundingClientRect()
+    const w = this.sicTip.offsetWidth, h = this.sicTip.offsetHeight
+    this.sicTip.style.left = Math.round(Math.max(8, Math.min(window.innerWidth - w - 8, r.left - 2))) + 'px'
+    this.sicTip.style.top = Math.round(Math.max(8, r.top - h - 9)) + 'px'
+  }
+  private sicTipHide(): void { if (this.sicTip) this.sicTip.hidden = true }
+  private onSicOver = (e: Event): void => {
+    const b = (e.target as HTMLElement).closest?.('[data-board]') as HTMLElement | null
+    if (b && this.root.contains(b)) this.sicTipShow(b)
+  }
+  private onSicOut = (e: Event): void => {
+    const t = e.target as HTMLElement
+    if (t.closest?.('[data-board]')) this.sicTipHide()
   }
   private get open(): boolean { return OPEN.get(this.sid) ?? false }
   private set open(v: boolean) { OPEN.set(this.sid, v) }
 
+  /** v136：会话输入框识别要用的卡片资料（最近一次 /session 回包）。 */
+  infoNow(): SessionInfo | null { return this.info }
+  private infoSubs = new Set<() => void>()
+  onInfo(f: () => void): () => void { this.infoSubs.add(f); return () => { this.infoSubs.delete(f) } }
+  /** v144（4.2）：第一次读 /session 失败（主实例刚重启 / 插件热加载那一刻）不再静默 —— 1s / 2s / 4s 重试，之后交给轮询。 */
+  private tries = 0
   async load(force = false): Promise<void> {
     let r: SessionInfo
-    try { r = await getSession(this.sid) } catch { return }
+    try { r = await getSession(this.sid, this.host.sess(this.sid)?.cwd ?? '') } catch (e) {
+      if (this.firstLoad && !this.dead && this.tries < 3) { const d = 1000 * 2 ** this.tries++; console.warn('[dsh-project-manager] 会话信息卡第一次读取失败，' + d / 1000 + 's 后重试：', e); setTimeout(() => { if (!this.dead) void this.load(force) }, d) }
+      return
+    }
     if (this.dead) return
     const sig = JSON.stringify(r)
     if (!force && sig === this.sig) return
     const prev = this.info
     this.info = r
     this.sig = sig
+    for (const f of this.infoSubs) { try { f() } catch (e) { console.warn('[dsh-project-manager] onInfo', e) } }
+    this.syncRow()
+    if (this.firstLoad) {
+      this.firstLoad = false
+      if (this.host.detailOpen() && r.card?.id) this.host.openDetail(r.card.id)
+    }
     // 合并完成（进行中 → 没了）：结果闪一下、提示
     const run = r.merging?.id ?? ''
     if (this.wasMerging && !run) {
@@ -125,42 +255,75 @@ export class SessionCard {
     // 正在输入时不整块重画（会丢光标）；输入框失焦后下一轮再画
     const a = document.activeElement
     if (prev && a && this.root.contains(a) && (a as HTMLElement).matches('input[type=text], input:not([type])')) { this.fillMg(); this.fillMt(); return }
-    this.render()
+    this.renderSettled()
+  }
+
+  /** v87：动画窗口内的数据刷新延后到动画结束再重画（只合并一次）。 */
+  private renderSettled(): void {
+    const wait = this.animUntil - Date.now()
+    if (wait <= 0) { this.render(); return }
+    if (this.animTimer || this.dead) return
+    this.animTimer = window.setTimeout(() => { this.animTimer = 0; if (!this.dead) this.render() }, wait + 16)
   }
 
   private foldOthers(keep: string): void { for (const m of this.info?.memDetail ?? []) if (m.merge && m.merge.id !== keep) this.fold.set(m.merge.id, true); this.fold.set(keep, false) }
 
   // ── 渲染 ──
   render(): void {
+    // 0.24 渲染出错时点名显示，不留下一块空的信息卡（之前旧 host 数据格式让它静默白掉）
+    try { this.render0() } catch (e) {
+      console.error('[dsh-project-manager] 会话信息卡渲染失败：', e, this.info)
+      this.root.hidden = false
+      this.root.innerHTML = '<div class="sic-h"><span class="crumb"><span class="t">会话信息卡显示失败：' + esc(e instanceof Error ? e.message : String(e)) + '（详情见控制台）</span></span></div>'
+    }
+  }
+  private render0(): void {
     const i = this.info
-    if (!i?.card || !i.cardInfo) { this.root.hidden = true; this.root.innerHTML = ''; return }
+    if (!i?.card || !i.cardInfo) {
+      // 0.27 项目区卡片组里还没卡片的会话：一行浅灰条 +「创建会话卡片」
+      if (i?.free) {
+        this.root.hidden = false
+        this.root.className = 'dpm-dock dpm-sic nc'
+        this.root.innerHTML = '<div class="ncbar">' + ic('cards') + '<span class="txt">这个会话还没有卡片 · 卡片组 <b>' + esc(i.free.group.name) + '</b></span><button type="button" class="btn sm" data-nc-open aria-haspopup="dialog">' + ic('plus') + '创建会话卡片</button></div>'
+        return
+      }
+      this.root.hidden = true; this.root.innerHTML = ''; return
+    }
     this.root.hidden = false
     const scroll = (this.root.querySelector('.scroll') as HTMLElement | null)?.scrollTop ?? 0
     const ci = i.cardInfo
     const mem = i.memDetail ?? []
     const memN = mem.length
-    const matN = ci.repos.length + ci.links.length + ci.files.length + ci.tasks.length + (ci.notes.trim() ? 1 : 0)
+    const lf = ci.tasks.flatMap((t) => (t.subs?.length ? t.subs : [t]))
+    const matN = ci.repos.length + ci.links.length + ci.files.length + lf.length + ci.notes.length + (ci.related?.length ?? 0)
     const pend = mem.reduce((n, m) => n + (m.merge?.all ?? 0), 0)
-    const crumb = '<span class="crumb" title="' + esc(i.card.group + ' / ' + i.card.title) + '"><span class="g">' + esc(i.card.group) + '</span><span class="sl">/</span><span class="t">' + esc(i.card.title) + '</span></span>'
-    const boardBtn = '<button type="button" class="ib board" data-board aria-label="在项目看板打开这张卡片" title="在项目看板打开这张卡片">' + BOARD_GLYPH + '</button>'
+    // v88：没有关联落盘项目时，卡片名悬停 → 双份轨道循环跑马灯（40px 间距、45px/s、300ms 延迟）
+    const crumb = '<span class="crumb" title="' + esc(i.card.group + ' / ' + i.card.title) + '"><span class="g">' + esc(i.card.group) + '</span><span class="sl">/</span><span class="t' + (memN ? '' : ' mq') + '"' + (memN ? '' : ' data-mq-speed="45"') + '>' + esc(i.card.title) + '</span></span>'
+    const boardBtn = this.side ? '' : '<button type="button" class="ib board sic-open" data-board aria-pressed="' + (this.isOpenFor() ? 'true' : 'false') + '" aria-label="打开卡片详情（右侧面板，不切看板）" title="打开卡片详情（右侧面板，不切看板）">' + SIC_OPEN_GLYPH + '</button>'
+    const qBtn = this.host.actions() ? '<button type="button" class="qhint" data-qopen title="在输入框里输入 > 也可以打开"><kbd>&gt;</kbd><span class="q-txt">引用卡片内容</span></button>' : ''
     const chev = '<button type="button" class="ib" data-tgl aria-label="' + (this.open ? '收起' : '展开') + '会话信息" title="' + (this.open ? '收起' : '展开') + '" aria-expanded="' + this.open + '">' + ic('chev') + '</button>'
     let head: string
     if (!memN) {
       const run = i.lfRun && !i.lfRun.key ? i.lfRun : null
       const busy = !!this.sending || run?.state === 'busy' || run?.state === 'ask'
-      head = '<div class="sic-h">' + crumb + '<div class="mk" id="dpmMk"><input id="dpmMkIn" type="text" placeholder="新建落盘项目：输入名字，空格分隔，留空由 AI 起名" aria-label="新建落盘项目的名字（空格分隔；第一个不含中文的当文件名，其余是别名）" autocomplete="off" spellcheck="false"' + (busy ? ' disabled' : '') + '><span class="tok" id="dpmMkTok"></span></div><span id="dpmMkBtn">' + this.mkBtn(run, busy) + '</span><span class="acts">' + boardBtn + chev + '</span></div>'
+      head = '<div class="sic-h">' + crumb + '<div class="mk" id="dpmMk"><input id="dpmMkIn" type="text" placeholder="新建落盘项目：输入名字，空格分隔，留空由 AI 起名" aria-label="新建落盘项目的名字（空格分隔；第一个不含中文的当文件名，其余是别名）" autocomplete="off" spellcheck="false"' + (busy ? ' disabled' : '') + '><span class="tok" id="dpmMkTok"></span></div><span id="dpmMkBtn">' + this.mkBtn(run, busy) + '</span><span class="acts">' + qBtn + boardBtn + chev + '</span></div>'
         + this.runLine(run) + this.folderHtml() + '<div class="mt" id="dpmMt"><div class="in" id="dpmMtIn"></div></div>'
     } else {
       const lr = i.lfRun && i.lfRun.key ? i.lfRun : null
       const pills = '<span class="pill mem">' + ic('mem') + '落盘项目 <b>' + memN + '</b></span>' + (lr?.state === 'busy' || (this.sending && this.sending !== '__new') ? '<span class="pill mem"><span class="dot"></span>落盘中</span>' : lr && ['stopped', 'error', 'nowrite'].includes(lr.state) ? '<span class="pill bad">落盘没完成</span>' : lr?.state === 'ask' ? '<span class="pill mem">等你回复</span>' : '') + (i.merging ? '<span class="pill mem"><span class="dot"></span>合并中</span>' : '') + (pend ? '<span class="pill" title="合并前的落盘项目还在回收区，可撤销或删除">合并前 <b>' + pend + '</b> 个待清理</span>' : '')
-        + '<span class="pill">仓库 <b>' + ci.repos.length + '</b></span>' + (ci.links.length ? '<span class="pill">链接 <b>' + ci.links.length + '</b></span>' : '') + (ci.tasks.length ? '<span class="pill">子任务 <b>' + ci.tasks.filter((t) => t.done).length + '/' + ci.tasks.length + '</b></span>' : '') + (ci.notes.trim() ? '<span class="pill">说明</span>' : '') + (ci.files.length ? '<span class="pill">文件 <b>' + ci.files.length + '</b></span>' : '')
-      head = '<div class="sic-h"><button type="button" class="tgl" data-tgl aria-expanded="' + this.open + '">' + crumb + '<span class="pills">' + pills + '</span></button><span class="acts">' + boardBtn + chev + '</span></div>' + this.folderHtml()
+        // 0.27.1 收起态只留「落盘项目」（其余统计在展开后的「卡片资料」里），状态提醒照旧
+      head = '<div class="sic-h"><button type="button" class="tgl" data-tgl aria-expanded="' + this.open + '">' + crumb + '<span class="pills">' + pills + '</span></button><span class="acts">' + qBtn + boardBtn + chev + '</span></div>' + this.folderHtml()
     }
     const g1 = memN ? '<section class="grp" aria-label="落盘项目"><div class="grp-h">' + ic('mem') + '落盘项目<span class="n">' + memN + '</span><span class="sp"></span>' + (memN > 1 && !this.mg && !i.merging ? '<button type="button" class="btn sm" data-merge title="选几个合并成一个">' + ic('merge') + '合并</button>' : '') + '</div>' + this.listHtml(mem) + (i.merging ? this.runHtml() : this.mg ? this.mgHtml(mem) : '') + '</section>' : ''
     const g2 = '<section class="grp" aria-label="卡片资料"><div class="grp-h">' + ic('repo') + '卡片资料<span class="n">' + matN + '</span><span class="sp"></span><button type="button" class="lnk" data-raw title="插件每一步发给 AI 的卡片档案和落盘项目全文，逐字显示">查看 AI 收到的原文</button></div>' + this.matHtml() + '</section>'
-    this.root.className = 'dpm-dock dpm-sic' + (memN ? ' on' : ' off') + (this.open ? ' open' : '')
+    this.root.className = 'dpm-dock dpm-sic' + (memN ? ' on' : ' off') + (memN ? '' : ' mk-mode') + (this.open ? ' open' : '') + (this.ncFresh ? ' fresh' : '')
+    if (this.ncFresh) { this.ncFresh = false; setTimeout(() => this.root.classList.remove('fresh'), 900) }
     const mk = (this.root.querySelector('#dpmMkIn') as HTMLInputElement | null)?.value ?? ''
-    this.root.innerHTML = head + '<div class="sic-b"><div class="in"><div class="scroll">' + g1 + g2 + '</div></div></div>'
+    // v86：信息卡只留两行——面包屑 + 状态胶囊，以及「卡片资料 N · 查看 AI 收到的原文」
+    // 落盘项目列表 / 合并 / 新建入口都在卡片详情里（详情有完整的一块），这里不再重复。
+    void g1
+    this.root.innerHTML = head + '<div class="sic-b"><div class="in"><div class="scroll"><div class="sic-lite">' + g1 + g2 + '</div></div></div></div>'
+    this.syncOpenBtn()
     const s = this.root.querySelector('.scroll') as HTMLElement | null
     if (s) s.scrollTop = scroll
     const mi = this.root.querySelector('#dpmMkIn') as HTMLInputElement | null
@@ -335,15 +498,34 @@ export class SessionCard {
     }, 200)
   }
 
+  /** 0.24 信息卡里展开了说明全文的子任务。 */
+  private taskOpen = new Set<string>()
   private matHtml(): string {
     const ci = this.info!.cardInfo!
+    const lf = ci.tasks.flatMap((t) => (t.subs?.length ? t.subs : [t]))
     const sec = (icon: string, t: string, n: string | number, body: string): string => '<div class="ma-s"><p class="ma-t">' + ic(icon) + t + ' <span class="c">' + n + '</span></p>' + body + '</div>'
     const repos = ci.repos.length ? ci.repos.map((r) => '<div class="row"><span class="k mq">' + esc(r.name) + '</span><span class="v mono mq">' + esc(r.path) + '</span>' + copyBtn(r.path, '仓库路径') + '</div>').join('') : '<p class="empty">没有仓库</p>'
-    const tasks = ci.tasks.length ? ci.tasks.map((t) => '<div class="row task' + (t.done ? ' dn' : '') + '"><span class="bx">' + (t.done ? ic('check') : '') + '</span><span class="v mq">' + esc(t.text) + '</span></div>').join('') : '<p class="empty">没有子任务</p>'
-    const notes = ci.notes.trim() ? '<p class="note">' + esc(ci.notes) + '</p>' : '<p class="empty">没有相关说明</p>'
-    const links = ci.links.length ? ci.links.map((l) => '<div class="row"><span class="ty">' + esc(l.type) + '</span><span class="v pri mq" title="' + esc(l.url) + '">' + esc(l.text) + '</span>' + copyBtn(l.url, '链接') + '<a class="ib" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" aria-label="打开链接 ' + esc(l.text) + '" title="打开链接">' + ic('ext') + '</a></div>').join('') : '<p class="empty">没有相关链接</p>'
+    // 0.24 子任务：两级；有说明 / 链接的整行可点开看全文（说明里的 [n] 显示成「链接名」）
+    const lname = (id: string): string => ci.links.find((l) => l.id === id)?.text ?? ''
+    const trow = (t: NonNullable<typeof ci.tasks>[number], lv: number): string => {
+      const k = t.id ?? t.text
+      const ex = this.taskOpen.has(k)
+      const subs = t.subs ?? []
+      const sd = subs.filter((x) => x.done).length
+      const extra = [t.type ?? '', (t.links ?? []).length ? (t.links ?? []).length + ' 个链接' : '', subs.length ? sd + '/' + subs.length : ''].filter(Boolean).join(' · ')
+      const note = (t.note ?? '').replace(/\[(\d{1,2})\]/g, (m, n: string) => { const x = lname((t.links ?? [])[+n - 1] ?? ''); return x ? '「' + x + '」' : m })
+      const ls = (t.links ?? []).map((id, i) => '[' + (i + 1) + '] ' + lname(id)).filter((x) => !/\] $/.test(x))
+      const sub = note || ls.length ? '<span class="dsub">' + esc(note) + (ex && ls.length ? (note ? '\n' : '') + '链接：' + esc(ls.join('　')) : '') + '</span>' : ''
+      const inner = '<span class="bx">' + (t.done ? ic('check') : '') + '</span><span class="dv"><span class="dt">' + esc(t.text) + '</span>' + sub + '</span>' + (extra ? '<span class="dc">' + esc(extra) + '</span>' : '')
+      return sub ? '<button type="button" class="row task drow' + (t.done ? ' dn' : '') + (lv ? ' child' : '') + '" data-task-open="' + esc(k) + '" aria-expanded="' + ex + '">' + inner + '<span class="ex">' + ic('chev') + '</span></button>'
+        : '<div class="row task drow' + (t.done ? ' dn' : '') + (lv ? ' child' : '') + '">' + inner + '</div>'
+    }
+    const tasks = ci.tasks.length ? ci.tasks.map((t) => trow(t, 0) + (t.subs ?? []).map((x) => trow(x, 1)).join('')).join('') : '<p class="empty">没有任务</p>'
+    const notes = ci.notes.length ? '<div class="note">' + ci.notes.map((x) => '<div class="dk"><b>' + esc(x.t) + '</b><p>' + esc(x.v) + '</p></div>').join('') + '</div>' : '<p class="empty">没有相关说明</p>'
+    const rel = (ci.related ?? []).length ? (ci.related ?? []).map((r) => '<div class="row drow"><span class="dv"><span class="dt">' + esc(r.title) + '</span><span class="dsub">' + esc(r.group + (r.archived ? ' · 已归档' : '') + ' · ' + (r.dirs[0] ?? '没有落盘项目')) + '</span></span>' + (r.dirs[0] ? copyBtn(r.dirs[0], '记忆文件夹路径') : '') + '</div>').join('') : ''
+    const links = ci.links.length ? ci.links.map((l) => '<div class="row">' + (l.type ? '<span class="ty">' + esc(l.type) + '</span>' : '') + '<span class="v pri mq" title="' + esc(l.url) + '">' + esc(l.text) + '</span>' + copyBtn(l.url, '链接') + '<a class="ib" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" aria-label="打开链接 ' + esc(l.text) + '" title="打开链接">' + ic('ext') + '</a></div>').join('') : '<p class="empty">没有相关链接</p>'
     const files = ci.files.length ? ci.files.map((f) => '<div class="row' + (f.exists ? '' : ' gone') + '"><span class="k mq">' + esc(f.path.split('/').pop() ?? f.path) + '</span><span class="v mono mq">' + esc(f.path) + (f.exists ? '' : '（已删除）') + '</span>' + copyBtn(f.path, '文件路径') + '</div>').join('') : '<p class="empty">没有相关文件</p>'
-    return '<div class="ma">' + sec('repo', '仓库', ci.repos.length, repos) + sec('clip', '子任务', ci.tasks.length ? ci.tasks.filter((t) => t.done).length + '/' + ci.tasks.length : 0, tasks) + sec('note', '相关说明', ci.notes.trim() ? ci.notes.length + ' 字' : 0, notes) + sec('link', '相关链接', ci.links.length, links) + sec('file', '相关文件', ci.files.length, files) + '</div>'
+    return '<div class="ma">' + sec('repo', '仓库', ci.repos.length, repos) + sec('check', '任务', lf.length ? lf.filter((t) => t.done).length + '/' + lf.length : 0, tasks) + sec('note', '相关说明', ci.notes.length, notes) + sec('link', '相关链接', ci.links.length, links) + sec('file', '相关文件', ci.files.length, files) + sec('cards', '关联卡片', (ci.related ?? []).length, rel || '<p class="empty">没有关联卡片</p>') + '</div>'
   }
   private mkTok(): void {
     const inp = this.root.querySelector('#dpmMkIn') as HTMLInputElement | null
@@ -368,10 +550,10 @@ export class SessionCard {
   }
   /** 未关联时首行的主按钮：进行中 / 等回复 / 重新新建 / 关联并落盘（完全同名）/ 新建并落盘。 */
   private mkBtn(run: LfRun | null, busy: boolean): string {
-    if (busy) return '<button type="button" class="btn sm pri" disabled>' + (run?.state === 'ask' ? '等待回复' : '<span class="spin"></span>落盘中') + '</button>'
+    if (busy) return '<button type="button" class="btn sm pri mk-go" disabled>' + (run?.state === 'ask' ? '等待回复' : '<span class="spin"></span>落盘中') + '</button>'
     const m = this.mt.r
-    if (m?.mode === 'exact' && m.hits[0]) return '<button type="button" class="btn sm pri" data-link-lf="' + esc(m.hits[0].key) + '" title="关联 ' + esc(m.hits[0].key) + ' 并在本会话落盘">' + ic('save') + '关联并落盘</button>'
-    return '<button type="button" class="btn sm pri" data-mk>' + ic('plus') + (run && run.state !== 'done' ? '重新新建并落盘' : '新建并落盘') + '</button>'
+    if (m?.mode === 'exact' && m.hits[0]) return '<button type="button" class="btn sm pri mk-go" data-link-lf="' + esc(m.hits[0].key) + '" title="关联 ' + esc(m.hits[0].key) + ' 并在本会话落盘">' + ic('save') + '<span class="mk-go-txt">关联并落盘</span></button>'
+    return '<button type="button" class="btn sm pri mk-go" data-mk>' + ic('plus') + '<span class="mk-go-txt">' + (run && run.state !== 'done' ? '重新新建并落盘' : '新建并落盘') + '</span></button>'
   }
   private runLine(run: LfRun | null): string {
     if (!run || run.state === 'busy' || run.state === 'done') return ''
@@ -468,6 +650,8 @@ export class SessionCard {
   }
 
   // ── 交互 ──
+  /** 「> 引用卡片内容」按下时不抢输入框焦点（光标留在原处，插入位置才对）。 */
+  private keepCaret = (e: MouseEvent): void => { if ((e.target as HTMLElement).closest?.('[data-qopen]')) e.preventDefault() }
   private onInput = (e: Event): void => {
     const t = e.target as HTMLInputElement
     if (t.id === 'dpmMkIn') { this.mkTok(); this.scheduleMatch(); return }
@@ -486,6 +670,12 @@ export class SessionCard {
   }
   private toggle(): void {
     this.open = !this.open
+    this.animUntil = Date.now() + 360
+    // 连点：把上一次延迟重画挪到本次动画结束，别在动画中间重画
+    if (this.animTimer) {
+      clearTimeout(this.animTimer)
+      this.animTimer = window.setTimeout(() => { this.animTimer = 0; if (!this.dead) this.render() }, 376)
+    }
     this.root.classList.toggle('open', this.open)
     this.root.querySelectorAll('[data-tgl]').forEach((b) => b.setAttribute('aria-expanded', String(this.open)))
   }
@@ -526,9 +716,21 @@ export class SessionCard {
     const d = t.dataset
     const i = this.info
     if (d.tgl !== undefined) return this.toggle()
-    if (d.board !== undefined && i?.card) return this.host.openBoard(i.card.id)
+    if (d.qopen !== undefined) { this.quote.launch(); return }
+    if (d.ncOpen !== undefined) { this.ncOpen(); return }
+    if (d.board !== undefined && i?.card) {
+      this.host.openDetail(i.card.id)
+      this.sicTipHide()
+      setTimeout(() => {
+        this.syncOpenBtn()
+        const el = document.querySelector('.dpm-global-detail')
+        if (el) { el.classList.remove('sic-flash'); void (el as HTMLElement).offsetWidth; el.classList.add('sic-flash'); setTimeout(() => el.classList.remove('sic-flash'), 700) }
+      }, 80)
+      return
+    }
     if (d.raw !== undefined) { void this.openRaw(t); return }
     if (d.copy !== undefined) { void this.copy(t, d.copy, d.what ?? ''); return }
+    if (d.taskOpen !== undefined) { if (this.taskOpen.has(d.taskOpen)) this.taskOpen.delete(d.taskOpen); else this.taskOpen.add(d.taskOpen); this.render(); (this.root.querySelector('[data-task-open="' + CSS.escape(d.taskOpen) + '"]') as HTMLElement | null)?.focus({ preventScroll: true }); return }
     if (d.mk !== undefined) { void this.make(); return }
     if (d.linkLf) { void this.linkLf(d.linkLf, true); return }
     if (d.onlyLf) { void this.linkLf(d.onlyLf, false); return }
@@ -618,6 +820,49 @@ export class SessionCard {
     ov.innerHTML = '<div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dpmRawT"><div class="dlg-h"><div style="flex:1;min-width:0"><h2 id="dpmRawT">AI 收到的原文</h2><p>' + esc((this.info?.card?.group ?? '') + ' / ' + (this.info?.card?.title ?? '')) + ' · 和插件发给 AI 的文本逐字一致</p></div><button type="button" class="ib" data-raw-close aria-label="关闭" title="关闭（Esc）">' + ic('x') + '</button></div>' + tabs + '<div class="dlg-b" id="dpmRawBody" role="tabpanel" aria-labelledby="dpmRawTab-' + this.rawTab + '">' + body + '</div><div class="dlg-f"><span class="meta">约 ' + tok(this.rawText()).toLocaleString() + ' token</span><button type="button" class="btn sm" data-raw-copy>复制全文</button><button type="button" class="btn sm" data-raw-close>关闭</button></div></div>'
     if (!ov.contains(document.activeElement)) (ov.querySelector('[data-raw-close]') as HTMLElement).focus()
   }
+  /** 0.27 创建会话卡片弹窗：标题默认会话名、阶段默认第一个。 */
+  private ncOpen(): void {
+    const f = this.info?.free
+    if (!f) return
+    this.nc?.remove()
+    const dlg = document.createElement('dialog')
+    dlg.className = 'dpm-dialog nc-dlg'
+    dlg.setAttribute('aria-labelledby', 'dpmNcT'); dlg.setAttribute('aria-describedby', 'dpmNcSub')
+    const name = this.host.sess(this.sid)?.title ?? ''
+    dlg.innerHTML = '<form method="dialog" novalidate><div class="dlg-h"><h2 id="dpmNcT">创建会话卡片</h2><p id="dpmNcSub">在卡片组「' + esc(f.group.name) + '」里新建一张卡片，并把这个会话关联上去。</p><button type="button" class="ib dlg-x" data-nc-x aria-label="关闭">' + ic('x') + '</button></div>'
+      + '<div class="dlg-b"><div class="nc-f"><label for="dpmNcIn">卡片标题</label><input type="text" class="fld" id="dpmNcIn" maxlength="120" autocomplete="off" aria-describedby="dpmNcH dpmNcE"><p class="hint" id="dpmNcH">默认是这个会话现在的名字，可以改。</p><p class="err" id="dpmNcE" hidden></p></div>'
+      + '<div class="nc-f"><span class="lb" id="dpmNcStL">放到哪个阶段</span><fieldset class="stg" aria-labelledby="dpmNcStL">' + f.group.statuses.map((st, k) => '<label' + (k ? '' : ' class="on"') + '><input type="radio" name="dpmNcSt" value="' + esc(st.id) + '"' + (k ? '' : ' checked') + '><span class="n">' + (k + 1) + '</span>' + esc(st.name) + '</label>').join('') + '</fieldset></div>'
+      + '<div class="nc-sum">' + ic('cards') + '<span>卡片会带上卡片组的共用仓库；本会话关联后，每一步都会读取这张卡片的资料。</span></div></div>'
+      + '<div class="dlg-f"><span class="sp"></span><button type="button" class="btn" data-nc-x>取消</button><button type="submit" class="btn primary" id="dpmNcOk">' + ic('plus') + '创建卡片并关联本会话</button></div></form>'
+    document.body.append(dlg)
+    this.nc = dlg
+    const inp = dlg.querySelector('#dpmNcIn') as HTMLInputElement
+    inp.value = name
+    const err = dlg.querySelector('#dpmNcE') as HTMLElement
+    const close = (): void => { if (dlg.open) dlg.close(); dlg.remove(); if (this.nc === dlg) this.nc = null }
+    dlg.addEventListener('click', (e) => { if ((e.target as HTMLElement).closest('[data-nc-x]')) close() })
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); close() })
+    inp.addEventListener('input', () => { inp.removeAttribute('aria-invalid'); err.hidden = true })
+    dlg.addEventListener('change', () => { dlg.querySelectorAll('.stg label').forEach((l) => l.classList.toggle('on', !!l.querySelector('input:checked'))) })
+    dlg.querySelector('form')!.addEventListener('submit', (e) => {
+      e.preventDefault()
+      const v = inp.value.replace(/\s+/g, ' ').trim()
+      if (!v) { inp.setAttribute('aria-invalid', 'true'); err.hidden = false; err.textContent = '卡片标题不能为空'; inp.focus(); return }
+      const col = (dlg.querySelector('input[name=dpmNcSt]:checked') as HTMLInputElement).value
+      const ok = dlg.querySelector('#dpmNcOk') as HTMLButtonElement
+      ok.disabled = true; ok.setAttribute('aria-busy', 'true')
+      void post<{ result: { card: string } }>('session/create-card', { sessionId: this.sid, group: f.group.id, title: v, col, cwd: this.host.sess(this.sid)?.cwd ?? '' }).then(async (r) => {
+        close()
+        this.ncFresh = true
+        await this.load(true)
+        const st = f.group.statuses.find((x) => x.id === col)?.name ?? ''
+        const cid = r.result.card
+        this.host.toast('已在「' + f.group.name + ' · ' + st + '」创建卡片「' + v + '」，并关联本会话', 'ok', [{ label: '在看板打开', run: () => this.host.openBoard(cid) }, { label: '撤销', run: () => { void post('card/remove', { id: cid }).then(() => { this.host.toast('已撤销：卡片删除，会话回到没有卡片的状态'); void this.load(true) }, (x) => this.host.toast('撤销失败：' + (x instanceof ApiError ? x.message : String(x)), 'err')) } }])
+      }, (x) => { ok.disabled = false; ok.removeAttribute('aria-busy'); err.hidden = false; err.textContent = x instanceof ApiError ? x.message : String(x) })
+    })
+    dlg.showModal()
+    inp.focus(); inp.select()
+  }
   private closeRaw(): void {
     const ov = this.ov
     if (!ov) return
@@ -629,19 +874,31 @@ export class SessionCard {
 }
 
 /** 悬停走马灯：只在文字被截断且鼠标悬停时跑，离开即复原；减少动效时改成悬停提示。挂在 document 上，返回卸载函数。 */
+/** 文字放不下才开始走马灯（返回是否开始）；减少动效时只补悬停提示。 */
+export function mqStart(el: HTMLElement): boolean {
+  if (el.dataset.mq !== undefined || el.children.length || el.scrollWidth <= el.clientWidth + 1) return false
+  const txt = el.textContent ?? ''
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { if (!el.title) el.title = txt; return false }
+  el.dataset.mq = txt
+  el.classList.add('mq-on')
+  // v88：信息卡面包屑按 45px/s 的恒定速度循环（轨道 = 文字 + 40px 间距）
+  const speed = Number(el.dataset.mqSpeed) || 0
+  el.style.setProperty('--mq-dur', (speed ? (el.scrollWidth + 40) / speed : Math.max(4, txt.length * 0.22)) + 's')
+  el.innerHTML = '<span class="mq-track"><span>' + esc(txt) + '</span><span aria-hidden="true">' + esc(txt) + '</span></span>'
+  return true
+}
+export function mqStop(el: HTMLElement): void {
+  if (el.dataset.mq === undefined) return
+  el.textContent = el.dataset.mq
+  delete el.dataset.mq
+  el.classList.remove('mq-on')
+  el.style.removeProperty('--mq-dur')
+}
 export function marquee(scope: string): () => void {
-  const reduce = (): boolean => matchMedia('(prefers-reduced-motion: reduce)').matches
   const over = (e: MouseEvent): void => {
     const el = (e.target as HTMLElement).closest?.(scope) as HTMLElement | null
-    if (!el || el.dataset.mq !== undefined || el.children.length) return
-    if (el.scrollWidth <= el.clientWidth + 1) return
-    const txt = el.textContent ?? ''
-    if (reduce()) { if (!el.title) el.title = txt; return }
-    el.dataset.mq = txt
-    el.classList.add('mq-on')
-    el.style.setProperty('--mq-dur', Math.max(4, txt.length * 0.22) + 's')
-    el.innerHTML = '<span class="mq-track"><span>' + esc(txt) + '</span><span aria-hidden="true">' + esc(txt) + '</span></span>'
-    const leave = (): void => { if (el.dataset.mq !== undefined) el.textContent = el.dataset.mq; delete el.dataset.mq; el.classList.remove('mq-on'); el.style.removeProperty('--mq-dur'); el.removeEventListener('mouseleave', leave) }
+    if (!el || !mqStart(el)) return
+    const leave = (): void => { mqStop(el); el.removeEventListener('mouseleave', leave) }
     el.addEventListener('mouseleave', leave)
   }
   document.addEventListener('mouseover', over)

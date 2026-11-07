@@ -1,26 +1,29 @@
-/**
- * 0.18 会话注入与卡片档案（纯函数）。
- * - cardSection：卡片档案（实时）——系统提示里唯一的一份卡片资料，每步按看板现生成。
- * - cardBlock：写进 STATE 的「卡片档案块」（按看板生成、AI 不写）；stripBlock / placeBlock / maskBlock 处理它。
- * - memoryText：系统提示单段 = 卡片档案（实时）+ 记忆索引（每个关联落盘项目一行摘要 + 版本）。STATE 全文不进系统提示，
- *   由 landfill.autoRead 在会话里注入最新版（见 landfill.ts）。
- */
 import { Board, Card, memoryOf } from './model.js';
 import type { StateInfo } from './states.js';
 export declare const BLOCK_TITLE = "## \uD83D\uDDC2 \u5361\u7247\u6863\u6848\uFF08dsh-project-manager \u6309\u770B\u677F\u751F\u6210\uFF0C\u52FF\u624B\u6539\uFF1B\u4EE5\u770B\u677F\u4E3A\u51C6\uFF09";
 export declare const MASK = "\uFF08\u672C\u5361\u7247\u7684\u5361\u7247\u6863\u6848\u89C1\u7CFB\u7EDF\u63D0\u793A\u300C\u5361\u7247\u6863\u6848\uFF08\u5B9E\u65F6\uFF09\u300D\uFF0C\u8FD9\u91CC\u7701\u7565\u4EE5\u514D\u91CD\u590D\uFF09";
+/** statePath = 落盘项目 key → STATE.md 绝对路径（关联卡片只注入记忆文件夹路径用）。 */
 export interface CardOpts {
     notesMax: number;
     maxItems?: number;
     mounts?: ReadonlyMap<string, string>;
     boardPath?: string;
+    statePath?: (key: string) => string | undefined;
 }
-/** 一张卡片的档案正文（不含标题）：位置、上级总览、仓库、子任务、链接、文件、说明。 */
+/** 本机时间 YYYY-MM-DD HH:MM。 */
+export declare const stamp: (iso: string) => string;
+/** 0.24 相关说明全文：每条「【小标题】」+ 内容，空行隔开。v87：关掉注入的条目不出现（AI 原文、STATE、系统提示同一口径）。 */
+export declare const notesText: (c: Card) => string;
+/**
+ * 一张卡片的档案正文（不含标题）：位置、上级总览、仓库、链接、文件、说明。
+ * v93：不再输出「任务」整块 —— 任务不再自动注入会话上下文（系统提示与 STATE 卡片档案同时生效）。
+ * 任务数据一个字不删，仍可用 task_manage / 看板卡片详情 / 日程看板查看。
+ */
 export declare function cardLines(b: Board, c: Card, o: CardOpts, skipKey?: string): string[];
 /** 系统提示里的卡片档案（实时）。 */
-export declare function cardSection(b: Board, c: Card, notesMax?: number): string;
+export declare function cardSection(b: Board, c: Card, notesMax?: number, statePath?: (key: string) => string | undefined): string;
 /** 写进 STATE 的卡片档案块；没有任何卡片 / 卡片组关联这个 key → 空串。卡片级最多 5 张。 */
-export declare function cardBlock(b: Board, key: string, at: string, boardPath?: string): string;
+export declare function cardBlock(b: Board, key: string, at: string, boardPath?: string, statePath?: (key: string) => string | undefined): string;
 /**
  * 档案块在文本里的位置 [起, 止)（含标题行与结尾换行）；没有 → null。
  * 只认独占一行的开始标记（<!-- dpm:card v<n> key=…）和独占一行的结束标记：正文里引用标记文字不算（0.18 门 12 实测误删半节）；
@@ -47,5 +50,5 @@ export interface IndexInfo {
     full?: boolean;
 }
 /** 系统提示单段：卡片档案（实时）+ 记忆索引。索引按字节预算从后往前省略并注明。 */
-export declare function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes?: number, notesMaxBytes?: number): string;
+export declare function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes?: number, notesMaxBytes?: number, statePath?: (key: string) => string | undefined): string;
 export { memoryOf };

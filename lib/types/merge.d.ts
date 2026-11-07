@@ -129,16 +129,7 @@ export interface BoardPort {
             archivedAt?: string;
         }>;
     };
-    relink(fn: (b: {
-        groups: Array<{
-            id: string;
-            links: string[];
-        }>;
-        cards: Array<{
-            id: string;
-            links: string[];
-        }>;
-    }) => void): Promise<void>;
+    relink(fn: (b: import('./model.js').Board) => void): Promise<void>;
 }
 export interface MergeDeps {
     aiRoot: string;

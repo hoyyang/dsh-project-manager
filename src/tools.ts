@@ -45,9 +45,9 @@ function summary(b: M.Board, states: StateCatalog): string {
 export function registerTools(host: { register(t: unknown): void }, store: BoardStore, states: StateCatalog): void {
   host.register(defineTool({
     name: 'card_manage',
-    description: 'Project board (dsh-project-manager). op: list | create_group{name} | create{group,title,links?} | update{card?,title?,links?} | remove{card} | link_group{group,links}. links are landfill-project keys "<project>/<slug>". card defaults to the card bound to this session.',
+    description: 'Project board (dsh-project-manager). op: list | create_group{name} | create{group,title,links?} | update{card?,title?,links?} | remove{card}. links are landfill-project keys "<project>/<slug>". card defaults to the card bound to this session. 要给卡片关联落盘项目，用 update{card,links}（整份替换）；卡片组的共用记忆（整组所有卡片都会读取）只能在看板的「卡片组设置」里改，本工具不提供。',
     parameters: {
-      op: { type: 'string', required: true, description: 'list|create_group|create|update|remove|link_group' },
+      op: { type: 'string', required: true, description: 'list|create_group|create|update|remove' },
       group: { type: 'string', description: 'group id' },
       card: { type: 'string', description: 'card id' },
       name: { type: 'string', description: 'group name' },
@@ -66,7 +66,6 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
             case 'create': return M.addCard(b, String(a.group ?? ''), String(a.title ?? ''), (a.links as string[] | undefined) ?? [])
             case 'update': return M.updateCard(b, resolveCard(b, a.card, c).id, { t: a.title as string | undefined, links: a.links as string[] | undefined })
             case 'remove': M.removeCard(b, String(a.card ?? '')); return null
-            case 'link_group': M.setGroupLinks(b, String(a.group ?? ''), (a.links as string[]) ?? []); return M.group(b, String(a.group))
             default: throw new M.BoardError('BAD_OP', '未知 op ' + String(a.op))
           }
         }, () => [{ at: new Date().toISOString(), actor: actor(c), kind: 'card_manage:' + String(a.op) }])
@@ -117,13 +116,17 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
 
   host.register(defineTool({
     name: 'task_manage',
-    description: 'Checklist on a card. op: add{text} | check{index,done} | remove{index}. card defaults to this session\'s card.',
+    description: 'Tasks on a card (two levels: task + subtasks). num = number shown in the card archive ("2" or "2.1"). op: add{text,note?,type?,parent?} | check{num,done} | update{num,text?,note?,type?} | remove{num}. Parent done = all children done. card defaults to this session\'s card.',
     parameters: {
-      op: { type: 'string', required: true, description: 'add|check|remove' },
+      op: { type: 'string', required: true, description: 'add|check|update|remove' },
       card: { type: 'string', description: 'card id' },
-      text: { type: 'string', description: 'task text for add' },
-      index: { type: 'number', description: '0-based task index' },
+      num: { type: 'string', description: 'task number, e.g. "2" or "2.1"' },
+      parent: { type: 'string', description: 'add: parent task number (one level only)' },
+      text: { type: 'string', description: 'title' },
+      note: { type: 'string', description: 'description' },
+      type: { type: 'string', description: 'subtask type (existing name, "" = none)' },
       done: { type: 'boolean', description: 'for check' },
+      index: { type: 'number', description: 'legacy 0-based top-level index' },
     },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v) }] },
     execute: async (args, exec) => {
@@ -132,13 +135,18 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
       try {
         const tasks = await store.mutate((b) => {
           const cd = resolveCard(b, a.card, c)
-          const list = cd.tasks.slice()
-          const i = typeof a.index === 'number' ? a.index : -1
-          if (a.op === 'add') list.push({ text: String(a.text ?? ''), done: false })
-          else if (a.op === 'check' || a.op === 'remove') {
-            if (i < 0 || i >= list.length) throw new M.BoardError('BAD_INDEX', '子任务序号越界 ' + i + '（共 ' + list.length + ' 项）')
-            if (a.op === 'check') list[i] = { ...list[i], done: a.done !== false }
-            else list.splice(i, 1)
+          const list = M.taskList(cd.tasks)
+          const num = typeof a.num === 'string' && a.num ? a.num : typeof a.index === 'number' ? String(a.index + 1) : ''
+          const fields = { ...(a.text !== undefined ? { text: String(a.text) } : {}), ...(a.note !== undefined ? { note: String(a.note) } : {}), ...(a.type !== undefined ? { type: String(a.type) } : {}) }
+          if (a.op === 'add') {
+            const t = { text: String(a.text ?? ''), done: false, ...fields }
+            if (typeof a.parent === 'string' && a.parent) { const p = M.taskAt(list, a.parent); if (p.sub) throw new M.BoardError('TOO_DEEP', '子任务最多一层：' + a.parent + ' 已经是子任务'); p.task.subs = [...(p.task.subs ?? []), t] }
+            else list.push(t)
+          } else if (a.op === 'check' || a.op === 'update' || a.op === 'remove') {
+            const hit = M.taskAt(list, num)
+            if (a.op === 'remove') hit.list.splice(hit.i, 1)
+            else if (a.op === 'update') Object.assign(hit.task, fields)
+            else { const on = a.done !== false; hit.task.done = on; for (const s of hit.task.subs ?? []) s.done = on }
           } else throw new M.BoardError('BAD_OP', '未知 op ' + String(a.op))
           M.setTasks(b, cd.id, list)
           return M.card(b, cd.id).tasks
@@ -168,6 +176,7 @@ export function registerLandfillTool(host: { register(t: unknown): void }, lf: L
       file: { type: 'string', description: 'recall/write/retire: path inside the project folder; append: path under memory/' },
       src: { type: 'string', description: 'import: absolute local file' },
       dest: { type: 'string', description: 'import: evidence/<name>' },
+      allowLarge: { type: 'boolean', description: 'import: user already confirmed copying a 50–500MB file (still copies); >500MB always path only' },
       newState: { type: 'boolean', description: 'persist: allow a second STATE for this card' },
       text: { type: 'string', description: 'append: text' },
       projectId: { type: 'string', description: 'register' },
@@ -188,7 +197,7 @@ export function registerLandfillTool(host: { register(t: unknown): void }, lf: L
           case 'persist': return toJson({ ok: true, ...(await lf.persist(s, str(a.slug), a.content, str(a.project), str(a.expectedHash), a.drop ?? [], a.newState === true)) })
           case 'write': return toJson({ ok: true, ...(await lf.write(s, str(a.slug), a.file, a.content, str(a.project), str(a.expectedHash))) })
           case 'retire': return toJson({ ok: true, ...(await lf.retire(s, str(a.slug), a.file, str(a.project))) })
-          case 'import': return toJson({ ok: true, ...(await lf.importFile(s, str(a.slug), a.src, a.dest, str(a.project))) })
+          case 'import': return toJson({ ok: true, ...(await lf.importFile(s, str(a.slug), a.src, a.dest, str(a.project), { allowLarge: a.allowLarge === true })) })
           case 'append': return toJson({ ok: true, ...(await lf.append(s, a.file, a.text, str(a.project))) })
           case 'list': return toJson({ ok: true, ...lf.list(str(a.project)) })
           case 'register': return toJson({ ok: true, ...(await lf.register(a.projectId, a.path, a.aliases, a.confirm)) })

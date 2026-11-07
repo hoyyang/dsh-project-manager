@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import type { StateCatalog } from './states.js'
 import { blockOf, maskBlock, sameBlock, stripBlock, placeBlock } from './memory.js'
+import { clip, safeBoundary } from './text.js'
 import { specHint, specIssues } from './lfspec.js'
 
 export const SKILL_NAME = 'landfill-project'
@@ -174,7 +175,8 @@ export function cutEnd(text: string, offset: number, max = CHUNK): number {
   const h = text.lastIndexOf('\n## ', lim - 1)
   if (h > offset + max / 2) return h + 1
   const n = text.lastIndexOf('\n', lim - 1)
-  return n > offset ? n + 1 : lim
+  // 没有换行可切时也不能切在代理对中间（半个 emoji 会让后续请求被网关判 400）
+  return n > offset ? n + 1 : safeBoundary(text, lim)
 }
 /** 从 0 开始的全部分段起点。 */
 export function chunkStarts(text: string, max = CHUNK): number[] {
@@ -185,7 +187,7 @@ export function chunkStarts(text: string, max = CHUNK): number[] {
 /** ## 标题目录（带 offset），最多 60 条（只放二级标题，控制第一段体量）。 */
 export function toc(text: string): Array<{ offset: number; title: string }> {
   const out: Array<{ offset: number; title: string }> = []
-  for (const m of text.matchAll(/^## .*$/gm)) { out.push({ offset: m.index ?? 0, title: m[0].slice(3, 63) }); if (out.length >= 60) break }
+  for (const m of text.matchAll(/^## .*$/gm)) { out.push({ offset: m.index ?? 0, title: clip(m[0].slice(3), 60) }); if (out.length >= 60) break }
   return out
 }
 /** 已读区间合并后，没读到的部分。 */
@@ -286,12 +288,16 @@ export function isIndexed(rel: string, whole: string): boolean {
   return paths.some((p) => p === rel || (p.endsWith('/') && rel.startsWith(p)))
 }
 const IMPORT_MAX = 50 * 1024 * 1024
+const IMPORT_HARD_MAX = 500 * 1024 * 1024
 /** 文件夹内相对路径校验：不能越界 / 不能是 STATE.md / 每段只用字母数字中文 . _ -。 */
 export function checkRel(v: unknown, mode: 'read' | 'write' | 'import' = 'read'): string {
   if (typeof v !== 'string' || !v.trim()) throw new LandfillError('BAD_ARG', 'file 是项目文件夹里的相对路径（如 notes/design.md、plans/2026-10-13-x.md）')
   const r = v.trim().replace(/^\.\//, '')
   const seg = r.split('/')
-  if (r.startsWith('/') || seg.some((s) => !s || s.startsWith('.') || !/^[A-Za-z0-9._\u4e00-\u9fff-]+$/.test(s)) || r.length > 300) throw new LandfillError('BAD_ARG', 'file 不合法（只能用字母、数字、中文、. _ -，不能越出项目文件夹）：' + JSON.stringify(v))
+  /* v154（1.2）：导入（import）放宽到「保留原文件名」——允许空格、全角标点等原名字符，只挡路径分隔符与控制字符。
+     其它模式（读 / 写文本）保持原规则：那些是我们自己命名的文件，不需要怪字符。 */
+  const segOk = (s: string): boolean => (mode === 'import' ? /^[^/\\\u0000-\u001f\u007f]+$/.test(s) : /^[A-Za-z0-9._\u4e00-\u9fff-]+$/.test(s))
+  if (r.startsWith('/') || seg.some((s) => !s || s.startsWith('.') || !segOk(s)) || r.length > 300) throw new LandfillError('BAD_ARG', 'file 不合法（只能用字母、数字、中文、. _ -，导入可以带空格；不能越出项目文件夹）：' + JSON.stringify(v))
   if (r === 'STATE.md') throw new LandfillError('BAD_ARG', 'STATE.md 用 op=persist 写，不能用 ' + mode)
   if (mode === 'write' && !WRITE_EXT.test(r)) throw new LandfillError('BAD_ARG', 'op=write 只写文本（.md .txt .json .log .csv .yml）：' + r)
   if (mode === 'import' && !r.startsWith('evidence/')) throw new LandfillError('BAD_ARG', 'op=import 只能导入到 evidence/ 下：' + r)
@@ -860,13 +866,18 @@ export class Landfill {
   }
 
   /** 0.18 导入本机文件（截图 / 日志等，可二进制）到 evidence/。需要新版 ai-memory。 */
-  async importFile(s: ToolSession, slugOrKey: string | undefined, src: unknown, dest: unknown, project?: string): Promise<Record<string, unknown>> {
+  async importFile(s: ToolSession, slugOrKey: string | undefined, src: unknown, dest: unknown, project?: string, opts: { allowLarge?: boolean } = {}): Promise<Record<string, unknown>> {
     const key = await this.keyFor(s, slugOrKey, project)
     if (typeof src !== 'string' || !src.startsWith('/')) throw new LandfillError('BAD_ARG', 'src 是本机文件的绝对路径')
     let st
     try { st = statSync(src) } catch { throw new LandfillError('NOT_FOUND', '没有这个文件：' + src) }
     if (!st.isFile()) throw new LandfillError('BAD_ARG', 'src 不是文件：' + src)
-    if (st.size > IMPORT_MAX) throw new LandfillError('TOO_LARGE', src + ' 超过 50MB，不导入；在 STATE 里记路径即可')
+    // 0.32：50MB–500MB 先确认（仍然复制 / 只记路径）；>500MB 只能只记路径。
+    if (st.size > IMPORT_MAX) {
+      const meta = { size: st.size, max: IMPORT_MAX, hardMax: IMPORT_HARD_MAX, path: src, name: basename(src) }
+      if (st.size > IMPORT_HARD_MAX) throw new LandfillError('TOO_LARGE', src + ' 超过 500MB，只能只记路径', meta)
+      if (!opts.allowLarge) throw new LandfillError('NEED_CONFIRM', src + ' 超过 50MB；确认后仍可复制，或只记路径', meta)
+    }
     const rel = checkRel(typeof dest === 'string' && dest ? dest : 'evidence/' + basename(src).replace(/[^A-Za-z0-9._\u4e00-\u9fff-]+/g, '-'), 'import')
     if (existsSync(join(this.dirOf(key), rel))) throw new LandfillError('EXISTS', rel + ' 已存在：换个 dest，或先 retire 旧的')
     if (this.status.toolOutdated) throw new LandfillError('NEED_UPGRADE', '本机 ~/.ai/tools/ai-memory 是旧版（v' + this.status.toolVersion + '，需要 v' + this.status.bundledVersion + '）不支持导入：请用户在项目看板顶部点「升级 ai-memory」（会先备份）')
@@ -1032,7 +1043,7 @@ export class Landfill {
 
   list(project?: string): Record<string, unknown> {
     const l = this.states.list().filter((x) => !project || x.project === project)
-    return { count: l.length, states: l.slice(0, 200).map((x) => ({ key: x.key, updated: x.updated, status: x.status.slice(0, 120) })), ...(l.length > 200 ? { more: l.length - 200 } : {}) }
+    return { count: l.length, states: l.slice(0, 200).map((x) => ({ key: x.key, updated: x.updated, status: clip(x.status, 120) })), ...(l.length > 200 ? { more: l.length - 200 } : {}) }
   }
 
   async validate(): Promise<Record<string, unknown>> {
@@ -1057,7 +1068,7 @@ export class Landfill {
     const k = reason?.kind
     if (k === 'completed') Object.assign(r, asked ? { state: 'ask' } : { state: 'nowrite' }, { end: Date.now() })
     else if (k === 'aborted' || k === 'interrupted') Object.assign(r, { state: 'stopped', end: Date.now() })
-    else if (k === 'error') Object.assign(r, { state: 'error', end: Date.now(), error: String(reason?.error?.message ?? '未知错误').slice(0, 200) })
+    else if (k === 'error') Object.assign(r, { state: 'error', end: Date.now(), error: clip(String(reason?.error?.message ?? '未知错误'), 200) })
   }
   /** 会话里出现了用户消息：是信息卡发出的那条（含名字）→ 之后的回合结束才算这一轮的结局。 */
   runSeen(sid: string, text: string): void { const r = this.runs.get(sid); if (r && r.state === 'busy' && !r.seen && /落盘项目/.test(text) && (!r.label || text.includes(r.label) || text.includes(r.key))) r.seen = true }

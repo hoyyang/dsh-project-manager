@@ -103,6 +103,8 @@ test('0.20 迁移：persist 自动迁到卡片组落盘文件夹 → 撤销 → 
   ok(await lf.ai(['update-state', '--project', 'dsh', '--slug', 'x', '--stdin'], '# x 旧标题\n\n## 🔄 重启读取清单\n- next_action: 下次 500 时查 ' + join(p.aiRoot, 'projects/dsh/memory/designs/x/notes/log.md') + '\n- commit a1b2c3d\n'))
   ok(await lf.ai(['write', '--project', 'dsh', '--file', 'memory/designs/x/notes/log.md', '--stdin'], '# 日志\n见 ' + join(p.aiRoot, 'projects/dsh/memory/designs/x/STATE.md') + '\n'))
   ok(await lf.ai(['append', '--project', 'dsh', '--file', 'MEMORY_INDEX.md', '--stdin'], '- designs/x/STATE.md — 插件诊断\n'))
+  /* v144（4.3）：卡片相关文件指向这个落盘项目文件夹里的文件 */
+  M.card(b, c.id).files = [{ id: 'f1', path: join(p.aiRoot, 'projects/dsh/memory/designs/x/notes/log.md') }, { id: 'f2', path: join(d, 'repo/other.md') }]
   states.invalidate()
   const readAll = async (sid, key) => { for (const f of lf.pending(sid, key)) { let off = f.next; for (;;) { const r = await lf.recall({ id: sid }, key, undefined, off, undefined, f.file === 'STATE.md' ? undefined : f.file); if (r.next === undefined || r.fileComplete) break; off = r.next } } }
   await readAll('s1', 'dsh/x')
@@ -123,6 +125,7 @@ test('0.20 迁移：persist 自动迁到卡片组落盘文件夹 → 撤销 → 
   assert.ok(!existsSync(join(p.aiRoot, 'projects/dsh/memory/designs/x')), '旧位置移走')
   assert.ok(existsSync(w.migrated.retired + '/STATE.md'), '旧文件夹在回收区')
   assert.deepEqual(M.card(b, c.id).links, ['grp/x'], '卡片关联换成新 key')
+  assert.deepEqual(M.card(b, c.id).files.map((x) => x.path), [join(nd, 'notes/log.md'), join(d, 'repo/other.md')], 'v144：卡片相关文件路径同一事务改到新文件夹，别处的不动')
   assert.match(readFileSync(join(p.aiRoot, 'projects/dsh/memory/MEMORY_INDEX.md'), 'utf8'), /projects\/grp\/memory\/designs\/x\/STATE\.md/, '外部引用改指新位置')
   states.invalidate()
   assert.equal(await lf.resolveKey({}, 'dsh/x').catch(() => 'none'), 'dsh/x', '旧 key 本身不再存在（别名靠 aliases 行）')
@@ -137,6 +140,7 @@ test('0.20 迁移：persist 自动迁到卡片组落盘文件夹 → 撤销 → 
   const back = readFileSync(join(p.aiRoot, 'projects/dsh/memory/designs/x/STATE.md'), 'utf8')
   assert.match(back, /第二次/); assert.match(back, /projects\/dsh\/memory\/designs\/x\/notes\/log\.md/)
   assert.deepEqual(M.card(b, c.id).links, ['dsh/x'])
+  assert.equal(M.card(b, c.id).files[0].path, join(p.aiRoot, 'projects/dsh/memory/designs/x/notes/log.md'), 'v144：撤销迁移时相关文件路径一起还原')
   assert.ok(mig.stay('dsh/x'))
   states.invalidate()
   await readAll('s1', 'dsh/x')

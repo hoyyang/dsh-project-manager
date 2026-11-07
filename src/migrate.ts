@@ -9,9 +9,28 @@ import { dirname, join } from 'node:path'
 import { isText, LandfillError, listDocs, sha256, type Landfill } from './landfill.js'
 import { MERGE_TOOL_VERSION, refFiles, rewritePaths, type BoardPort } from './merge.js'
 import type { StateCatalog } from './states.js'
+import type { Board } from './model.js'
+import { syncFileRefs } from './refsync.js'
 
 const projOf = (key: string): string => key.split('/')[0]
 const slugOf = (key: string): string => key.split('/')[1]
+/**
+ * v144（4.3）：卡片相关文件里以 fromDir 开头的路径改成 toDir 开头；返回改了几条。
+ * v154（1.1）：同一事务把说明里的引用原文一起改到新路径（撤销 = 反向搬家，同一段代码改回）。
+ */
+export function relinkFiles(b: Board, fromDir: string, toDir: string): number {
+  let n = 0
+  for (const c of b.cards) for (const f of c.files ?? []) if (f.path === fromDir || f.path.startsWith(fromDir + '/')) {
+    const np = toDir + f.path.slice(fromDir.length)
+    /* v151（1.2）：旧路径记进 prev，会话里写着旧路径的引用照样认得出 */
+    const p = [f.path, ...(f.prev ?? [])].filter((x, i, a) => x !== np && a.indexOf(x) === i).slice(0, 8)
+    if (p.length) f.prev = p; else delete f.prev
+    const old = f.path
+    f.path = np; n++
+    syncFileRefs(b, f, old)
+  }
+  return n
+}
 const stamp = (d = new Date()): string => d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0')
 
 export interface MigRec {
@@ -74,6 +93,7 @@ export class MigrateEngine {
     const undo: Array<() => Promise<unknown>> = []
     const tdirRel = 'memory/designs/' + slug
     const links: MigRec['links'] = { cards: [], groups: [] }
+    let relinked = 0
     try {
       await this.ai(['retire-dir', '--project', projOf(from), '--dir', 'memory/designs/' + slug, '--dest', dir, ...(h ? ['--expected-hash', h] : [])], undefined, '移走 ' + from + ' ')
       undo.push(() => this.ai(['restore-dir', '--project', projOf(from), '--src', dir + '/' + slug, '--dir', 'memory/designs/' + slug], undefined, '恢复 ' + from + ' '))
@@ -96,6 +116,8 @@ export class MigrateEngine {
       await this.d.board.relink((b) => {
         for (const c of b.cards) if (c.links.includes(from)) { links.cards.push({ id: c.id, before: c.links.slice() }); c.links = [...new Set(c.links.map((k) => (k === from ? to : k)))] }
         for (const g of b.groups) if (g.links.includes(from)) { links.groups.push({ id: g.id, before: g.links.slice() }); g.links = [...new Set(g.links.map((k) => (k === from ? to : k)))] }
+        /* v144（4.3）：同一事务把卡片「相关文件」里指向旧文件夹的路径改到新文件夹（撤销 = 反向搬家，同一段代码改回） */
+        relinked = relinkFiles(b, srcDir, dirname(this.d.lf.statePath(to)))
       })
     } catch (e) {
       for (const u of undo.reverse()) { try { await u() } catch (x) { this.d.log?.warn('迁移失败后撤回出错（需要人工核对 ' + dir + '）', x) } }
@@ -117,7 +139,7 @@ export class MigrateEngine {
       } catch (e) { refsFailed.push({ file: ref.file, error: e instanceof Error ? e.message : String(e) }) }
     }
     this.d.states.invalidate()
-    this.d.log?.info('迁移 ' + from + ' → ' + to + '（旧文件夹在 ' + projOf(from) + '/inbox/retired/' + dir + '）')
+    this.d.log?.info('迁移 ' + from + ' → ' + to + '（旧文件夹在 ' + projOf(from) + '/inbox/retired/' + dir + '）' + (relinked ? '；卡片相关文件改了 ' + relinked + ' 条路径' : ''))
     return { key: to, rewrite: (t) => rewrite(t), rec: { from, to, dir, retired: retiredOf(dir), links, refs, refsFailed, files: files.length } }
   }
 

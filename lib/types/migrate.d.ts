@@ -1,6 +1,12 @@
 import { type Landfill } from './landfill.js';
 import { type BoardPort } from './merge.js';
 import type { StateCatalog } from './states.js';
+import type { Board } from './model.js';
+/**
+ * v144（4.3）：卡片相关文件里以 fromDir 开头的路径改成 toDir 开头；返回改了几条。
+ * v154（1.1）：同一事务把说明里的引用原文一起改到新路径（撤销 = 反向搬家，同一段代码改回）。
+ */
+export declare function relinkFiles(b: Board, fromDir: string, toDir: string): number;
 export interface MigRec {
     id: string;
     from: string;

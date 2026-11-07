@@ -171,7 +171,7 @@ export interface MergeRec {
 }
 export interface BoardPort {
   get(): { groups: Array<{ id: string; links: string[] }>; cards: Array<{ id: string; g: string; links: string[]; archivedAt?: string }> }
-  relink(fn: (b: { groups: Array<{ id: string; links: string[] }>; cards: Array<{ id: string; links: string[] }> }) => void): Promise<void>
+  relink(fn: (b: import('./model.js').Board) => void): Promise<void>
 }
 export interface MergeDeps { aiRoot: string; dataDir: string; lf: Landfill; states: StateCatalog; board: BoardPort; cardBlock(key: string): string; log?: { info(...a: unknown[]): void; warn(...a: unknown[]): void } }
 

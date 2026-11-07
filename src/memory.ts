@@ -5,6 +5,7 @@
  * - memoryText：系统提示单段 = 卡片档案（实时）+ 记忆索引（每个关联落盘项目一行摘要 + 版本）。STATE 全文不进系统提示，
  *   由 landfill.autoRead 在会话里注入最新版（见 landfill.ts）。
  */
+import { dirname } from 'node:path'
 import { Board, Card, Group, group, groupMounts, linksOfKey, memoryOf } from './model.js'
 import type { StateInfo } from './states.js'
 
@@ -22,9 +23,21 @@ function cutBytes(s: string, max: number): string {
 const fence = (s: string): string[] => ['```text', s.replace(/```/g, '\u02cb\u02cb\u02cb'), '```']
 const norm = (p: string): string => p.replace(/\/+$/, '') || '/'
 
-export interface CardOpts { notesMax: number; maxItems?: number; mounts?: ReadonlyMap<string, string>; boardPath?: string }
+/** statePath = 落盘项目 key → STATE.md 绝对路径（关联卡片只注入记忆文件夹路径用）。 */
+export interface CardOpts { notesMax: number; maxItems?: number; mounts?: ReadonlyMap<string, string>; boardPath?: string; statePath?: (key: string) => string | undefined }
 
-/** 一张卡片的档案正文（不含标题）：位置、上级总览、仓库、子任务、链接、文件、说明。 */
+const pad2 = (n: number): string => String(n).padStart(2, '0')
+/** 本机时间 YYYY-MM-DD HH:MM。 */
+export const stamp = (iso: string): string => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) }
+
+/** 0.24 相关说明全文：每条「【小标题】」+ 内容，空行隔开。v87：关掉注入的条目不出现（AI 原文、STATE、系统提示同一口径）。 */
+export const notesText = (c: Card): string => (c.noteItems ?? []).filter((x) => !x.off).map((x) => '【' + x.t + '】\n' + x.v).join('\n\n')
+
+/**
+ * 一张卡片的档案正文（不含标题）：位置、上级总览、仓库、链接、文件、说明。
+ * v93：不再输出「任务」整块 —— 任务不再自动注入会话上下文（系统提示与 STATE 卡片档案同时生效）。
+ * 任务数据一个字不删，仍可用 task_manage / 看板卡片详情 / 日程看板查看。
+ */
 export function cardLines(b: Board, c: Card, o: CardOpts, skipKey?: string): string[] {
   const g = group(b, c.g)
   const st = g.statuses.find((s) => s.id === c.col)?.name ?? c.col
@@ -36,30 +49,42 @@ export function cardLines(b: Board, c: Card, o: CardOpts, skipKey?: string): str
   if (up.length) out.push('- 上级总览（卡片组关联的落盘项目）：' + up.join('、'))
   const own = c.links.filter((k) => k !== skipKey)
   if (skipKey && own.length) out.push('- 这张卡片还关联：' + own.join('、'))
-  const repos = c.repos ?? []
+  // v136：关掉「自动注入 Agent 会话」的仓库 / 链接 / 文件 / 关联卡片不进卡片档案（系统提示与 STATE 卡片档案块同一口径）
+  const repos = (c.repos ?? []).filter((r) => !r.off)
   if (repos.length) {
     out.push('- 仓库（' + repos.length + '）' + (o.mounts ? '：会话目录里 repos/<名>/ 是软链接，读写用这个路径（仓库自己的 AGENTS.md / CLAUDE.md 才会加载）' : '：'))
     for (const r of repos) { const n = o.mounts?.get(norm(r.path)); out.push('  - ' + r.name + '（' + r.role + '）：' + (n ? 'repos/' + n + '/ → ' : '') + r.path) }
   }
-  const tasks = c.tasks ?? []
-  if (tasks.length) out.push('- 子任务（' + tasks.filter((t) => t.done).length + '/' + tasks.length + ' 完成）：', ...cap(tasks).map((t) => '  - [' + (t.done ? 'x' : ' ') + '] ' + t.text), ...more(tasks.length))
-  const links = c.webLinks ?? []
-  if (links.length) out.push('- 相关链接：', ...cap(links).map((l) => '  - [' + l.text.replace(/[[\]]/g, '') + '](' + l.url + ')（' + l.type + '）'), ...more(links.length))
-  const files = c.files ?? []
-  if (files.length) out.push('- 相关文件（绝对路径）：', ...cap(files).map((p) => '  - ' + p), ...more(files.length))
-  const notes = (c.notes ?? '').trim()
+  const links = (c.webLinks ?? []).filter((l) => !l.off)
+  if (links.length) out.push('- 相关链接：', ...cap(links).map((l) => '  - [' + l.text.replace(/[[\]]/g, '') + '](' + l.url + ')' + (l.type ? '（' + l.type + '）' : '')), ...more(links.length))
+  const files = (c.files ?? []).filter((f) => !f.off)
+  if (files.length) out.push('- 相关文件（绝对路径）：', ...cap(files).map((f) => '  - ' + (f.title ? f.title + '：' : '') + f.path), ...more(files.length))
+  const notes = notesText(c)
   if (notes) {
     const cut = cutBytes(notes, o.notesMax)
-    out.push('- 相关说明（用户原文）：', ...fence(cut))
+    out.push('- 相关说明（用户原文，共 ' + (c.noteItems ?? []).filter((x) => !x.off).length + ' 条，按看板顺序，每条「【小标题】+ 内容」）：', ...fence(cut))
     if (cut.length < notes.length) out.push('  （说明超过 ' + o.notesMax + ' 字节，已截断；全文在项目看板这张卡片的「相关说明」里）')
+  }
+  const relOff = new Set(c.relOff ?? [])
+  const rel = (c.related ?? []).filter((id) => !relOff.has(id)).map((id) => b.cards.find((x) => x.id === id)).filter((x): x is Card => !!x)
+  if (rel.length) {
+    out.push('- 关联卡片（用户标记与本卡片有关，按看板顺序；这里只给记忆文件夹路径，不含内容，需要时用 read / landfill recall 自己读）：')
+    for (const r of cap(rel)) {
+      const rg = b.groups.find((x) => x.id === r.g)
+      out.push('  - 「' + r.t + '」（' + r.id + '）· 卡片组「' + (rg?.name ?? r.g) + '」· 阶段「' + (rg?.statuses.find((s) => s.id === r.col)?.name ?? r.col) + '」' + (r.archivedAt ? ' · 已归档' : ''))
+      const mem = rg ? memoryOf(b, r) : []
+      if (!mem.length) { out.push('    没有关联落盘项目'); continue }
+      for (const m of mem) { const p = o.statePath?.(m.key); out.push('    记忆文件夹：' + (p ? dirname(p) + '/（入口 STATE.md）' : m.key + '（未找到 STATE）')) }
+    }
+    out.push(...more(rel.length))
   }
   if (o.boardPath) out.push('- 权威来源：' + o.boardPath + ' → cards[id=' + c.id + ']')
   return out
 }
 
 /** 系统提示里的卡片档案（实时）。 */
-export function cardSection(b: Board, c: Card, notesMax = 16000): string {
-  return ['### 卡片档案（实时，以看板为准）', ...cardLines(b, c, { notesMax, mounts: groupMounts(b, c.g) })].join('\n')
+export function cardSection(b: Board, c: Card, notesMax = 16000, statePath?: (key: string) => string | undefined): string {
+  return ['### 卡片档案（实时，以看板为准）', ...cardLines(b, c, { notesMax, mounts: groupMounts(b, c.g), statePath })].join('\n')
 }
 
 /** 组级 STATE：同组卡片清单。 */
@@ -76,12 +101,12 @@ function groupLines(b: Board, g: Group, key: string): string[] {
 }
 
 /** 写进 STATE 的卡片档案块；没有任何卡片 / 卡片组关联这个 key → 空串。卡片级最多 5 张。 */
-export function cardBlock(b: Board, key: string, at: string, boardPath?: string): string {
+export function cardBlock(b: Board, key: string, at: string, boardPath?: string, statePath?: (key: string) => string | undefined): string {
   const { cards, groups } = linksOfKey(b, key)
   if (!cards.length && !groups.length) return ''
   const shown = cards.slice(0, 5)
   const out = [BLOCK_TITLE, OPEN + ' v1 key=' + key + ' cards=' + shown.map((c) => c.id).join(',') + ' groups=' + groups.map((g) => g.id).join(',') + ' synced=' + at + ' -->']
-  for (const c of shown) out.push('', '### 卡片「' + c.t + '」', ...cardLines(b, c, { notesMax: 2000, maxItems: 30, boardPath }, key))
+  for (const c of shown) out.push('', '### 卡片「' + c.t + '」', ...cardLines(b, c, { notesMax: 2000, maxItems: 30, boardPath, statePath }, key))
   if (cards.length > shown.length) out.push('', '（另有 ' + (cards.length - shown.length) + ' 张卡片也关联了它，见看板）')
   for (const g of groups) out.push('', '### 卡片组「' + g.name + '」', ...groupLines(b, g, key))
   out.push(CLOSE)
@@ -146,9 +171,9 @@ export function maskBlock(text: string, o: number, e: number, cardId?: string): 
 export interface IndexInfo { key: string; from: 'group' | 'card' | 'both'; state?: StateInfo; required?: string[]; full?: boolean }
 
 /** 系统提示单段：卡片档案（实时）+ 记忆索引。索引按字节预算从后往前省略并注明。 */
-export function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes = 6000, notesMaxBytes = 16000): string {
+export function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes = 6000, notesMaxBytes = 16000, statePath?: (key: string) => string | undefined): string {
   const g = group(b, c.g)
-  const head = ['## dsh-project-manager：本会话的项目记忆', '卡片组「' + g.name + '」· 卡片「' + c.t + '」。本段每一步都按看板与磁盘现生成，始终是最新的。', '', cardSection(b, c, notesMaxBytes), '', '### 落盘项目（/landfill-project）']
+  const head = ['## dsh-project-manager：本会话的项目记忆', '卡片组「' + g.name + '」· 卡片「' + c.t + '」。本段每一步都按看板与磁盘现生成，始终是最新的。', '', cardSection(b, c, notesMaxBytes, statePath), '', '### 落盘项目（/landfill-project）']
   if (!index.length) return head.concat('（没有关联落盘项目）').join('\n')
   const blocks = index.map((m) => {
     const s = m.state

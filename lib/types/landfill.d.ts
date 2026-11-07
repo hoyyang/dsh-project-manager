@@ -282,7 +282,9 @@ export declare class Landfill {
     /** 0.18 退役项目文件夹里的文件：移到 projects/<p>/inbox/retired/（可恢复）。文本要先读全。 */
     retire(s: ToolSession, slugOrKey: string | undefined, file: unknown, project?: string): Promise<Record<string, unknown>>;
     /** 0.18 导入本机文件（截图 / 日志等，可二进制）到 evidence/。需要新版 ai-memory。 */
-    importFile(s: ToolSession, slugOrKey: string | undefined, src: unknown, dest: unknown, project?: string): Promise<Record<string, unknown>>;
+    importFile(s: ToolSession, slugOrKey: string | undefined, src: unknown, dest: unknown, project?: string, opts?: {
+        allowLarge?: boolean;
+    }): Promise<Record<string, unknown>>;
     /** 0.18 计划批准后归档到 plans/<日期>-<标题>.md（会话卡片只有一个主 STATE 时）。返回写入结果或 null。 */
     archivePlan(sid: string | undefined, plan: string): Promise<Record<string, unknown> | null>;
     /** 系统提示索引行用：当前版本 hash 与存在的 [必读] 文件。 */

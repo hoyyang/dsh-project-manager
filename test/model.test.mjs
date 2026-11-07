@@ -51,6 +51,16 @@ test('addCard orders cards within a status', () => {
   assert.deepEqual(M.cellCards(b, g.id, 'research').map((x) => x.t), ['A', 'B', 'C'])
 })
 
+test('0.32 archiveCard refuses unfinished tasks; zero tasks counts as done', () => {
+  const { b, a } = seed()
+  M.setTasks(b, a.id, [{ text: '还没做', done: false }])
+  assert.throws(() => M.archiveCard(b, a.id), { code: 'CARD_HAS_TASKS', message: /还有 1 个任务未完成/ })
+  assert.equal(M.liveCard(b, a.id).archivedAt, undefined)
+  M.setTasks(b, a.id, [{ text: '做完了', done: true }])
+  M.archiveCard(b, a.id)
+  assert.ok(b.cards.find((x) => x.id === a.id).archivedAt)
+})
+
 test('reorder inside a status puts card before target and renumbers', () => {
   const { b, g, a, d } = seed()
   const ev = M.moveCard(b, d.id, { col: 'research', beforeId: a.id }, 'user')
@@ -394,27 +404,101 @@ test('syncHub never creates links outside repos/ for dotted names', () => {
 test('setNotes keeps text verbatim, normalizes CRLF, blank clears; survives parseBoard', () => {
   const { b, a } = seed()
   M.setNotes(b, a.id, '第一行\r\n  https://x.test/a  \n')
-  assert.equal(a.notes, '第一行\n  https://x.test/a  \n')
+  assert.deepEqual(a.noteItems, [{ t: '卡片项目说明', v: '第一行\n  https://x.test/a  \n', pin: true }])
   M.setNotes(b, a.id, '   \n ')
-  assert.equal('notes' in a, false)
+  assert.equal('noteItems' in a, false)
   assert.throws(() => M.setNotes(b, a.id, 42), { code: 'BAD_ARG' })
   M.setNotes(b, a.id, 'x'.repeat(200000))
-  assert.equal(M.parseBoard(JSON.parse(JSON.stringify(b))).cards[0].notes.length, 200000)
+  assert.equal(M.parseBoard(JSON.parse(JSON.stringify(b))).cards[0].noteItems[0].v.length, 200000)
 })
 
-test('addFiles/removeFile: absolute paths only, dedupe, all-or-nothing, unlink never touches disk', () => {
+test('addFiles/removeFile: absolute paths only, dedupe, all-or-nothing, titles, unlink unbinds tasks', () => {
   const { b, a } = seed()
-  assert.deepEqual(M.addFiles(b, a.id, ['/tmp/a.md', '/tmp/b.pdf/', '/tmp/a.md']), { added: 2, skipped: 1 })
-  assert.deepEqual(a.files, ['/tmp/a.md', '/tmp/b.pdf'])
+  const r = M.addFiles(b, a.id, ['/tmp/a.md', { path: '/tmp/b.pdf/', title: ' 方案 ' }, '/tmp/a.md'])
+  assert.equal(r.added, 2); assert.equal(r.skipped, 1)
+  assert.deepEqual(M.filePaths(a), ['/tmp/a.md', '/tmp/b.pdf'])
+  assert.equal(a.files[1].title, '方案')
+  assert.equal(M.addFiles(b, a.id, [{ path: '/tmp/c.md', title: 'c.md' }]).added, 1)
+  assert.equal(a.files[2].title, undefined, '标题等于文件名不存')
   assert.throws(() => M.addFiles(b, a.id, ['/tmp/c', 'rel/x']), { code: 'BAD_ARG' })
-  assert.deepEqual(a.files, ['/tmp/a.md', '/tmp/b.pdf'])
+  assert.equal(a.files.length, 3)
   assert.throws(() => M.addFiles(b, a.id, []), { code: 'BAD_ARG' })
   assert.throws(() => M.addFiles(b, a.id, ['/tmp/x\ny']), { code: 'BAD_ARG' })
-  M.removeFile(b, a.id, '/tmp/a.md')
-  assert.deepEqual(a.files, ['/tmp/b.pdf'])
-  assert.throws(() => M.removeFile(b, a.id, '/tmp/a.md'), { code: 'NOT_LINKED' })
-  M.removeFile(b, a.id, '/tmp/b.pdf')
+  M.setTasks(b, a.id, [{ text: 't', done: false, files: [a.files[0].id] }, { text: 'u', done: false, subs: [{ text: 'v', done: false, files: [a.files[0].id, a.files[1].id] }] }])
+  assert.throws(() => M.setTasks(b, a.id, [{ text: 't', done: false, files: ['nope'] }]), { code: 'BAD_FILE' })
+  const f0 = a.files[0]
+  const rm = M.removeFile(b, a.id, f0.id)
+  assert.equal(rm.index, 0); assert.equal(rm.tasks.length, 2)
+  assert.equal(a.tasks[0].files, undefined); assert.deepEqual(a.tasks[1].subs[0].files, [a.files[0].id])
+  M.restoreFile(b, a.id, rm.file, rm.index, rm.tasks)
+  assert.equal(a.files[0].id, f0.id); assert.deepEqual(a.tasks[0].files, [f0.id]); assert.deepEqual(a.tasks[1].subs[0].files, [a.files[1].id, f0.id])
+  M.setFileTitle(b, a.id, f0.id, '需求'); assert.equal(a.files[0].title, '需求')
+  M.setFileTitle(b, a.id, f0.id, ''); assert.equal(a.files[0].title, undefined)
+  M.setFilePath(b, a.id, f0.id, '/ai/evidence/a.md'); assert.equal(a.files[0].path, '/ai/evidence/a.md')
+  assert.throws(() => M.setFilePath(b, a.id, f0.id, '/tmp/b.pdf'), { code: 'FILE_LINKED' })
+  for (const f of a.files.slice()) M.removeFile(b, a.id, f.path)
   assert.equal('files' in a, false)
+  assert.throws(() => M.removeFile(b, a.id, '/tmp/a.md'), { code: 'NOT_LINKED' })
+})
+
+test('0.26 parseBoard migrates string files to {id,path} with stable ids', () => {
+  const raw = { version: 1, groups: [{ id: 'g', name: 'G', collapsed: false, repos: [], links: [], statuses: [{ id: 's', name: 'S' }] }], cards: [{ id: 'c', g: 'g', col: 's', order: 0, t: 'T', links: [], tasks: [], repos: [], files: ['/tmp/a.md'] }], sessions: [] }
+  const x = M.parseBoard(JSON.parse(JSON.stringify(raw))), y = M.parseBoard(JSON.parse(JSON.stringify(raw)))
+  assert.equal(x.cards[0].files[0].path, '/tmp/a.md')
+  assert.equal(x.cards[0].files[0].id, y.cards[0].files[0].id)
+})
+
+test('0.26 copyCard: name numbering, placement after family, tasks reset, no sessions/memory', () => {
+  const { b, g, a, c } = seed()
+  a.links = ['p/s']; M.bindSession(b, 'sess1', a.id)
+  M.addFiles(b, a.id, ['/tmp/a.md'])
+  M.setTasks(b, a.id, [{ text: 'x', done: true, files: [a.files[0].id] }, { text: 'y', done: true, subs: [{ text: 'z', done: true }] }])
+  a.related = [c.id]; M.setNoteItems(b, a.id, [{ t: '说明', v: 'v' }])
+  const x1 = M.copyCard(b, a.id, '2026-10-16T00:00:00Z')
+  assert.equal(x1.t, 'A（1）'); assert.deepEqual(x1.links, []); assert.equal(b.sessions.filter((s) => s.cardId === x1.id).length, 0)
+  assert.equal(x1.tasks.every((t) => !t.done && (t.subs ?? []).every((s) => !s.done)), true)
+  assert.notEqual(x1.tasks[0].id, a.tasks[0].id); assert.deepEqual(x1.tasks[0].files, a.tasks[0].files)
+  assert.deepEqual(x1.related, [c.id]); assert.equal(x1.noteItems[0].t, '说明'); assert.equal(x1.files[0].path, '/tmp/a.md')
+  const x2 = M.copyCard(b, a.id)
+  const x3 = M.copyCard(b, x1.id)
+  assert.equal(x2.t, 'A（2）'); assert.equal(x3.t, 'A（3）')
+  assert.deepEqual(M.cellCards(b, g.id, a.col).map((y) => y.t), ['A', 'A（1）', 'A（2）', 'A（3）', 'B', 'C'])
+  M.archiveCard(b, c.id)
+  const x4 = M.copyCard(b, c.id)
+  assert.equal(x4.archivedAt, undefined); assert.equal(M.cellCards(b, g.id, a.col).at(-1).id, x4.id)
+})
+
+test('0.26 group archive: only when no live cards; archived group blocks adds; bulk collapse modes', () => {
+  const { b, g, a, c, d } = seed()
+  const e = M.addGroup(b, 'empty')
+  assert.throws(() => M.archiveGroup(b, g.id), { code: 'GROUP_HAS_CARDS', message: /3 张卡片没归档/ })
+  for (const x of [a, c, d]) M.archiveCard(b, x.id)
+  M.archiveGroup(b, g.id, '2026-10-16T00:00:00Z'); assert.equal(g.archivedAt, '2026-10-16T00:00:00Z')
+  assert.throws(() => M.addCard(b, g.id, 'n'), { code: 'GROUP_ARCHIVED' })
+  assert.throws(() => M.unarchiveCard(b, a.id), { code: 'GROUP_ARCHIVED' })
+  M.unarchiveGroup(b, g.id); assert.equal(g.archivedAt, undefined); assert.equal(a.archivedAt !== undefined, true)
+  M.unarchiveCard(b, a.id)
+  g.collapsed = true; e.collapsed = true
+  assert.deepEqual(M.bulkCollapse(b, 'open'), { opened: 1, folded: 0 }); assert.equal(e.collapsed, true)
+  e.collapsed = false
+  assert.deepEqual(M.bulkCollapse(b, 'only'), { opened: 0, folded: 1 }); assert.equal(e.collapsed, true)
+  assert.deepEqual(M.bulkCollapse(b, 'fold'), { opened: 0, folded: 1 })
+  assert.throws(() => M.bulkCollapse(b, 'x'), { code: 'BAD_ARG' })
+})
+
+test('0.26 prefs default on, setPrefs validates; stampTimes/backfillTimes', () => {
+  const { b, g, a, c } = seed()
+  assert.deepEqual(M.prefsOf(b), { lf: true, delAdd: true, delTolf: true })
+  M.setPrefs(b, { lf: false }); assert.deepEqual(M.prefsOf(b), { lf: false, delAdd: true, delTolf: true })
+  assert.throws(() => M.setPrefs(b, { delAdd: 1 }), { code: 'BAD_ARG' })
+  const prev = JSON.parse(JSON.stringify(b))
+  M.renameGroup(b, g.id, 'G2'); a.t = 'A2'; c.order = 9
+  M.stampTimes(prev, b, 'T1')
+  assert.equal(a.updatedAt, 'T1'); assert.equal(c.updatedAt, undefined); assert.equal(g.updatedAt, 'T1')
+  const p2 = JSON.parse(JSON.stringify(b)); g.collapsed = true; M.stampTimes(p2, b, 'T2'); assert.equal(g.updatedAt, 'T1', '折叠不算修改')
+  const old = M.emptyBoard(); const g2 = M.addGroup(old, 'x'); const k = M.addCard(old, g2.id, 'k'); const k2 = M.addCard(old, g2.id, 'k2')
+  M.backfillTimes(old, [{ at: '2026-01-02T00:00:00Z', card: k.id, kind: 'card/tasks' }, { at: '2026-01-05T00:00:00Z', card: k.id, kind: 'card/archive' }, { at: '2026-01-01T00:00:00Z', card: k.id, kind: 'card/update' }])
+  assert.equal(k.updatedAt, '2026-01-02T00:00:00Z'); assert.equal(k2.updatedAt, null); assert.equal(g2.updatedAt, '2026-01-02T00:00:00Z')
 })
 
 test('parsePicked splits osascript POSIX output', () => {
@@ -604,7 +688,7 @@ test('0.10 memoryText injects card materials (notes fenced, links markdown, file
   M.addFiles(b, a.id, ['/srv/demo/a.md', '/srv/demo/b.png'])
   const t = memoryText(b, a, idxOf(b, a, states))
   assert.match(t, /### 卡片档案（实时，以看板为准）/)
-  assert.match(t, /- 相关说明（用户原文）：\n```text\n背景：\n## 不是标题/)
+  assert.match(t, /- 相关说明（用户原文，共 1 条，按看板顺序，每条「【小标题】\+ 内容」）：\n```text\n【卡片项目说明】\n背景：\n## 不是标题/)
   assert.equal((t.match(/```/g) || []).length, 2, 'user fences neutralized, only our fence remains')
   assert.match(t, /- \[方案 v2\]\(https:\/\/docs\.example\.com\/abc\)（文档）/)
   assert.match(t, /- 相关文件（绝对路径）：\n  - \/srv\/demo\/a\.md\n  - \/srv\/demo\/b\.png/)
@@ -626,14 +710,17 @@ test('0.12/0.20 blankRows: blank sessions of the given workspaces (not archived 
     d: { title: 'D', blank: true }, e: { blank: true, origin: 'subagent' }, f: { displayTitle: 'F', blank: true },
     x: { title: 'X', blank: true },
   }
-  const r = blankRows(items, byId, new Set(['d']), ['hub', 'g1', 'missing'])
+  const bound = { h1: undefined, h2: undefined, a: undefined, b: undefined, c: undefined, d: undefined, e: undefined, f: undefined, x: undefined }
+  const r = blankRows(items, byId, new Set(['d']), ['hub', 'g1', 'missing'], bound)
   // 0.15：c 是分叉（带 parentId、不是子代理）→ 照常补画
   assert.deepEqual(r, { hub: [{ id: 'h1', title: '新会话' }], g1: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', current: true }, { id: 'c', title: 'C' }, { id: 'f', title: '新会话' }] })
   // 0.20：当前打开的空会话也由插件画；没有会话标题时用看板上记的标题（绑定卡片时写入）
   assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['n'] }], { n: { blank: true, retainedBy: { mainView: 1 } } }, new Set(), ['g'], { n: '插件诊断' }), { g: [{ id: 'n', title: '插件诊断', current: true }] })
   // 没有标题时 displayTitle 是目录名，不能拿来当标题
-  assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['z'] }], { z: { displayTitle: 'gmunhccece', blank: true } }, new Set(), ['g']), { g: [{ id: 'z', title: '新会话' }] })
-  assert.deepEqual(blankRows(items, byId, new Set(), []), {})
+  assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['z'] }], { z: { displayTitle: 'gmunhccece', blank: true } }, new Set(), ['g'], { z: undefined }), { g: [{ id: 'z', title: '新会话' }] })
+  assert.deepEqual(blankRows(items, byId, new Set(), [], bound), {})
+  // 0.23：宿主开窗自动建的空会话（没绑卡片）不补画，交还宿主（不然删了又出现）
+  assert.deepEqual(blankRows([{ workspaceId: 'g', sessionIds: ['auto', 'mine'] }], { auto: { blank: true, retainedBy: { mainView: 1 } }, mine: { blank: true } }, new Set(), ['g'], { mine: '结算页改版' }), { g: [{ id: 'mine', title: '结算页改版' }] })
 })
 
 test('0.12 limitList / moreBtn: default 3, button only when more, label counts the hidden ones', () => {
@@ -716,7 +803,7 @@ test('0.14 groupMounts: group + card repos, same path once, name clash becomes n
   assert.deepEqual([...m], [['/r/a', 'A'], ['/r/b', 'B'], ['/other/b', 'B-2']])
 })
 
-test('0.14 card archive injects repos (with real repos/ link name) and subtasks', () => {
+test('0.14 card archive injects repos (with real repos/ link name); v93 no longer injects tasks', () => {
   const b = M.emptyBoard()
   const g = M.addGroup(b, 'G')
   const c1 = M.addCard(b, g.id, 'C1')
@@ -728,7 +815,9 @@ test('0.14 card archive injects repos (with real repos/ link name) and subtasks'
   const t = memoryText(b, c2, idxOf(b, c2, cat))
   assert.match(t, /- 仓库（1）/)
   assert.match(t, /  - B（仓库）：repos\/B-2\/ → \/other\/b/)
-  assert.match(t, /- 子任务（1\/2 完成）：\n  - \[x\] 做完\n  - \[ \] 没做/)
+  // v93 ④：卡片任务不再进系统提示 / STATE 卡片档案（数据保留，改由 task_manage / 看板 / 日程看）
+  assert.doesNotMatch(t, /- 任务（完成/)
+  assert.doesNotMatch(t, /做完|没做/)
   assert.doesNotMatch(t, /\/r\/b/, 'only this card\'s repos')
 })
 
@@ -752,13 +841,12 @@ test('0.14 syncHub mounts card-only repos in the group dir and lists them in AGE
   assert.ok(existsSync(rb))
 })
 
-test('0.14 moveLinkType reorders the global type list', () => {
+test('0.14 type order (0.21: placeLinkType replaces moveLinkType) reorders the global type list', () => {
   const b = M.emptyBoard()
   for (const t of ['x', 'y', 'z']) M.addLinkType(b, t)
-  assert.deepEqual(M.moveLinkType(b, 'z', 0), ['z', '文档', '代码', 'x', 'y'])
-  assert.deepEqual(M.moveLinkType(b, 'z', 4), ['文档', '代码', 'x', 'y', 'z'])
-  assert.throws(() => M.moveLinkType(b, 'nope', 0), { code: 'NOT_FOUND' })
-  assert.throws(() => M.moveLinkType(b, 'x', 5), { code: 'BAD_ARG' })
+  M.placeLinkType(b, 'z', null, 0); assert.deepEqual(M.linkTypes(b), ['z', '文档', '代码', 'x', 'y'])
+  M.placeLinkType(b, 'z', null, 4); assert.deepEqual(M.linkTypes(b), ['文档', '代码', 'x', 'y', 'z'])
+  assert.throws(() => M.placeLinkType(b, 'nope', null, 0), { code: 'NOT_FOUND' })
 })
 
 test('0.14 setWebLinks rejects duplicate links (host case, trailing slash, bare domain) and names both rows', () => {
@@ -832,4 +920,181 @@ test('0.15 eventsTail reads only the tail of a large audit log', () => {
   assert.equal(tail.length, 80)
   assert.equal(tail[79].kind, 'k1999')
   assert.equal(tail[0].kind, 'k1920')
+})
+
+test('0.21 type groups: add / rename / move / delete group; place type across groups; loose = not in any group; linkTypes stays the full ordered list', () => {
+  const b = M.emptyBoard()
+  for (const t of ['x', 'y', 'z']) M.addLinkType(b, t)
+  assert.deepEqual(M.looseTypes(b), ['文档', '代码', 'x', 'y', 'z'], 'upgrade: every existing type is loose (A)')
+  const g1 = M.addTypeGroup(b, ' 文档类 ')
+  const g2 = M.addTypeGroup(b, '平台')
+  assert.equal(g1.name, '文档类')
+  assert.throws(() => M.addTypeGroup(b, '平台'), /已经有类型组「平台」/)
+  assert.throws(() => M.addTypeGroup(b, '未归类'), /未归类/)
+  assert.throws(() => M.addTypeGroup(b, 'x'.repeat(21)), /20/)
+  M.placeLinkType(b, 'y', g1.id, 0)
+  M.placeLinkType(b, '文档', g1.id, 0)
+  M.placeLinkType(b, 'z', g2.id, 99)
+  assert.deepEqual(M.typeGroups(b).map((g) => g.types), [['文档', 'y'], ['z']])
+  assert.deepEqual(M.linkTypes(b), ['文档', 'y', 'z', '代码', 'x'], 'groups first, loose last')
+  M.placeLinkType(b, 'y', g1.id, 0)
+  assert.deepEqual(M.typeGroups(b)[0].types, ['y', '文档'], 'reorder inside group')
+  M.placeLinkType(b, 'y', null, 0)
+  assert.deepEqual(M.looseTypes(b), ['y', '代码', 'x'], 'back to loose at position')
+  assert.equal(M.addLinkType(b, '新', g2.id), '新')
+  assert.deepEqual(M.typeGroups(b)[1].types, ['z', '新'], 'add straight into a group')
+  M.moveTypeGroup(b, g2.id, 0)
+  assert.deepEqual(M.typeGroups(b).map((g) => g.name), ['平台', '文档类'])
+  assert.throws(() => M.moveTypeGroup(b, g2.id, 2), { code: 'BAD_ARG' })
+  M.renameTypeGroup(b, g2.id, '研发平台')
+  assert.throws(() => M.renameTypeGroup(b, g2.id, '文档类'), /已经有/)
+  assert.equal(M.renameTypeGroup(b, g2.id, '研发平台').name, '研发平台', 'same name ok')
+  assert.deepEqual(M.deleteTypeGroup(b, g2.id), { types: 2 })
+  assert.deepEqual(M.looseTypes(b), ['z', '新', 'y', '代码', 'x'], 'deleted group types go to the front of loose')
+  assert.throws(() => M.deleteTypeGroup(b, g2.id), { code: 'NOT_FOUND' })
+  M.deleteTypeGroup(b, g1.id)
+  assert.equal(b.linkTypeGroups, undefined, 'no groups → field dropped')
+  assert.throws(() => M.placeLinkType(b, 'nope', null, 0), { code: 'NOT_FOUND' })
+  assert.throws(() => M.placeLinkType(b, 'x', 'tgnope', 0), { code: 'NOT_FOUND' })
+  assert.throws(() => M.placeLinkType(b, 'x', null, -1), { code: 'BAD_ARG' })
+})
+
+test('0.21 deleteLinkType: removes from list + group, links (archived too) become 无类型; empty type allowed and not re-added; 无类型 is reserved', () => {
+  const { b, a, c } = seed()
+  const g = M.addTypeGroup(b, '组')
+  M.placeLinkType(b, '代码', g.id, 0)
+  M.setWebLinks(b, a.id, [{ text: 'x', type: '代码', url: 'https://a.com' }, { text: 'y', type: '', url: 'https://b.com' }, { text: 'z', type: '无类型', url: 'https://c.com' }])
+  assert.deepEqual(a.webLinks.map((l) => l.type), ['代码', '', ''], 'empty / 无类型 → no type')
+  M.setWebLinks(b, c.id, [{ text: 'w', type: '代码', url: 'https://d.com' }])
+  M.archiveCard(b, c.id)
+  assert.deepEqual(M.linkTypes(b), ['代码', '文档'], 'empty type not added')
+  assert.deepEqual(M.deleteLinkType(b, '代码'), { links: 2 })
+  assert.deepEqual(M.linkTypes(b), ['文档'])
+  assert.deepEqual(M.typeGroups(b)[0].types, [])
+  assert.deepEqual([...a.webLinks, ...c.webLinks].map((l) => l.type), ['', '', '', ''])
+  assert.throws(() => M.deleteLinkType(b, '代码'), { code: 'NOT_FOUND' })
+  assert.throws(() => M.addLinkType(b, '无类型'), /保留名/)
+  assert.throws(() => M.renameLinkType(b, '文档', '无类型'), /保留名/)
+  M.renameLinkType(b, '文档', '资料')
+  M.placeLinkType(b, '资料', g.id, 0)
+  M.renameLinkType(b, '资料', '资料2')
+  assert.deepEqual(M.typeGroups(b)[0].types, ['资料2'], 'rename keeps group membership')
+})
+
+test('0.21 memoryText: 无类型 links carry no type suffix', () => {
+  const ai = mkdtempSync(join(tmpdir(), 'dpm-ai-'))
+  const { b, a } = seed()
+  M.setWebLinks(b, a.id, [{ text: '甲', type: '', url: 'https://a.com' }, { text: '乙', type: '文档', url: 'https://b.com' }])
+  const txt = memoryText(b, a, idxOf(b, a, new StateCatalog(ai, 0)))
+  assert.match(txt, /\[甲\]\(https:\/\/a\.com\/\)\n/)
+  assert.match(txt, /\[乙\]\(https:\/\/b\.com\/\)（文档）/)
+})
+
+// ── 0.24 ──
+test('0.24 parseBoard migrates notes string → noteItems, adds stable link / task ids', () => {
+  const raw = { version: 1, groups: [{ id: 'g', name: 'G', collapsed: false, repos: [], links: [], statuses: [{ id: 's', name: 'S' }] }], cards: [{ id: 'c', g: 'g', col: 's', order: 0, t: 'C', links: [], tasks: [{ text: 'A', done: false }, { text: 'A', done: true }], repos: [], notes: '旧说明\n第二行', webLinks: [{ text: 'x', type: '', url: 'https://a.example.com/x' }] }], sessions: [] }
+  const b1 = M.parseBoard(JSON.parse(JSON.stringify(raw))), b2 = M.parseBoard(JSON.parse(JSON.stringify(raw)))
+  const c = b1.cards[0]
+  assert.equal('notes' in c, false)
+  assert.deepEqual(c.noteItems, [{ t: '卡片项目说明', v: '旧说明\n第二行', pin: true }])
+  assert.ok(c.webLinks[0].id && c.webLinks[0].id === b2.cards[0].webLinks[0].id, 'link id deterministic')
+  assert.ok(c.tasks[0].id && c.tasks[0].id !== c.tasks[1].id, 'task ids unique')
+  assert.equal(c.tasks[0].id, b2.cards[0].tasks[0].id)
+})
+
+test('0.24 setTasks: two levels, parent done rolls up, timestamps only on content change, links/type validated', () => {
+  const { b, a } = seed()
+  M.setWebLinks(b, a.id, [{ text: 'L1', type: '', url: 'https://a.example.com/1' }, { text: 'L2', type: '', url: 'https://a.example.com/2' }])
+  const [l1, l2] = a.webLinks.map((l) => l.id)
+  const t0 = '2026-10-10T01:00:00.000Z', t1 = '2026-10-11T01:00:00.000Z', t2 = '2026-10-12T01:00:00.000Z'
+  M.setTasks(b, a.id, [{ text: 'P', done: false, type: '验证', links: [l1, l2], note: '见 [2]', subs: [{ text: 'c1', done: true }, { text: 'c2', done: true }] }, { text: 'Q', done: false }], t0)
+  assert.equal(a.tasks[0].done, true, 'all children done → parent done')
+  assert.equal(a.tasks[0].created, t0); assert.equal(a.tasks[0].subs[0].updated, t0)
+  const ids = a.tasks.map((t) => t.id)
+  // 只调顺序：不改 updated
+  M.setTasks(b, a.id, [a.tasks[1], a.tasks[0]], t1)
+  assert.deepEqual(a.tasks.map((t) => t.id), [ids[1], ids[0]])
+  assert.equal(a.tasks[1].updated, t0)
+  // 取消一个子任务 → 父任务改回未完成，两者都盖修改时间，created 不变
+  const p = JSON.parse(JSON.stringify(a.tasks[1])); p.subs[1].done = false
+  M.setTasks(b, a.id, [a.tasks[0], p], t2)
+  assert.equal(a.tasks[1].done, false); assert.equal(a.tasks[1].updated, t2); assert.equal(a.tasks[1].subs[1].updated, t2); assert.equal(a.tasks[1].subs[0].updated, t0); assert.equal(a.tasks[1].created, t0)
+  assert.throws(() => M.setTasks(b, a.id, [{ text: 'x', done: false, subs: [{ text: 'y', done: false, subs: [{ text: 'z', done: false }] }] }]), { code: 'TOO_DEEP' })
+  assert.throws(() => M.setTasks(b, a.id, [{ text: 'x', done: false, links: ['nope'] }]), { code: 'BAD_LINK' })
+  assert.throws(() => M.setTasks(b, a.id, [{ text: 'x', done: false, type: '不存在' }]), { code: 'BAD_TYPE' })
+})
+
+test('0.24 deleting a web link unbinds it from subtasks and rewrites [n] refs', () => {
+  const { b, a } = seed()
+  M.setWebLinks(b, a.id, [{ text: '方案', type: '', url: 'https://a.example.com/1' }, { text: '评审', type: '', url: 'https://a.example.com/2' }, { text: '稿', type: '', url: 'https://a.example.com/3' }])
+  const [l1, l2, l3] = a.webLinks.map((l) => l.id)
+  M.setTasks(b, a.id, [{ text: 'T', done: false, links: [l1, l2, l3], note: '按 [1] 做，结论写进 [2]，参考 [3]' }])
+  M.setWebLinks(b, a.id, a.webLinks.filter((l) => l.id !== l2))
+  assert.deepEqual(a.tasks[0].links, [l1, l3])
+  assert.equal(a.tasks[0].note, '按 [1] 做，结论写进 「评审」，参考 [2]')
+  assert.deepEqual(a.webLinks.map((l) => l.id), [l1, l3], 'ids kept on re-save')
+  assert.deepEqual(M.dropRef('x [1] y', ['a'], 'a', 'A'), { note: 'x 「A」 y', links: [] })
+})
+
+test('0.24 task types: add / rename (tasks follow) / delete (tasks → none) / place', () => {
+  const { b, a } = seed()
+  assert.deepEqual(M.taskTypes(b), ['开发', '验证', '文档', '沟通'])
+  M.addTaskType(b, '评审')
+  assert.throws(() => M.addTaskType(b, '评审'), { code: 'BAD_ARG' })
+  M.setTasks(b, a.id, [{ text: 'x', done: false, type: '评审', subs: [{ text: 'y', done: false, type: '评审' }] }])
+  assert.deepEqual(M.renameTaskType(b, '评审', '方案评审'), { name: '方案评审', tasks: 2 })
+  assert.equal(a.tasks[0].subs[0].type, '方案评审')
+  M.placeTaskType(b, '方案评审', 0)
+  assert.equal(M.taskTypes(b)[0], '方案评审')
+  assert.deepEqual(M.deleteTaskType(b, '方案评审'), { tasks: 2 })
+  assert.equal('type' in a.tasks[0], false)
+})
+
+test('0.25 noteItems: pinned note deletable, list can be emptied, new pin only at index 0', () => {
+  const { b, a } = seed()
+  M.setNoteItems(b, a.id, [{ t: '卡片项目说明', v: '甲', pin: true }, { t: '验收', v: '乙' }])
+  M.setNoteItems(b, a.id, [{ t: '验收', v: '乙' }])
+  assert.deepEqual(a.noteItems, [{ t: '验收', v: '乙' }])
+  M.setNoteItems(b, a.id, [{ t: '卡片项目说明', v: '新', pin: true }, { t: '验收', v: '乙', pin: true }])
+  assert.equal(a.noteItems[0].pin, true); assert.equal('pin' in a.noteItems[1], false)
+  M.setNoteItems(b, a.id, [])
+  assert.equal('noteItems' in a, false)
+})
+
+test('0.24 noteItems / related / removeCard cleanup / taskAt numbering', () => {
+  const { b, a, c, d } = seed()
+  M.setNoteItems(b, a.id, [{ t: '卡片项目说明', v: '甲', pin: true }, { t: '验收', v: '乙' }])
+  assert.equal(a.noteItems.length, 2); assert.equal(a.noteItems[0].pin, true)
+  assert.throws(() => M.setNoteItems(b, a.id, [{ t: '', v: 'x' }]), /小标题/)
+  assert.throws(() => M.setNoteItems(b, a.id, [{ t: 'x', v: '  ' }]), /内容/)
+  M.archiveCard(b, d.id)
+  M.setRelated(b, a.id, [c.id, d.id, c.id])
+  assert.deepEqual(a.related, [c.id, d.id])
+  assert.throws(() => M.setRelated(b, a.id, [a.id]), { code: 'BAD_ARG' })
+  M.removeCard(b, c.id)
+  assert.deepEqual(a.related, [d.id])
+  const list = [{ text: 'a', done: false }, { text: 'b', done: false, subs: [{ text: 'b1', done: false }] }]
+  assert.equal(M.taskAt(list, '2.1').task.text, 'b1')
+  assert.throws(() => M.taskAt(list, '3'), { code: 'BAD_INDEX' })
+})
+
+test('0.24 card archive: notes as 【title】, related cards inject only memory folders (v93: no task blocks)', () => {
+  const ai = mkdtempSync(join(tmpdir(), 'dpm-ai-'))
+  const states = new StateCatalog(ai)
+  const { b, a, c } = seed()
+  M.setWebLinks(b, a.id, [{ text: '方案', type: '文档', url: 'https://a.example.com/1' }])
+  M.setTasks(b, a.id, [{ text: 'P', done: false, type: '验证', links: [a.webLinks[0].id], note: '按 [1]\n第二行', subs: [{ text: 'c1', done: true }, { text: 'c2', done: false }] }], '2026-10-12T02:30:00.000Z')
+  M.setNoteItems(b, a.id, [{ t: '卡片项目说明', v: '甲', pin: true }, { t: '验收', v: '乙' }])
+  M.setNoteItems(b, c.id, [{ t: '卡片项目说明', v: '机密内容不该注入', pin: true }])
+  c.links = ['acme/other']
+  // v136：新关联的卡片默认不注入；这里显式打开（老断言针对「注入时只给路径」）
+  M.setRelated(b, a.id, [{ id: c.id, off: false }])
+  const t = memoryText(b, a, idxOf(b, a, states), 6000, 16000, (k) => (k === 'acme/other' ? '/srv/ai/projects/acme/memory/designs/other/STATE.md' : undefined))
+  // v93 ④：任务块（含子任务、类型、说明、链接）不再注入
+  assert.doesNotMatch(t, /- 任务（完成/)
+  assert.doesNotMatch(t, /1\.1 \[x\] c1/)
+  assert.doesNotMatch(t, /全部完成时自动勾上/)
+  assert.match(t, /【卡片项目说明】\n甲\n\n【验收】\n乙/)
+  assert.match(t, /- 关联卡片（[^\n]*\n  - 「B」（[^）]+）· 卡片组「checkout-flow」· 阶段「调研」\n    记忆文件夹：\/srv\/ai\/projects\/acme\/memory\/designs\/other\/（入口 STATE\.md）/)
+  assert.doesNotMatch(t, /机密内容不该注入/)
 })

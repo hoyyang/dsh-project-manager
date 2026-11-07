@@ -1,19 +1,20 @@
+<div align="center">
+
+<img src="assets/banner-zh.png" alt="dsh-project-manager" width="100%">
+
 # dsh-project-manager
 
-![banner](assets/banner.png)
+**DeepSeek Harness 的项目看板 + 项目记忆。从卡片开会话，AI 第一句话就知道项目做到哪了。**
 
-**给 DeepSeek Harness 加一块项目看板，并把「项目记忆」做成插件的本职：从卡片打开的会话，自动带上这个项目完整、最新的落盘记忆（STATE + 必读子文档）和卡片资料；说一句「落盘项目」就把进展按规范写回去，换会话、换 CLI、隔几天都能接着做。**
+<a href="https://www.npmjs.com/package/dsh-project-manager"><img alt="npm" src="https://img.shields.io/npm/v/dsh-project-manager?color=2f5fcc"></a>
+<a href="https://www.npmjs.com/package/dsh-project-manager"><img alt="downloads" src="https://img.shields.io/npm/dm/dsh-project-manager"></a>
+<a href="https://github.com/hoyyang/dsh-project-manager/releases"><img alt="release" src="https://img.shields.io/github/v/release/hoyyang/dsh-project-manager"></a>
+<a href="https://github.com/hoyyang/dsh-project-manager/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/hoyyang/dsh-project-manager?style=flat"></a>
+<a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/hoyyang/dsh-project-manager"></a>
 
-[**English**](README.en.md) · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [更新日志](CHANGELOG.md)
+**简体中文** · [English](README.en.md) · [更新日志](CHANGELOG.md) · [问题反馈](https://github.com/hoyyang/dsh-project-manager/issues)
 
-<p align="center">
-  <img alt="dsh" src="https://img.shields.io/badge/dsh-0.2.0--rc.2-2f5fcc">
-  <a href="https://www.npmjs.com/package/dsh-project-manager"><img alt="npm" src="https://img.shields.io/npm/v/dsh-project-manager"></a>
-  <a href="https://www.npmjs.com/package/dsh-project-manager"><img alt="downloads" src="https://img.shields.io/npm/dm/dsh-project-manager"></a>
-  <a href="https://github.com/hoyyang/dsh-project-manager/releases"><img alt="release" src="https://img.shields.io/github/v/release/hoyyang/dsh-project-manager"></a>
-  <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/hoyyang/dsh-project-manager"></a>
-  <a href="https://github.com/hoyyang/dsh-project-manager/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/hoyyang/dsh-project-manager"></a>
-</p>
+</div>
 
 ## 安装
 
@@ -21,258 +22,166 @@
 dsh plugin add dsh-project-manager
 ```
 
-备选（直接从 GitHub 装）：
+备选：`dsh plugin add github:hoyyang/dsh-project-manager`。重启 dsh 即可用，**零配置**，无需账号或 API Key。
 
-```sh
-dsh plugin add github:hoyyang/dsh-project-manager
-```
+> 需要 dsh web 界面（`dsh web` 或 DSH Desktop）。实测 dsh `0.2.0-rc.2`、DSH Desktop `2.0.18`。项目记忆需要 `python3`，Windows 上只关这一块。
 
-**零配置、开箱即用**：装完重启 dsh 即可，不需要账号、API Key 或任何设置项。落盘项目默认读写 `~/.ai`（写入一律经插件自带的 `ai-memory`，需要 python3；Windows 上这块自动关闭，看板照常）。要改数据目录或权限模式见下文「配置」。
+## 核心功能
 
-| 环境 | 版本 | 状态 |
+| | 功能 | 一句话 |
 |---|---|---|
-| dsh CLI（`@deepseek-ai/dsh`，`dsh web`） | `0.2.0-rc.2` | 实测通过（0.20.1） |
-| DSH Desktop | `2.0.17`（内置 dsh `0.2.0-rc.2`） | 实测通过（0.20.1） |
-| 依赖范围（peerDependencies） | `@deepseek-ai/cordis >=4.0.1 <5`、`@deepseek-ai/dsh-tools >=0.1.5-rc <2`、`@deepseek-ai/dsh-client-ui-slots >=0.1.5-rc <2`、`@deepseek-ai/schemastery ^3.18.1` | 声明范围，范围内其他版本未逐一验证 |
+| 🗂 | **项目看板** | 卡片组 = 父项目，卡片 = 项目，阶段自定义，拖动即推进 |
+| 🧠 | **会话自动带记忆** | 从卡片开会话，项目 STATE 全文自动注入，别处改了自动补新版 |
+| 💾 | **一句话落盘** | 说「落盘项目」写回进展，丢了关键事实直接拒写 |
+| 📅 | **任务日程 + 今天面板** | 计划 / 实际 / 截止一条时间轴，今天的任务按状态分区 |
+| 🔗 | **任务 ↔ 会话联动** | 会话跑起来，任务自动进「执行中」 |
 
-需要 dsh web 界面（CLI 的 `dsh web` 或 DSH Desktop）。侧栏增强（项目区数字、层级、「+」接管、空会话行）依赖 dsh 工作区列表的页面结构；dsh 改版后若对不上，这几项会自动不显示，看板、会话与落盘功能不受影响。
-
-## 功能
+### 项目看板
 
 ![项目看板](assets/board-zh.png)
 
-### 会话自动带上完整、最新的项目记忆
+- **按项目分组**：每个卡片组一条泳道，阶段名、数量、顺序都能改。
+- **状态一眼可见**：卡片显示会话数、任务进度，正在执行的亮绿框。
+- **深色主题**：跟随 dsh，一键切换。
 
-- **从卡片开会话 = 上下文已经在了**：卡片关联的落盘项目（STATE + 标 `[必读]` 的子文档）由插件把**全文**直接放进会话，系统提示里另有一段实时生成的「卡片档案」（仓库、子任务、说明、链接、文件）。不用先说「回忆」，第一句就能接着干。
-- **永远是最新版，且不重复**：别的会话或 Codex / Claude Code 等其他 CLI 改了 STATE，下一步自动补上新版（标明替代哪一版、谁写的）；会话压缩后重新补齐；同一版本只放一次，自己写的不回灌，分叉会话继承。
-- **看得见 AI 收到了什么**：会话信息卡里「查看 AI 收到的原文」逐字显示系统提示和注入的全文，标出版本、是否已在本会话、约多少 token，可一键复制。
+### 会话自动带上项目记忆
+
+![会话信息卡](assets/session-card-open-zh.png)
+
+- **全文注入**：卡片关联的 `STATE.md` 和 `[必读]` 子文档整份放进会话，不用先说「回忆」。
+- **始终最新**：其他会话或 Codex / Claude Code 改了 STATE，下一步自动补新版，同一版本只发一次。
+- **信息卡**：输入框上方显示本会话属于哪张卡片、带了哪些记忆，可单独落盘。
+- **原文可查**：逐字查看 AI 收到的内容和 token 数。
 
 ![AI 收到的原文](assets/raw-overlay-zh.png)
 
-### 说一句「落盘项目」，按规范写回去
+### 一句话落盘，不丢事实
 
-- **一句话触发**：会话里说「落盘项目 XX」把进展写进 XX 的 STATE，说「回忆 XX」/「继续 XX」先读全再接着做；触发词来自 `~/.ai` 里现有的项目名和别名。只认指令写法，讨论「落盘项目这个功能」时不会误触发；规划模式下只提示不拉回。
-- **防丢事实**：没读全不能写；新稿少了旧稿里的 commit、路径、版本号、单号又没声明删除，直接拒绝；写完回读校验并给出前后大小、删掉了哪些章节。用户要求了而这一轮没做到，回合结束前把模型拉回补做。
-- **一个项目一个文件夹**：`STATE.md` 是唯一入口，`plans/`（批准的计划自动存进来）`notes/` `evidence/` 里每个文件都要在「📁 文件索引」里有一行；每次落盘都整体重写 STATE、顺手整理文件夹（重复的合并、过时的退役到回收区）。
-- **卡片档案进 STATE**：插件按看板生成「🗂 卡片档案」块写进 STATE（AI 不写），其他工具读 STATE 也能看到卡片资料。
-- **防绕过**：`write` / `edit` / `bash` 直接改 `~/.ai` 下的记忆文件会被拒绝；写入只经 `ai-memory`（文件锁 + 乐观并发），和其他 CLI 共用同一个 `~/.ai` 也不会互相覆盖。
+- **触发词**：「落盘项目 XX」写进展，「回忆 XX」/「继续 XX」读全再接着做。
+- **防丢事实**：没读全不让写；新稿删掉旧稿里的 commit、路径、版本号又没声明，拒写。
+- **并发安全**：只经自带 `ai-memory` 写入（文件锁 + 乐观并发），直接改 `~/.ai` 会被拦截。
+- **整理旧账**：同名检测、多份合并、按卡片组归档，都可撤销。
 
-### 会话信息卡：这个会话属于哪张卡片、带着什么，一眼看清
+### 任务日程与今天面板
 
-![会话信息卡](assets/sic-collapsed-zh.png)
+![任务日程看板](assets/schedule-today-zh.png)
 
-- **输入框上方一行**：卡片组 / 卡片、落盘项目数、仓库 / 链接 / 子任务 / 说明胶囊，一键直达看板上的这张卡片。有关联是浅蓝，没关联是浅灰。
-- **展开看全部**：每个落盘项目一行（所属项目、别名、next_action、是否已注入、字数），可以单独「落盘」；下面是卡片资料。
-- **落盘的结局如实显示**：从信息卡点了落盘之后，这一轮写好了提示「落盘完成」；被你停止、出错、或者 AI 在问你，都会写明，并给「重新落盘 / 忽略」，不会一直转圈。
-
-![展开的会话信息卡](assets/sic-open-zh.png)
-
-![落盘出错时](assets/sic-error-zh.png)
-
-### 同名检测：不让同一个项目被建成两份
-
-- **还没输入就提示**：卡片没关联落盘项目时，按卡片名找到别名相同的已有项目，提示「可能就是这个」。
-- **完全同名不让新建**：输入的文件名或别名和已有项目相同，主按钮换成「关联并落盘」，并给出改名建议；名字相近时只提示，确认不是同一个可以照常新建。
-- **每个候选看得清**：字数、更新时间、已经关联了哪些卡片、落盘时会不会迁移；可以「只关联」，也可以「关联并落盘」。
-
-![可能就是这个](assets/sic-hint-zh.png)
-
-![已有同名落盘项目](assets/sic-exact-zh.png)
-
-![名字相近](assets/sic-near-zh.png)
-
-### 按卡片组归档，按规范自动迁移
-
-- **每个卡片组有自己的落盘文件夹**：`~/.ai/projects/<文件夹>/`。第一次在这个组落盘时，信息卡请你确认一次（按组名给建议，可改），卡片组设置里也能改。新建、合并的落盘项目都放进这里。
-- **规范是一张带版本号的检查清单**：每次落盘都整张检查，所以不管 STATE 是按哪个旧版本写的，下次落盘都会被拉到最新规范。位置不对的由插件把**整个文件夹**迁过来（子文档一起搬、里面的旧路径改指新位置、`~/.ai` 里的外部引用改指向、卡片关联换成新位置，旧文件夹进回收区）；标题行、文件索引、别名行由落盘的 AI 按清单改好，不合规范不让写。
-- **提前告诉你，事后能撤销**：信息卡上提前标出「落盘时迁到 xxx」；迁移后显示「已按规范迁移」卡片，可以撤销（搬回原处，之后不再自动迁）或删除旧文件夹。跨组共用的留在第一个关联它的组；旧项目不会被主动批量迁移，只在被落盘时迁。
-
-![卡片组设置：落盘文件夹](assets/group-settings-zh.png)
-
-### 合并落盘项目
-
-- **几份合成一份**：同一张卡片关联的几个落盘项目可以合并（勾选要合的，没选的不动）。AI 读全每一份、先写要点再整体重写成一份 STATE；插件校验来源里的关键事实都还在，再按规范把所有文件放进合并结果文件夹（重复的只留一份，`~/.ai` 外引用的文件复制进 `evidence/`）。
-- **旧名字变成别名**：说「回忆 + 旧名字」照样能找到；卡片关联和 `~/.ai` 里指向旧路径的引用一并改好。
-- **可撤销、可删除、可嵌套**：合并前的文件夹进回收区，可以撤销（只退一步），也可以永久删除；合并结果还能再合并。
-
-![合并落盘项目](assets/merge-panel-zh.png)
-
-### 看板：卡片组管父项目，卡片管任务
-
-- **按项目看全局**：每个卡片组一条泳道，阶段（列）名称、数量、顺序都能改；卡片在阶段内拖动排序（键盘 Alt+↑/↓），拖到别的阶段即推进；卡片组可拖动排序、点头部展开 / 收起。
-- **卡片组标题旁的统计**：卡片数是蓝底胶囊（0 张变灰），旁边「● N 活跃会话」= 本组卡片关联、没归档的会话数，会话一开一归档就更新；仓库数和阶段数是灰色小字。
-- **每个阶段随手加卡**：阶段底部常驻「添加卡片」，回车连续添加；也能从落盘项目批量导入（一个 STATE 生成一张卡片并自动关联）。
-- **卡片上只放两个小标志**：会话标志（有活跃会话为绿色、全部已归档为灰色）和落盘项目数。
-- **卡片归档**：点归档图标或拖进「已归档卡片」列表；归档的卡片可看只读详情、「恢复活跃」回原阶段。
-- **agent 也能改看板**：`card_manage` / `repo_manage` / `phase_move` / `task_manage` 四个工具，在项目会话里不传 card 就作用于本会话的卡片。
-- **深色主题**：跟随 dsh，看板右上角可一键切换。
-
-![卡片组标题旁的统计](assets/lane-stats-zh.png)
+- **一条时间轴**：浅蓝计划、深蓝实际（有对话的那天自动记）、红旗截止。
+- **今天面板**：执行中 / 等外部 / 个人暂停 / 已安排 / 未安排分区，拖动改状态。
+- **会话状态汇总**：没拆任务的项目卡汇总自己所有会话的状态。
 
 ### 卡片详情
 
-![卡片详情](assets/card-detail-zh.png)
+![卡片详情](assets/card-tasks-zh.png)
 
-- **以此卡片新建会话**：点了立刻显示「正在新建会话…」并锁住按钮，侧栏同时出现占位行；建好后侧栏那一行就是「卡片名 · 未开始」。会话默认完全权限，标题自动改成卡片名或「卡片组 · 卡片」。
-- **本卡片的会话置顶**：活跃在前、已归档在后，各自按更新时间排序；可打开、归档（还在运行时先确认「停止并归档」，可撤销）、「恢复活跃」回原位置、解除关联；还没对话的会话可以删除（需要 [dsh-manage-sessions](https://github.com/hoyyang/dsh-manage-sessions)）。
-- **关联已有会话**：搜索会话名或仓库，活跃 / 已归档两列按仓库分组，勾选后一次保存；一个会话只属于一张卡片，分叉出来的会话自动跟着源会话的卡片。
-- **关联的落盘项目**：默认只显示标题，「展开详情」一次展开全部（项目、更新日期、一行状态、next_action）；下面「回忆」「落盘」两个按钮发到这张卡片最近的会话。
-- **相关说明 / 相关链接 / 相关文件**：说明不限字数、网址可点、过长折叠；链接有显示文字、类型（全局共用，可在「管理类型」里新增、改名、拖动排序）和完整网址，可批量添加，编辑 / 删除按钮常驻显示，可拖动排序、复制；文件用系统对话框多选或「粘贴路径」一次贴多行（逐行检查存在 / 是文件夹 / 不存在 / 已关联）。
-- **阶段与子任务**：步骤条点一下就移到该阶段；子任务勾选、删除、回车添加。
+- **任务与子任务**：截止日、排今天、关联会话、拖动改层级。
+- **卡片资料**：说明、链接、文件、仓库都注入会话，每条可单独开关。
+- **一键开会话**：仓库软链到 `repos/<仓库>/`，仓库自己的 `AGENTS.md` 照常加载。
 
-![落盘项目展开详情](assets/card-memory-zh.png)
+## 快速上手
 
-![相关链接](assets/card-links-zh.png)
-
-![关联已有会话](assets/link-sessions-zh.png)
-
-### 仓库
-
-- **卡片共用仓库 + 卡片自己的仓库**：卡片组设置里的仓库是「卡片共用」，新建卡片时自动带上；卡片还可以加自己的仓库。候选来自 dsh 已有工作区和任意卡片组 / 卡片添加过的仓库，也可以「选择文件夹…」。
-- **项目会话统一路径**：仓库以软链接挂在会话目录的 `repos/<仓库>/` 下，并生成 AGENTS.md 列出仓库清单；从这个路径读写，仓库自己的 AGENTS.md / CLAUDE.md 才会加载。同名不同路径的自动改成「名-2」。
-
-![添加卡片共用仓库](assets/add-repos-zh.png)
-
-### 侧栏「项目区」
-
-![侧栏项目区](assets/sidebar-zh.png)
-
-- **项目区工作区**：插件在工作区列表置顶一个「项目区」，每个卡片组是它的子工作区（视图选「按工作区树」时嵌套显示），项目会话按卡片组归在这里。
-- **活跃会话数 + 层级**：每个卡片组行显示没归档的会话数（0 为灰色，变化时轻跳）；组下会话整行缩进到引导线右侧。
-- **还没对话的会话也显示**：dsh 默认隐藏空会话，插件把它们补画成「卡片名 · 未开始」行，当前打开的也一样，可直接删除。
-- **从看板进入自动展开**：从详情打开或新建会话后，所在卡片组收起着就自动展开并滚到这个会话。
-- **「+」先选卡片**：点「项目区」或卡片组行的「+」，先选卡片（只列本组卡片，带阶段、记忆数、会话数），再新建会话或打开它已关联的会话。
-- **「项目看板」主按钮**：与「插件」同一组，带「N 进行中」徽标（没归档、且至少有一个没归档会话的卡片数）。
-
-![选卡片浮层](assets/card-picker-zh.png)
-
-**和已有插件的差别**：看板类插件多数按工作区记待办；本插件不做通用待办，只做「项目 → 落盘记忆 → 仓库 → 会话」这条链，而且把记忆的读、写、规范、迁移、合并都做进插件里：卡片即项目，会话自动继承完整、最新的项目上下文。
-
-## 快速上手（30 秒）
-
-1. 点击侧栏「插件」下面的「项目看板」，再点右上角「新建卡片组」，输入组名后回车。
-2. 点击任意阶段底部的「添加卡片」，输入标题后回车。
-3. 打开「卡片组设置」，在「卡片共用仓库」里添加仓库；需要的话把「落盘文件夹」也设好。
-4. 在卡片详情点「以此卡片新建会话」：会话出现在「项目区」下这个卡片组里，已带上卡片资料。
-5. 在会话里干完一段，说「落盘项目」（或点信息卡上的「新建并落盘」），进展就写进这张卡片的落盘项目；下次从卡片开会话，记忆自动就在。
+1. 点击侧栏「项目看板」，再点击「新建卡片组」，输入组名后回车。
+2. 点击阶段底部「添加卡片」，输入标题后回车。
+3. 打开卡片，在「仓库」里添加你的代码仓库。
+4. 点击「以此卡片新建会话」，开始对话。
+5. 告一段落时，在会话里输入「落盘项目」。
 
 | 操作 | 结果 |
 |---|---|
-| 以此卡片新建会话 | 按钮立即进入「正在新建会话…」，侧栏出现「卡片名 · 未开始」，卡片组行数字 +1 |
-| 在会话里说「落盘项目」 | STATE 写进卡片组的落盘文件夹，带卡片档案块，回读校验通过，信息卡提示「落盘完成」 |
-| 落盘中途点「停止」 | 信息卡显示「已停止，没写入」，给「重新落盘 / 忽略」 |
-| 在信息卡输入已有项目的名字 | 按钮变成「关联并落盘」，标出「已存在」，给改名建议 |
-| 对旧位置的落盘项目落盘 | 整个文件夹迁到卡片组的落盘文件夹，信息卡出现「已按规范迁移」，可撤销 |
-| 另一个 CLI 改了 STATE | 本会话下一步收到新版全文，标明替代旧版和写入者 |
-| 新稿删掉了旧稿里的 commit 号 | 写入被拒（`DROPPED_ANCHORS`），点名缺了哪些 |
-| 拖动卡片到别的阶段 | 卡片移到新阶段，`events.jsonl` 追加一条 move 记录 |
+| 以此卡片新建会话 | 会话出现在侧栏「项目区」，已带上卡片资料和项目记忆 |
+| 会话里说「落盘项目」 | STATE 按规范写回，回读校验通过，信息卡提示「落盘完成」 |
+| 新稿删了旧 commit 号 | 写入被拒，返回 `DROPPED_ANCHORS` 并列出缺了哪些 |
+| 另一个 CLI 改了 STATE | 本会话下一步收到新版全文 |
+| 任务关联的会话开始运行 | 今天面板里这项自动移到「执行中」 |
+| 拖动卡片到别的阶段 | 卡片换阶段，`events.jsonl` 记一条 move |
 
-在项目会话里让 agent 操作看板（不传 `card` 就作用于本会话的卡片）：
+在项目会话里让 agent 改看板（不传 `card` = 本会话的卡片）：
 
 ```text
-> 把这张卡片推进到「验收」，再加一个子任务「补回归用例」
-phase_move  { "status": "verify" }                     → {"ok":true,"event":{"kind":"move","from":"开发","to":"验收"}}
-task_manage { "op": "add", "text": "补回归用例" }      → {"ok":true,"tasks":[…,{"text":"补回归用例","done":false}]}
-```
-
-读写落盘项目（插件注册的 `landfill` 工具，模型按 skill 协议调用）：
-
-```text
-landfill { "op": "recall" }                          → 分段读 STATE + [必读]，读到 complete:true
-landfill { "op": "persist", "content": "…", "drop": ["a1b2c3d"] } → {"key":"checkout/checkout-flow","verified":true,"migrated":{…}}
+phase_move  { "status": "verify" }               → {"ok":true,"event":{"kind":"move","to":"验收"}}
+task_manage { "op": "add", "text": "补回归用例" } → {"ok":true,"tasks":[…,{"text":"补回归用例","done":false}]}
+landfill    { "op": "recall" }                   → 分段读 STATE + [必读]，直到 complete:true
 ```
 
 ## 使用场景
 
-- **长周期项目接续**：今天落盘，明天从卡片开新会话，状态、决策、next_action 已经在上下文里，不用重新交代。
-- **多个 CLI 共用一份记忆**：DSH 里落盘，Codex / Claude Code 读同一个 `~/.ai` 的 STATE；它们写了，DSH 这边下一步自动拿到新版。
-- **一个需求跨多个仓库**：卡片组挂上前端、SDK、基础设施几个仓库，项目会话里用 `repos/<仓库>/` 统一读写。
-- **收拾散落的记忆**：同一件事以前落成了好几份，用「合并」合成一份，旧名字当别名；放错地方的，下次落盘自动迁到卡片组的文件夹。
-- **把零散会话收拢到项目**：之前在各处开的讨论会话，用「关联已有会话」挂到同一张卡片下。
-- **每天开工先看全局**：卡片组标题旁的卡片数和活跃会话数、卡片上的会话标志，打开看板就知道哪些项目在推进。
-- **交接给同事或新会话**：卡片的落盘项目、说明、链接、文件和会话列表就是交接清单。
-- **让 agent 自己推进**：在项目会话里让 agent 推进阶段、勾子任务，看板实时更新，每次变更写审计日志。
-- **一单一卡处理问题单**：卡片标题写问题单号，落盘项目以单号为别名；下次在任意会话说「回忆 + 单号」就能找回分析进度。
-- **规范升级不用手工迁移**：老版本写的 STATE 不用一次性整理，哪个项目再被落盘，哪个就自动迁到卡片组的文件夹并补齐规范项。
+- **长周期项目**：今天落盘，明天开新会话直接接着做。
+- **多 CLI 共用记忆**：DSH 与 Codex / Claude Code 读写同一份 `~/.ai`。
+- **跨仓库需求**：一张卡片挂前端、SDK、基建多个仓库。
+- **每日站会**：打开今天面板，看清每个项目和会话在干什么。
+- **问题单跟进**：一单一卡，「回忆 + 单号」随时找回分析进度。
+- **交接**：卡片里的记忆、说明、链接、会话就是交接清单。
+- **收拾散落记忆**：同一件事落成了几份，合并成一份，旧名变别名。
+- **让 agent 自己推进**：会话里让 agent 推阶段、勾子任务，看板实时更新。
+
+## 适合 / 不适合
+
+- **适合**：要隔几天反复接着做的项目、跨多个仓库的需求、DSH 与其他 CLI 共用一份项目记忆。
+- **不适合**：只想要通用待办清单；需要多人在线协作（数据只在本机）。
 
 ## 运行效果
 
-- 从卡片开的会话第一步就带着 STATE 与 `[必读]` 全文，系统提示里只有一段「项目记忆」（卡片档案 + 落盘项目索引）。
-- 落盘后 STATE 位于 `~/.ai/projects/<卡片组的落盘文件夹>/memory/designs/<名字>/STATE.md`，带卡片档案块、文件索引、别名行。
-- 会话信息卡实时显示落盘这一轮的结局；同名检测边输入边给出候选。
-- 侧栏「项目区」下每个卡片组行带活跃会话数，会话整行缩进；新建的空会话直接显示卡片名。
-- 每次移动、关联、挂载、迁移都追加到 `events.jsonl`，可追溯谁（用户 / agent）在什么时候做了什么。
-- 合并完成后，合并结果文件夹里是 STATE.md、notes/（每份来源的要点）和 evidence/，合并前的文件夹在各自项目的 `inbox/retired/` 下。
-- 迁移完成后，旧文件夹在原项目的 `inbox/retired/<时间>-migrate-<名字>/` 下，信息卡显示子文档数和改了几处外部引用。
-- 「查看 AI 收到的原文」显示系统提示字数、注入全文份数与总字数、约多少 token。
+- 从卡片开的会话，第一步就收到 STATE 与 `[必读]` 全文。
+- 落盘后 STATE 位于 `~/.ai/projects/<卡片组文件夹>/memory/designs/<名字>/STATE.md`。
+- 每次移动、关联、迁移都追加到 `events.jsonl`，可追溯。
+- 侧栏「项目区」按卡片组归拢项目会话，带活跃会话数。
+- 合并后旧文件夹进 `inbox/retired/`，可撤销还原。
+- 信息卡实时显示落盘结局：完成、已停止或出错，并给「重新落盘」。
 
 ![深色主题](assets/board-dark-zh.png)
 
+## 与同类对比
+
+| | dsh-project-manager | 通用看板 / 待办插件 | 纯记忆插件 |
+|---|:---:|:---:|:---:|
+| 项目看板 + 阶段 | ✅ | ✅ | — |
+| 会话自动注入项目记忆 | ✅ 全文 + 版本追踪 | — | 检索召回 |
+| 写回防丢事实 | ✅ | — | — |
+| 多 CLI 共用 `~/.ai` | ✅ | — | — |
+| 任务 ↔ 会话状态联动 | ✅ | — | — |
+| 多人协作 / 云同步 | — | 视插件 | 视插件 |
+
+## 可靠性
+
+- **隔离验收**：每版先在独立 staging DSH_HOME 逐项点击验证，冷启动静态检测全绿才发布。
+- **测试**：256 项单元测试 + 9 项 `ai-memory` 测试。
+- **失败点名**：`NEED_FULL_READ`、`DROPPED_ANCHORS`、`SPEC_ISSUES` 等错误码说清原因，不静默失败。
+- **安全边界**：路由只接受本机回环；不读凭据、不联网、不执行 git；删卡片组只删软链。
+- **降级**：dsh 改版对不上页面结构时，侧栏增强自动隐藏，数据不受影响。
+
+## 常见问题
+
+- **侧栏没有「项目区」？** 新建第一个项目会话后出现，之前用「项目看板」按钮进入。
+- **怎么知道 AI 收到了什么？** 信息卡点「查看 AI 收到的原文」。
+- **落盘被拒？** 按错误码处理：先「回忆」读全，或在 `drop` 里声明有意删除的内容。
+- **「恢复活跃」是灰的？** 安装 [dsh-manage-sessions](https://github.com/hoyyang/dsh-manage-sessions)。
+
 ## 配置
 
-零配置即可使用。需要时在 profile 的 `cordis.patch.yml` 加顶层 id 条目覆盖（不要放进 `insert:` 列表）：
+零配置可用。需要时在 profile 的 `cordis.patch.yml` 加顶层条目：
 
 ```yaml
 - id: dsh-project-manager
   config:
-    dataDir: ''                              # 缺省 <DSH_HOME>/dsh-project-manager
-    aiRoot: ''                               # 缺省 ~/.ai
-    landfill: true                           # 落盘项目工具 / 识别 / 拦截 / 收尾检查（false = 只读扫描）
-    agentsHome: ''                           # landfill-project skill 链接所在的 ~/.agents
-    hubTitle: 项目区
-    projectSessionMode: danger-full-access   # 或 inherit（跟随全局权限）
-    memoryMaxBytes: 6000                     # 系统提示里项目记忆段的上限，1000–32000
+    aiRoot: ''                              # 记忆目录，缺省 ~/.ai
+    landfill: true                          # false = 只用看板
+    projectSessionMode: danger-full-access  # 或 inherit
 ```
-
-卡片组的落盘文件夹在「卡片组设置」里改，不需要写配置。
-
-## 工作原理
-
-- **数据**：看板存在 `<dataDir>/board.json`（原子写 + 串行变更），审计追加到 `events.jsonl`；落盘项目按需扫描 `~/.ai/projects/*/memory/designs/*/STATE.md`；写入只经 `~/.ai/tools/ai-memory`（Python 标准库：fcntl 文件锁 + expected-hash + journal）。合并与迁移记录在 `<dataDir>/merges.json` / `migrations.json`。
-- **注入**：系统提示一段（卡片档案每步按看板现生成 + 落盘项目索引）；STATE 与 `[必读]` 全文在 `agent/pre-step` 作为一次性消息注入，按「会话 × 文件版本」记已知，跨重启保存；看到压缩事件就重注。
-- **落盘触发**：`agent/pre-step` 识别用户原话并追加提示；`tools/pre-execute` 拦截直写；`agent/turn-stopping` 收尾检查并拉回；会话事件 `turn/end` 的结束原因（完成 / 停止 / 出错）驱动信息卡上的落盘状态。
-- **规范与迁移**：规范清单（v2：位置、标题行、文件索引、别名行含卡片名）在每次 persist 前检查；位置项由插件用 `ai-memory retire-dir / write / import / update-state` 整体搬迁，中途失败按已做的倒着撤回。
-- **项目区**：用官方 `workspaceRegistry` 登记「项目区」工作区（`<dataDir>/hub`）与每个卡片组的子工作区，仓库以软链接挂在 `repos/<仓>` 下。
-- **界面**：看板是主区面板；「项目看板」主按钮走官方 `sidebar.panellist`；会话信息卡走 `conversation.input.dock`；侧栏数字与层级是一张按行 id 生成的样式表，「+」接管、空会话行、自动展开是 DOM 增强，找不到对应行时安静跳过。
-
-## 可靠性与验收
-
-- **隔离验证**：每个版本先在独立的 staging DSH_HOME 装配，冷启动静态检测（依赖链接 / bundle 清单 / 运行时导入 / 重复 entry 等六类）本插件项全绿后才装到主实例。
-- **真实模型端到端**：0.20 在 staging 用真实模型跑「落盘 → 自动迁移 → 规范检查 → 迁移卡 → 撤销」与「新建落盘进卡片组文件夹」；0.19 用 6 份真实落盘项目副本跑合并、嵌套合并、子删除、撤销逐字节还原。
-- **真实 GUI 测试**：Playwright 在真实 dsh web 上逐项点：组头统计、新建会话忙态与侧栏标题、链接按钮常驻、箭头方向、同名三种情况、卡片组落盘文件夹确认与非法名字提示、停止后状态与忽略、整页不移位，全部通过、0 页面报错。
-- **主实例验收**：每个版本装到日常使用的 dsh 后，用探针确认新逻辑已生效（0.20：组头统计、新建会话忙态与侧栏「卡片名 · 未开始」、链接按钮、箭头、同名检测）。
-- **单元测试**：96 项 node:test（看板模型、注入与已读判定、落盘防丢、合并全链路、规范清单、同名匹配、迁移与撤销、落盘状态跟踪）+ 9 项 ai-memory 测试。
-- **失败会点名**：`NEED_FULL_READ`、`DROPPED_ANCHORS`、`UNINDEXED_FILES`、`SPEC_ISSUES`、`NEED_GROUP_FOLDER`、`MIGRATE_CLASH`、`FOLDER_TAKEN`、`REPO_MOUNTED` 等错误码点名对象，不静默吞掉。
-- **兼容与限制**：「恢复活跃」和删除空会话依赖 dsh-manage-sessions，缺失时按钮置灰或不显示；落盘项目需要 python3（Windows 关闭）；多个 dsh 进程共用同一 DSH_HOME 时看板没有跨进程锁（`~/.ai` 写入有）。
-- **安全边界**：项目会话默认完全访问（只对项目区目录的会话生效，可改 `inherit`）；HTTP 路由只接受本机回环（Host 必须是 127.0.0.1 / localhost），写操作带 Origin 时必须同源（DSH Desktop 壳转发会去掉 Origin，此时放行），没有登录态校验；插件会写 `~/.ai`、建 `~/.agents/skills/landfill-project` 链接；不读写凭据、不访问网络、不执行 git；删除卡片组只删软链接，不删真实仓库。
-
-## 常见问题
-
-- **侧栏没看到「项目区」？** 新建第一个项目会话后才会登记；在那之前用侧栏「项目看板」主按钮。
-- **卡片组没有嵌套在「项目区」下？** 在工作区列表标题旁的「视图选项」里把分组方式选成「按工作区树」。
-- **第一次落盘为什么问我落盘文件夹？** 新建和迁移的落盘项目要放进卡片组自己的文件夹，只问一次；以后在卡片组设置里改。
-- **我的旧落盘项目会被搬走吗？** 只有在你对它落盘、且它关联的卡片组设了落盘文件夹时才迁；迁移后可在信息卡撤销，撤销后不再自动迁。
-- **落盘被拒了怎么办？** 看返回的错误码：没读全就先回忆；少了关键事实就补回或写进 `drop`；`SPEC_ISSUES` 按列出的规范项改。
-- **「恢复活跃」是灰的？** 当前 dsh 没有 `workspaceRegistry.unarchiveSession`，装 dsh-manage-sessions 并应用它的核心补丁即可。
-- **「选择文件夹…」变成了输入框？** dsh 使用网页文件浏览器（非本机访问或远程）时打不开系统对话框，直接输入绝对路径。
 
 ## 卸载
 
-1. 调用 `POST /_dsh/dsh-project-manager/api/hub/cleanup`（或在工作区列表手动移除「项目区」和各卡片组工作区），撤销插件登记的工作区条目；会话与文件不会被删除。
-2. `dsh plugin --profile web remove dsh-project-manager`，重启 dsh。
-3. 数据保留在 `<DSH_HOME>/dsh-project-manager/`（board.json、events.jsonl、merges.json、migrations.json、hub/、backups/），需要时手动删除。
-4. 落盘项目：`~/.ai`（含插件补建的 `tools/ai-memory`）是共享记忆，卸载不删。`~/.agents/skills/landfill-project/SKILL.md` 若是指向插件的链接，卸载后会断开；要留 skill 就把 `backups/` 里的备份（或插件包里的 SKILL.md）复制回去。
+```sh
+dsh plugin --profile web remove dsh-project-manager
+```
 
-## 本地构建
+看板数据（`<DSH_HOME>/dsh-project-manager/`）和 `~/.ai` 不会被删除。
+
+## 开发
 
 ```sh
-npm install
-npm run build          # host：tsc → lib/
-npm run build:client   # client：tsdown → lib/client.js
-npm run typecheck
-npm test               # node:test 单测 + ai-memory 测试
+npm install && npm run build && npm run build:client && npm test
 ```
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](LICENSE) © hoyyang

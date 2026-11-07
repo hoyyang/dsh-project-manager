@@ -4,6 +4,7 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { clip } from './text.js'
 
 export interface StateInfo {
   key: string
@@ -40,7 +41,7 @@ export function parseState(text: string): { status: string; next: string; aliase
   const next = pickLine(text, NEXT_RE)
   // 别名行：逗号 / 顿号 / 空格分隔，括号里的说明不算
   const al = pickLine(text, ALIAS_RE).replace(/[（(].*$/, '').split(/[\s,，、]+/).map((x) => x.replace(/`/g, '')).filter((x) => /^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9._\u4e00-\u9fff-]{1,63}$/.test(x)).slice(0, 30)
-  return { status: status.slice(0, 400), next: next.slice(0, 400), ...(al.length ? { aliases: al } : {}) }
+  return { status: clip(status, 400), next: clip(next, 400), ...(al.length ? { aliases: al } : {}) }
 }
 
 export class StateCatalog {

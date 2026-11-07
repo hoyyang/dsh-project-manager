@@ -1,15 +1,18 @@
 {
   "name": "dsh-project-manager",
-  "version": "0.20.1",
-  "description": "Project board + landfill memory for DeepSeek Harness: sessions opened from a card auto-load the complete, latest project memory; persist by the rules, same-name detection, merge, and per-group filing with undoable migration.",
+  "version": "0.57.0",
+  "description": "Project board, task schedule (gantt) and project memory for DeepSeek Harness: sessions opened from a card auto-load it.",
   "keywords": [
-    "dsh",
-    "memory",
     "dsh-plugin",
     "deepseek-harness",
     "kanban",
+    "project-board",
     "project-management",
+    "project-memory",
+    "memory",
     "session",
+    "task-schedule",
+    "gantt",
     "landfill-project"
   ],
   "license": "MIT",
@@ -27,6 +30,7 @@
   "types": "./lib/types/index.d.ts",
   "files": [
     "lib",
+    "!lib/*.map",
     "bin",
     "!bin/tests",
     "skills",
@@ -39,24 +43,26 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5",
-    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.1.5-rc <2",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc <2"
+    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/react": "18.3.31",
     "@types/react-dom": "18.3.7",
+    "linguist-languages": "9.5.0",
+    "mime-db": "1.54.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "tsdown": "0.22.14",
-    "unrun": "0.3.1",
-    "typescript": "5.7.3"
+    "typescript": "5.7.3",
+    "unrun": "0.3.1"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
-    "build:client": "node scripts/gen-css.mjs && tsdown",
+    "build:client": "node scripts/gen-css.mjs && node scripts/gen-ftype.mjs && tsdown",
     "test": "node --test test/*.test.mjs && python3 -m unittest discover -s bin/tests -q",
     "prepublishOnly": "npm run build && npm run build:client && npm test"
   },

@@ -34,7 +34,7 @@ export type BlankRow = { id: string; title: string; current?: boolean; pending?:
 /**
  * 0.12：wids 里每个工作区还没对话的会话：blank、没归档、不是子代理。宿主只画当前打开的那个、而且只写「新会话」，
  * 0.20 起当前那个也由插件画（标 current），标题用会话标题，没有就用看板上记的标题（titles，绑定卡片时就有）。
- * 纯函数（单测直接取源码跑），工作区内顺序保持宿主 sessionIds 的顺序。
+ * 0.23 起只画绑定了卡片的空会话（titles 里有键）。纯函数（单测直接取源码跑），工作区内顺序保持宿主 sessionIds 的顺序。
  */
 export function blankRows(items: Array<{ workspaceId: string; sessionIds?: string[] }>, byId: Record<string, { title?: string; displayTitle?: string; blank?: boolean; parentId?: string; origin?: string; retainedBy?: Record<string, number> } | undefined>, archived: ReadonlySet<string>, wids: string[], titles: Record<string, string | undefined> = {}): Record<string, BlankRow[]> {
   const out: Record<string, BlankRow[]> = {}
@@ -45,6 +45,9 @@ export function blankRows(items: Array<{ workspaceId: string; sessionIds?: strin
       const s = byId[id]
       // 0.15：分叉会话也带 parentId，只按 origin 排子代理
       if (!s || !s.blank || archived.has(id) || s.origin === 'subagent') continue
+      // 0.23：只补画绑定了卡片的（titles 的键 = 看板上记的会话）。宿主开窗时自动建的空会话交还宿主：
+      // 没在看就藏，在看时宿主自己画一行「新会话」——否则删一个、下次开窗宿主又建一个，侧栏永远挂着一行
+      if (!(id in titles)) continue
       const cur = ((s.retainedBy && s.retainedBy.mainView) || 0) > 0
       // displayTitle 在没有标题时是工作目录名（如 gmunhccece），不能用；都没有才显示「新会话」
       rows.push(cur ? { id, title: s.title || titles[id] || '新会话', current: true } : { id, title: s.title || titles[id] || '新会话' })
@@ -58,25 +61,29 @@ export function blankRows(items: Array<{ workspaceId: string; sessionIds?: strin
  * 卡片组行的数字 + 层级样式。counts：卡片组子工作区 id → 活跃会话数；bump：本次数字变了的（轻跳一下）。
  * 数字放在标题和悬停按钮之间；会话行整行缩进到引导线右侧（边框、填充、选中底色一起缩进）。
  */
+/** 0.24 数字的说明（悬停数字 / 读屏）；0.26 起数字只数侧栏显示的会话，不再有「还没对话」的说明。 */
+export const countTip = (n: number): string => (n ? n + ' 个会话' : '没有会话')
 export function rowCss(hub: string | null, counts: Record<string, number>, bump: Set<string>): string {
   const ids = Object.keys(counts)
   if (!ids.length) return ''
   const rows = ids.map(wsRow)
-  const sec = rows.map((r) => SEC + ':has(> * > ' + r + ')')
+  /* v132（3）：卡片组整组 / 会话行外层由 SidebarBridge.mark() 打 data-dpm-ws / data-dpm-sw（代替 has 选择器：
+     宿主侧栏任何 DOM 改动都不再让浏览器整页重新匹配）。sec 只剩一条属性选择器。 */
+  const sec = [SEC + '[data-dpm-ws="g"]']
   const any = (list: string[], tail: string): string => list.map((x) => x + tail).join(',\n')
   let css = any(rows, '::after') + ' { order: 1; flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--dpm-cnt-bg); color: var(--dpm-cnt-ink); font-size: 12px; font-weight: 700; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }\n'
     + any(rows, ' > [class*="rowActions"]') + ' { order: 2; }\n'
     + any(rows, '[aria-expanded="true"] [class*="_title"]') + ' { font-weight: 600; }\n'
     // 会话行：整行右移到引导线右侧；引导线画在每行外层（连续成一条），x = 卡片组文件夹图标中线
     + any(sec, ' > * > :is([data-row-key^="session:"], [data-dpm-blank])') + ' { margin-inline-start: calc(24px + var(--dsh-workspace-indent, 0px)); padding-inline-start: 8px; }\n'
-    + any(sec, ' > *:has(> :is([data-row-key^="session:"], [data-dpm-blank]))') + ' { background: linear-gradient(var(--dpm-guide), var(--dpm-guide)) no-repeat calc(15.5px + var(--dsh-workspace-indent, 0px)) 0 / 1px 100%; }\n'
+    + any(sec, ' > [data-dpm-sw]') + ' { background: linear-gradient(var(--dpm-guide), var(--dpm-guide)) no-repeat calc(15.5px + var(--dsh-workspace-indent, 0px)) 0 / 1px 100%; }\n'
     + any(sec, ' > [class*="sessionOverflow"]') + ' { margin-inline-start: calc(24px + var(--dsh-workspace-indent, 0px)); width: calc(100% - 24px - var(--dsh-workspace-indent, 0px)); padding-inline-start: 30px; }\n'
   for (const id of ids) {
     const n = counts[id]
-    css += wsRow(id) + '::after { content: "' + n + '" / "' + (n ? n + ' 个活跃会话' : '没有活跃会话') + '";' + (n ? '' : ' background: transparent; color: var(--dsw-alias-label-secondary, #61666b); font-weight: 600; opacity: .7;') + (bump.has(id) ? ' animation: dpm-cnt-bump 420ms cubic-bezier(.2, .8, .2, 1);' : '') + ' }\n'
+    css += wsRow(id) + '::after { content: "' + n + '" / "' + countTip(n) + '";' + (n ? '' : ' background: transparent; color: var(--dsw-alias-label-secondary, #61666b); font-weight: 600; opacity: .7;') + (bump.has(id) ? ' animation: dpm-cnt-bump 420ms cubic-bezier(.2, .8, .2, 1);' : '') + ' }\n'
   }
   // 「项目区」自己的会话（不属于任何卡片组）：只在按工作区树嵌套时缩进到卡片组同一级
-  if (hub) css += SEC + ':has(> * > ' + wsRow(hub) + '):has(> [role="group"]) > * > :is([data-row-key^="session:"], [data-dpm-blank]) { margin-inline-start: 12px; padding-inline-start: 8px; }\n'
+  if (hub) css += SEC + '[data-dpm-ws="hub"] > * > :is([data-row-key^="session:"], [data-dpm-blank]) { margin-inline-start: 12px; padding-inline-start: 8px; }\n'
   return css
 }
 
@@ -100,6 +107,7 @@ export class SidebarBridge {
 
   private style: HTMLStyleElement | null = null
   private last: Record<string, number> = {}
+  private hub: string | null = null
   private bumpTimer = 0
   private blanks: Record<string, BlankRow[]> = {}
   /** 0.20 正在新建的会话：工作区 id + 卡片标题（会话建好前侧栏先出现一行占位）。 */
@@ -112,8 +120,9 @@ export class SidebarBridge {
 
   start(): void {
     document.addEventListener('click', this.onCapture, true)
+    document.addEventListener('pointermove', this.onMove, { passive: true })
     // ponytail: 观察整个 body（侧栏容器类名是哈希、会重挂），rAF 合并 + 签名比对，没变化时零 DOM 写入
-    this.obs = new MutationObserver(() => { if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.syncBlanks() }) })
+    this.obs = new MutationObserver(() => { if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.syncBlanks(); this.mark() }) })
     this.obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] })
     this.style = document.createElement('style')
     this.style.dataset.plugin = 'dsh-project-manager:rows'
@@ -125,9 +134,12 @@ export class SidebarBridge {
 
   stop(): void {
     document.removeEventListener('click', this.onCapture, true)
+    document.removeEventListener('pointermove', this.onMove)
+    this.tip?.remove(); this.tip = null
     this.obs?.disconnect(); this.obs = null
     if (this.raf) cancelAnimationFrame(this.raf); this.raf = 0
     document.querySelectorAll('[data-dpm-blank-ws]').forEach((n) => n.remove())
+    document.querySelectorAll('[data-dpm-ws], [data-dpm-sw]').forEach((n) => { n.removeAttribute('data-dpm-ws'); n.removeAttribute('data-dpm-sw') })
     clearTimeout(this.bumpTimer)
     this.style?.remove()
     this.style = null
@@ -137,13 +149,65 @@ export class SidebarBridge {
   /** 0.20 新建会话期间的占位行（null = 去掉）。 */
   setPending(p: { ws: string; title: string } | null): void { this.pending = p; this.syncBlanks() }
 
-  /** 重画数字与层级。counts：卡片组子工作区 id → 活跃会话数。 */
+  /** 重画数字与层级。counts：卡片组子工作区 id → 侧栏显示的会话数（0.26 起不含宿主隐藏的空会话）。 */
   paint(hub: string | null, counts: Record<string, number>): void {
     if (!this.style) return
     const bump = new Set(Object.keys(counts).filter((k) => this.last[k] !== undefined && this.last[k] !== counts[k]))
     this.last = { ...counts }
+    this.hub = hub
+    this.mark()
     this.style.textContent = rowCss(hub, counts, bump)
     if (bump.size) { clearTimeout(this.bumpTimer); this.bumpTimer = window.setTimeout(() => { if (this.style) this.style.textContent = rowCss(hub, this.last, new Set()) }, 480) }
+  }
+  /**
+   * 0.24 悬停数字时的说明气泡：数字是行上的 ::after（不改宿主节点），位置 = 标题右侧到悬停按钮左侧之间。
+   * ponytail: 每次 pointermove 只做一次 closest + 两次 getBoundingClientRect，侧栏行很多时再加节流。
+   */
+  private tip: HTMLElement | null = null
+  private tipFor = ''
+  private readonly onMove = (e: PointerEvent): void => {
+    const row = (e.target as HTMLElement | null)?.closest?.(ROW) as HTMLElement | null
+    const id = row?.dataset.rowKey?.slice('workspace:'.length) ?? ''
+    const n = id ? this.last[id] : undefined
+    let on = false
+    if (row && n !== undefined) {
+      const tt = row.querySelector('[class*="_title"]') as HTMLElement | null
+      const acts = row.querySelector('[class*="rowActions"]') as HTMLElement | null
+      const ar = acts?.getBoundingClientRect()
+      const right = ar && ar.width > 0 ? ar.left : row.getBoundingClientRect().right
+      on = !!tt && e.clientX > tt.getBoundingClientRect().right && e.clientX < right
+    }
+    if (!on) { if (this.tip) { this.tip.remove(); this.tip = null; this.tipFor = '' } return }
+    if (this.tipFor === id) return
+    this.tip?.remove()
+    const t = document.createElement('div')
+    t.className = 'dpm-sbtip'
+    t.setAttribute('role', 'tooltip')
+    t.textContent = countTip(n as number)
+    document.body.append(t)
+    const r = (row as HTMLElement).getBoundingClientRect()
+    t.style.left = Math.max(8, Math.min(r.right - t.offsetWidth, innerWidth - t.offsetWidth - 8)) + 'px'
+    t.style.top = (r.bottom + 6) + 'px'
+    this.tip = t; this.tipFor = id
+  }
+
+  /**
+   * v132（3）：给 rowCss 用的标记（代替 has 选择器）。卡片组整组 [class*=groupSection] 打 data-dpm-ws="g"；
+   * 「项目区」整组在按工作区树嵌套（有直属 [role=group]）时打 "hub"；这些整组里直接装着会话行 / 补画行的外层打 data-dpm-sw。
+   * 只在值变化时写属性；宿主重挂节点后由 MutationObserver（rAF 合并，先于绘制）补标。
+   */
+  private mark(): void {
+    const want = new Map<Element, string>()
+    for (const id of Object.keys(this.last)) { const sec = document.querySelector(wsRow(id))?.closest(SEC); if (sec) want.set(sec, 'g') }
+    if (this.hub) { const sec = document.querySelector(wsRow(this.hub))?.closest(SEC); if (sec && !want.has(sec) && Array.from(sec.children).some((c) => c.getAttribute('role') === 'group')) want.set(sec, 'hub') }
+    document.querySelectorAll('[data-dpm-ws]').forEach((n) => { if (!want.has(n)) { n.removeAttribute('data-dpm-ws'); for (const c of Array.from(n.children)) c.removeAttribute('data-dpm-sw') } })
+    for (const [sec, v] of want) {
+      if (sec.getAttribute('data-dpm-ws') !== v) sec.setAttribute('data-dpm-ws', v)
+      for (const c of Array.from(sec.children)) {
+        const on = v === 'g' && !!Array.from(c.children).some((k) => k.matches('[data-row-key^="session:"], [data-dpm-blank]'))
+        if (on !== c.hasAttribute('data-dpm-sw')) c.toggleAttribute('data-dpm-sw', on)
+      }
+    }
   }
 
   /** 0.12：更新补画数据并立即同步。 */
@@ -209,6 +273,7 @@ export class SidebarBridge {
     const css = hidden.map((id) => '[data-row-key="session:' + CSS.escape(id) + '"]').join(',\n')
     const text = css ? css + ' { display: none !important; }' : ''
     if (this.hide && this.hide.textContent !== text) this.hide.textContent = text
+    this.mark()
   }
 
   /**
