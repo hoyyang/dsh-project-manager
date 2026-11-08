@@ -1,0 +1,49 @@
+{
+ "$schema": "dsh-project-manager/translation-catalog@1",
+ "source": "dsh-project-manager@0.20.1",
+ "file": "lib/tools.js",
+ "generated": "2026-10-31",
+ "license": "MIT (derivative work; original plugin © 2026 hoyyang)",
+ "entries": [
+  {
+   "zh": "merge 的 action 是 plan | note | commit",
+   "ru": "action merge — plan | note | commit"
+  },
+  {
+   "zh": "未指定 card，且当前会话没有绑定卡片",
+   "ru": "card не указан, и текущая сессия не привязана к карточке"
+  },
+  {
+   "zh": "  已归档（只读）: ",
+   "ru": "  В архиве (только чтение): "
+  },
+  {
+   "zh": "子任务序号越界 ",
+   "ru": "Индекс подзадачи вне диапазона "
+  },
+  {
+   "zh": "(看板为空)",
+   "ru": "(доска пуста)"
+  },
+  {
+   "zh": "未知 op ",
+   "ru": "Неизвестный op "
+  },
+  {
+   "zh": "缺少参数 ",
+   "ru": "Не хватает параметра "
+  },
+  {
+   "zh": "合并不可用",
+   "ru": "Слияние недоступно"
+  },
+  {
+   "zh": "（共 ",
+   "ru": "(всего "
+  },
+  {
+   "zh": " 项）",
+   "ru": " шт.)"
+  }
+ ]
+}

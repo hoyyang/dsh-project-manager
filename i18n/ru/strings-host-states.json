@@ -1,0 +1,17 @@
+{
+ "$schema": "dsh-project-manager/translation-catalog@1",
+ "source": "dsh-project-manager@0.20.1",
+ "file": "lib/states.js",
+ "generated": "2026-10-31",
+ "license": "MIT (derivative work; original plugin © 2026 hoyyang)",
+ "entries": [
+  {
+   "zh": "STATE.md 超过 256KB，只读前 256KB",
+   "ru": "STATE.md больше 256KB, читаются только первые 256KB"
+  },
+  {
+   "zh": "one-line status|一行状态",
+   "ru": "one-line status|одна строка статуса"
+  }
+ ]
+}

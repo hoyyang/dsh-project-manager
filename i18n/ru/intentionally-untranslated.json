@@ -1,0 +1,426 @@
+{
+ "note": "Strings that must stay Chinese: they are parsed by the plugin's own Chinese regexps or specify the on-disk STATE format (see tools/audit-functional.js).",
+ "by_file": {
+  "hub": [
+   {
+    "zh": "# 项目区（dsh-project-manager 自动生成，请勿手改）",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 读写纪律",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 落盘项目",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 卡片组：",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "# 卡片组「",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 仓库",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   }
+  ],
+  "index": [
+   {
+    "zh": "- 落盘 = 读完后整理整个文件夹（重复的合并 op=write，过时 / 弃用 / 错误的 op=retire，新证据 op=import）+ 按 skill「整体优化」重写整份 STATE；有意删掉的 commit / 路径 / 版本号 / 单号写进 persist 的 drop，否则会被拒。\\n",
+    "reasons": [
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "- 「读完」= STATE + 全部 [必读] 子文档。插件会把卡片关联的 STATE 与 [必读] 最新全文注入会话（别处改了下一步自动补新版），注入的算已读；其余用 recall（子文档带 file），有 next 就带 offset 读到 complete:true。\\n",
+    "reasons": [
+     "тело регэкспа",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "- 落盘项目按卡片组归档（~/.ai/projects/<卡片组的落盘文件夹>/）：新建的放进去；不在那里的由插件在落盘时整个迁过去（可撤销）。每次落盘按规范清单检查（标题行 / 文件索引 / 别名行含卡片名），落盘提示会列出要改的地方。\\n",
+    "reasons": [
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "- 读写都用 landfill 工具（op=recall / persist / append / list / register / validate），它经 ~/.ai/tools/ai-memory 写入，带并发校验与写后回读。\\n",
+    "reasons": [
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "- 一个落盘项目 = 一个文件夹：STATE.md 是唯一入口，plans/ notes/ evidence/ 里的每个文件都要在 STATE 的「📁 文件索引」里有一行（[必读] 或 [参考]）。\\n",
+    "reasons": [
+     "тело регэкспа",
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "- 不要用 write / edit / bash 直接改 ~/.ai 下的记忆文件；冲突时保留 inbox 里的产物并告诉用户，不要覆盖。\\n",
+    "reasons": [
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "- STATE 里的「🗂 卡片档案」块由插件按看板生成：不要改、不要在正文里重抄；卡片资料有错请用户在看板改。\\n",
+    "reasons": [
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 落盘项目（dsh-project-manager）\\n",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   }
+  ],
+  "landfill": [
+   {
+    "zh": "[dsh-project-manager · 落盘项目] 本轮用户要求落盘，先于回答完成：读全 STATE 与全部 [必读] 子文档（插件已注入的全文算已读；缺的用 landfill op=recall，有 next 就带 offset 读到 complete:true）→ 整理项目文件夹（重复的合并 op=write，过时 / 弃用 / 错误的 op=retire）→ 按 landfill-project skill 的「整体优化」规则重写整份 STATE（文件索引与文件夹一致）→ op=persist（有意删掉的 commit/路径/版本号/单号写进 drop）→ 看返回的报告（sizeWarning / missingPaths / dangling 要处理）。候选：",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "[dsh-project-manager · 项目记忆全文] 以下是本会话卡片关联的落盘项目在磁盘上的最新全文（STATE + [必读] 子文档），由插件按当前版本注入，已计入本会话已读，落盘前不用再 recall 这些。带 replaces 的条目替代本会话之前看到的版本，以新版为准。本卡片的卡片档案以系统提示「卡片档案（实时）」为准。",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": " 个文件没进 STATE 的文件索引：在「## 📁 文件索引」里给每个文件（或整个目录，写成 dir/）补一行「- [必读|参考] 路径 · 用途 · 何时读」；过时的先 op=retire",
+    "reasons": [
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "，但 STATE 与 [必读] 子文档还没读全。用 landfill op=recall 按 next / pending 读完（complete:true），再继续回答。",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "这个文件读完了；还有 [必读] 文件没读：按 pending 逐个 recall file=<file> offset=<next>，直到 complete:true",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": " 本会话还没读全当前版本（STATE + [必读] 子文档），不能整份覆盖：先 recall 把这些读完",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "的|功能|记录|结构|文件|机制|插件|是|和|与|里|中|这|那|怎么|如何|要|会|能|吗|呢",
+    "reasons": [
+     "список частиц/альтернатив"
+    ]
+   },
+   {
+    "zh": "建议加「## 📁 文件索引」节（每个文件一行：[必读|参考] 路径 · 用途 · 何时读）",
+    "reasons": [
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "在 STATE 的「## 📁 文件索引」里加一行（下次 persist 会检查）",
+    "reasons": [
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "[必读] 只能标文本文件（目录 / 二进制改标 [参考]）：",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "在 STATE 的文件索引里加一行（[参考]）",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "）：把不是每次都要读的改成 [参考]，或精简",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "建议首行用「# 落盘项目 STATE: ",
+    "reasons": [
+     "токен формата STATE",
+     "строка формата STATE"
+    ]
+   },
+   {
+    "zh": "^[\\\\s>*-]*落盘项目(?!",
+    "reasons": [
+     "regex",
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "落盘项目\\\\s*[:：]?\\\\s*",
+    "reasons": [
+     "regex",
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": "## 🔄 重启读取清单",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "[必读] 合计 ",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "落盘项目",
+    "reasons": [
+     "regex"
+    ]
+   },
+   {
+    "zh": "必读",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   }
+  ],
+  "lfspec": [
+   {
+    "zh": "加「## 📁 文件索引」节：每个子文档一行「- [必读|参考] 路径 · 用途」，没有子文档就写「- 暂无子文档」",
+    "reasons": [
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "缺「## 🔄 重启读取清单」或 next_action",
+    "reasons": [
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "在标题下加（或补全）一行「- aliases: ",
+    "reasons": [
+     "строка формата STATE"
+    ]
+   },
+   {
+    "zh": "首行不是「# 落盘项目 STATE: ",
+    "reasons": [
+     "токен формата STATE",
+     "строка формата STATE"
+    ]
+   },
+   {
+    "zh": "首行写成「# 落盘项目 STATE: ",
+    "reasons": [
+     "токен формата STATE",
+     "строка формата STATE"
+    ]
+   },
+   {
+    "zh": "^# 落盘项目 STATE: ",
+    "reasons": [
+     "regex",
+     "токен формата STATE",
+     "строка формата STATE"
+    ]
+   },
+   {
+    "zh": "没有「## 📁 文件索引」节",
+    "reasons": [
+     "токен формата STATE"
+    ]
+   }
+  ],
+  "memory": [
+   {
+    "zh": "状态、next_action 与全文（STATE + 必读子文档）见会话里插件注入的「项目记忆全文」（总是磁盘最新版，别处改了下一步自动补新版）；上下文里找不到时（例如压缩后）用 landfill op=recall 读完。",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "## 🗂 卡片档案（dsh-project-manager 按看板生成，勿手改；以看板为准）",
+    "reasons": [
+     "константа-маркер",
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## dsh-project-manager：本会话的项目记忆",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "### 落盘项目（/landfill-project）",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "### 卡片档案（实时，以看板为准）",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "## 🗂 卡片档案",
+    "reasons": [
+     "константа-маркер",
+     "аргумент метода",
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "### 卡片组「",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "  必读子文档：",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "### 卡片「",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   }
+  ],
+  "merge": [
+   {
+    "zh": "合并后的 STATE：≤30000 字符、按 landfill-project skill「整体优化」；细节指向 notes/；来源之间说法矛盾的写进「## ⚠ 待核实」节（逐条列出，不替用户选边）；「## 📁 文件索引」给 indexFiles 每个文件一行（[必读] 只标文本），可写目录 dir/；missing 里的文件本机已不存在，写进待核实；commit 时插件自动加 aliases 行、卡片档案块，并把旧路径改成合并后的路径。",
+    "reasons": [
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "3. 全部读完后，按 landfill-project skill「整体优化」写出一份合并后的 STATE：≤3 万字，细节指向 notes/；来源之间说法矛盾的写进「## ⚠ 待核实」，不替用户选边；「## 📁 文件索引」覆盖 plan 里的 indexFiles。\\n",
+    "reasons": [
+     "тело регэкспа",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "2. 逐份读全来源的 STATE 与 [必读]（已注入的算读过；其余 landfill op=recall，有 next 就带 offset 读到 complete:true）。每读完一份，立刻 landfill op=merge action=note id=",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": " content=<STATE 全文> drop=[有意删掉的 commit / 路径 / 版本号 / 单号]。被拒就按返回的 code 改好再提交。\\n",
+    "reasons": [
+     "тело регэкспа"
+    ]
+   },
+   {
+    "zh": " 个文件没进「📁 文件索引」：每个文件（或目录 dir/）一行「- [必读|参考] 路径 · 用途」",
+    "reasons": [
+     "токен формата STATE",
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "还有来源没读全（STATE + [必读]）：先 recall 读完",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "：看来源、文件去向、要进「📁 文件索引」的文件。\\n",
+    "reasons": [
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "[必读] 只能标合并结果里存在的文本文件：",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   },
+   {
+    "zh": "# 合并要点：",
+    "reasons": [
+     "заголовок файла",
+     "токен формата STATE"
+    ]
+   },
+   {
+    "zh": "必读",
+    "reasons": [
+     "тег индекса файлов"
+    ]
+   }
+  ],
+  "migrate": [],
+  "model": [],
+  "routes": [],
+  "states": [
+   {
+    "zh": "aliases|别名",
+    "reasons": [
+     "список частиц/альтернатив"
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "zh": "Landfill-project memory (~/.ai, via ai-memory). One project = one folder (STATE.md + plans/ notes/ evidence/). slug defaults to the card\\'s STATE. op: recall{slug?,file?,offset?} (chunked; complete:true = STATE + all [必读] docs read; follow next / pending) | persist{slug?,content,drop?,newState?} (full rewritten STATE; needs full read; every folder file indexed) | write{slug?,file,content} (text doc in the folder) | retire{slug?,file} (move to inbox/retired) | import{slug?,src,dest?} (local file → evidence/) | append{file,text} | list | register{projectId,path,aliases?,confirm} (ask the user first) | validate | merge{action:plan|note|commit, id, slug?, content?, drop?} (only after the user clicked 合并 in the session card).",
+    "reasons": [
+     "тело регэкспа",
+     "тег индекса файлов"
+    ]
+   }
+  ]
+ }
+}
