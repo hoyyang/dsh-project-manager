@@ -3,7 +3,8 @@
  * 阶段（statuses）只用来给卡片分组；每个阶段底部常驻「添加卡片」，就地输入、回车连续添加。
  * 所有变更 → POST → 用返回的新快照重绘（服务端是唯一事实来源，失败时点名提示并回到服务端状态）。
  */
-import { ApiError, Card, FileRef, getGantt, getGanttMeta, getState, Group, NoteItem, openedHow, openFileSmart, poll, post, postGantt, Prefs, Snapshot, StateInfo, Status, Task, TypeGroup, WebLink } from './api.js'
+import { ApiError, Card, FileRef, getGantt, getGanttMeta, getKb, getState, Group, KbItem, NoteItem, openedHow, openFileSmart, poll, post, postGantt, Prefs, searchKb, Snapshot, StateInfo, Status, Task, TypeGroup, WebLink } from './api.js'
+import { KB_MODE_HINT, KB_MODE_LABEL, KB_STATUS_LABEL, KB_TYPE_GLYPH, KB_TYPE_LABEL, kbEffMode, type KbMode } from './kb.js'
 import { FT_CATS, FT_EXTS } from './ftype.gen.js'
 import { mqStart, mqStop } from './dock.js'
 import { cardText, fileText, linkText, noteText, repoText, sessionText, taskText, type QCard, type QTask } from '../quote.js'
@@ -11,8 +12,11 @@ import { tFindIn, tMove } from '../tasks.js'
 import { colsPlan, COL_MIN, type ColIn, type ColKey } from '../rlayout.js'
 import { CHECK_SVG, COPY_SVG, esc, ic } from './icons.js'
 import { tcHtml } from './sess.js'
-import { DetailPop } from './detailpop.js'
+import { dropRecent, forgetRecent, loadRecent, rememberRecent, searchView, type RecentItem, type Row as SearchRow, type Scope as SearchScope, type TypeF as SearchType } from './search.js'
+import { parseQuery, shownHits, type DimF, type SearchCard as SCard, type SearchKb } from '../search.js'
+import { openNote, openTask, bubbleSync, closeBubble, type BubbleCtx } from './detailbubble.js'
 import { SchedView } from './gantt.js'
+import { cleanupBtnHtml, openCleanup, refreshCleanupBadge } from './cleanup.js'
 import { cardKeys, dueChip, getXS, panelCached, panelDirty, recordDone, ringEl, scheduleKeys, setPanelCache, stHtml, swHtml, swOn, swToggle, taskKeys, ZT, zoneOfKeys } from './gtextra.js'
 
 export interface BoardHost {
@@ -27,6 +31,8 @@ export interface BoardHost {
   pickCard(anchor: HTMLElement, groupId?: string): void
   /** 打开 dsh 的选文件夹对话框（与添加工作区同一个）；取消返回 null；不支持（网页文件浏览器模式）时抛错。 */
   pickDirectory(): Promise<string | null>
+  /** v183（2.1）：应用内选文件夹的数据源（只读列子文件夹）；旧宿主没有这条路由时界面回退到「粘贴路径」。 */
+  listDirs(path?: string): Promise<{ path: string; parent: string | null; home: string; dirs: Array<{ name: string; path: string }> }>
   /** dsh 的全部会话（活跃 + 已归档，不含子代理），带所在工作区与更新时间；来自 ctx.sessions + ctx.workspaces。 */
   allSessions(): SessionView[]
   /** 与 dsh 侧栏「归档会话」同一调用；会话有进行中的工作且未要求停止时返回 activity（由界面弹「停止并归档」确认）。 */
@@ -50,6 +56,8 @@ export interface BoardHost {
   taskDialogOpen?(): boolean
   /** v127：状态胶囊 → 打开今天的任务面板并定位（全局详情不在日程页里，要由宿主切页）。 */
   seek?(keys: string[]): void
+  /** v163 S9：切到知识库页 —— cardId = 定位到那张知识卡；newCard = 打开新建表单，保存后挂到那张项目卡。 */
+  openKb?(o: { cardId?: string; newCard?: string }): void
 }
 
 /** 宿主拒绝归档时带回的「仍在进行的工作」，一类一条。 */
@@ -137,8 +145,20 @@ const normPath = (p: string): string => p.replace(/[/\\]+$/, '') || '/'
 /** 相关说明折叠阈值（px）：超过就折叠，给「展开全部 / 收起」。 */
 const NOTE_CLAMP = 172
 const NOTE_PIN = '卡片项目说明'
+/** v163 S9：详情「知识卡」一节的图标（与侧栏知识库入口同一个开卷书形状）。 */
+const BOOK_SVG = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C9.9 5.2 7.4 4.9 4.6 5.5v12.6c2.8-.6 5.3-.3 7.4 1 2.1-1.3 4.6-1.6 7.4-1V5.5c-2.8-.6-5.3-.3-7.4 1Z"/><path d="M12 6.5v12.6"/><path d="M7 8.7h2.6M7 11.5h2.6"/><path d="M14.4 8.7h2.6M14.4 11.5h2.6"/></svg>'
 type WlRow = { id?: string; text: string; type: string; url: string; err: string; tag?: string; star?: boolean; off?: boolean; auto?: string; manual?: boolean }
-const STAR_SVG = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>'
+const STAR_SVG = ic('star')
+/* v172：项目星标按钮（尺寸 / 槽位全在 style.css 的 v172 段；place = board 20 / detail 26）。
+   归档卡只读：按钮 disabled，状态保留。 */
+const pstarBtn = (place: 'board' | 'detail', c: Card, ro?: boolean): string => {
+  const on = c.star === true
+  const lab = (on ? '取消星标「' : '加星标「') + c.t + '」'
+  const tip = ro ? '已归档：只能查看' : (on ? '取消星标：四处一起回落成未加星' : '加星标：看板卡金徽标 / 详情整窗金框 / 甘特图目录格金徽标 / 执行安排左上角金角签')
+  return '<button type="button" class="pstar-btn pstar-' + place + (on ? ' on' : '') + '" data-card-star="' + esc(c.id) + '" aria-pressed="' + (on ? 'true' : 'false') + '"' + (ro ? ' disabled aria-disabled="true"' : '') + ' aria-label="' + esc(lab) + '" title="' + esc(tip) + '">' + STAR_SVG + '</button>'
+}
+/* v172.1：扫光层（三处共用；只在「已加星」时放进模板，取消即随重画消失） */
+const PSTAR_SHEEN = '<span class="pstar-sheen" aria-hidden="true"></span>'
 
 /** 0.21「管理类型」里正在编辑 / 确认删除的对象：类型（key = 类型名）或类型组（key = 组 id）。 */
 type TyKey = { kind: 't' | 'g'; key: string }
@@ -262,6 +282,18 @@ export class BoardView {
   snap: Snapshot | null = null
   sel: string | null = null
   q = ''
+  /* v158 / v159：搜索模式（bqOpen = 搜索界面开着；q 为空时显示空态 + 最近搜索） */
+  private bqOpen = false
+  private bScope: SearchScope = 'all'
+  private bType: SearchType = 'all'
+  private bSel = 0
+  private bRows: SearchRow[] = []
+  private bOpenLf = new Set<string>()
+  /* v178：命中维度筛选 + 「展开全部命中」的行（切查询即清空） */
+  private bDim: DimF = 'all'
+  private bExp = new Set<string>()
+  private recent: RecentItem[] = loadRecent()
+  private bScroll = 0
   err = ''
   editG: string | null = null
   private timer: (() => void) | null = null
@@ -293,6 +325,9 @@ export class BoardView {
   /** 添加仓库弹窗：mode=group → 卡片组的「卡片共用仓库」；mode=card → 这张卡片自己的仓库（id = 组 id / 卡片 id）。 */
   private ar: { mode: 'group' | 'card'; id: string; q: string; sel: Array<{ path: string; name: string; role: string }>; manual: boolean; busy: boolean; fp?: { open: boolean; text: string; res: PathCheck[]; seq: number }; /** v137：仓库新增默认注入 */ on?: boolean } | null = null
   private arFpTimer = 0
+  /** v183（2.1）：应用内「选择文件夹」弹窗（系统对话框打不开时的降级；只读列目录）。 */
+  private pk: { path: string; parent: string | null; home: string; dirs: Array<{ name: string; path: string }>; areas?: { hub: string; data: string; dsh: string }; busy: boolean } | null = null
+  private pkWaiter: ((p: string | null) => void) | null = null
   /** 「关联已有会话」弹窗草稿；cf = 待确认解除关联的会话。 */
   private ls: { card: string; q: string; sel: string[]; busy: boolean } | null = null
   private cf: string | null = null
@@ -333,13 +368,16 @@ export class BoardView {
     if (opts.detailOnly) root.classList.add('dpm-detail-only')
     root.innerHTML = '<div class="pm-top"></div><div class="pm-mgr" role="toolbar" aria-label="卡片组管理"></div><div class="pm-body"><div class="board-wrap"></div><div class="sched-wrap" hidden></div></div>' + DIALOGS.replace('%FOLDER%', ic('fplus')).replaceAll('%PLUS%', ic('plus')).replaceAll('%X%', ic('x')).replace('%FILE%', ic('file'))
     this.bind()
-    /* v140（1）：详细信息气泡窗（只在全局详情里） */
-    if (opts.detailOnly && !opts.dialogsOnly) this.dp = new DetailPop({
-      root, card: () => (this.sel ? this.card(this.sel) : undefined), snap: () => this.snap, quote: (t) => void this.copyQuote(t),
-      edit: (cid, tid) => { if (this.host.taskDialog) this.host.taskDialog({ cardId: cid, mode: 'edit', taskId: tid }) },
-      toast: (m, k) => this.host.toast(m, k), openCard: (id) => openGlobalDetail(this.host, id), openSession: (id) => this.host.openSession(id),
-      sessions: () => this.host.allSessions().map((x) => ({ id: x.id, title: x.title })), ftIcon: (p) => ftype(p)?.icon ?? 'file',
-    })
+    /* v177：详情说明气泡（只在全局详情里；组件是单例，卡片详情 / 弹窗 / 对话框共用同一个） */
+    if (opts.detailOnly && !opts.dialogsOnly) {
+      this.dp = true
+      this.bctx = {
+        snap: () => this.snap, quote: (t) => void this.copyQuote(t),
+        edit: (cid, tid) => { if (this.host.taskDialog) this.host.taskDialog({ cardId: cid, mode: 'edit', taskId: tid }) },
+        toast: (m, k) => this.host.toast(m, k), openCard: (id) => openGlobalDetail(this.host, id), openSession: (id) => this.host.openSession(id),
+        sessions: () => this.host.allSessions().map((x) => ({ id: x.id, title: x.title })),
+      }
+    }
     /* v107 ②：查重候选行标题被截断时悬停跑马灯（双份轨道、28px 间距、约 45px/s） */
     const mqStop = (nm: HTMLElement | null): void => {
       if (!nm || !nm.dataset.mqOn) return
@@ -393,6 +431,8 @@ export class BoardView {
     this.syncing = true
     this.syncBadge()
     void this.refresh().finally(() => { this.syncing = false; this.syncBadge() })
+    /* v163 S9：详情「知识卡」一节的标题 / 摘要来自 /kb 列表（一次拉齐，之后按需刷新） */
+    void this.kbLoad()
     this.timer = poll(4000, () => { if (this.root.isConnected) void this.refresh(true) })
   }
 
@@ -449,7 +489,8 @@ export class BoardView {
 
   dispose(): void {
     this.disposed = true
-    this.dp?.dispose(); this.dp = null
+    if (this.dp) closeBubble()
+    this.dp = false; this.bctx = null
     this.offChanged?.()
     this.offChanged = null
     this.detailOff?.()
@@ -539,7 +580,8 @@ export class BoardView {
     const dark = this.host.isDark()
     const top = this.root.querySelector('.pm-top') as HTMLElement
     if (!top.firstChild) top.innerHTML = '<div class="ttl"><h1>项目看板<span class="pm-sync" role="status"><span class="dot" aria-hidden="true"></span>正在同步…</span></h1><p>一张卡片对应一个落盘项目，卡片组就是父项目。每个卡片组有自己的一套阶段。</p></div>'
-      + '<label class="search">' + ic('search') + '<span class="sr-only">搜索卡片</span><input id="dpmQ" type="search" placeholder="搜索卡片 / 卡片组（含已归档）" value="' + esc(this.q) + '"></label>'
+      + '<div class="searchbox"><label class="search">' + ic('search') + '<span class="sr-only">搜索卡片、卡片内容、卡片组、落盘项目</span><input id="dpmQ" type="search" placeholder="搜索卡片、任务、说明、链接、文件、知识卡…" autocomplete="off" spellcheck="false" aria-keyshortcuts="Meta+K"></label><kbd class="qk" aria-hidden="true">⌘K</kbd><button type="button" class="qclr" data-qclr hidden aria-label="清空搜索" title="清空搜索（Esc）">×</button></div>'
+      + cleanupBtnHtml()
       + '<button type="button" class="btn" data-import>' + ic('import') + '导入落盘项目</button>'
       + '<button type="button" class="btn primary" data-new-group>' + ic('plus') + '新建卡片组</button>'
       + '<button type="button" class="ib" data-theme-toggle></button>'
@@ -565,6 +607,7 @@ export class BoardView {
     else if (addFocus) { addIn.focus(); addIn.setSelectionRange(addIn.value.length, addIn.value.length) }
     this.rendering = false
     this.watchLanes()
+    void refreshCleanupBadge(this.root)
   }
 
   /* ── v99：阶段列整列铺满 + 翻列箭头 ──
@@ -632,7 +675,9 @@ export class BoardView {
    */
   private lastDetail = ''
   private fixRaf = 0
-  private dp: DetailPop | null = null
+  /** v177：详情气泡可用（全局详情才有）—— 模板里的提示文案 / 交互都按它判断 */
+  private dp = false
+  private bctx: BubbleCtx | null = null
   renderDetail(): void {
     if (this.opts.dialogsOnly) return
     if (!this.opts.detailOnly) { this.root.querySelector('.detail')?.remove(); return }
@@ -669,6 +714,8 @@ export class BoardView {
       // v90 验收发现：原地换内容只替换子节点，根节点的 ro（只读）不跟着变 —— 在详情里点归档后，
       // 内容已经是只读、根节点却还当可编辑（cursor / 只读样式不同步）。这里只同步这一个记号。
       old.classList.toggle('ro', nd.classList.contains('ro'))
+      // v172：星标同理 —— 根节点也要跟着换（否则详情里取消星，金框还挂在旧的 aside 上）
+      old.classList.toggle('pstar-on', nd.classList.contains('pstar-on'))
       old.classList.add('stay')
       old.replaceChildren(...Array.from(nd.childNodes))
       this.decorateDetail()
@@ -703,7 +750,7 @@ export class BoardView {
     this.ensureCdHandle()
     this.applyDw()
     if (this.ring) this.paintRing()
-    this.dp?.sync()
+    if (this.dp) bubbleSync()
   }
 
   /**
@@ -1311,9 +1358,8 @@ export class BoardView {
     // 0.15：第一次打开还没数据 → 骨架（不再整块空白）
     if (!this.snap) return '<div class="skel-board" aria-busy="true" aria-label="正在加载看板">' + [0, 1].map(() => '<div class="lane skel-lane"><div class="skel-h"></div><div class="skel-row">' + [0, 1, 2].map(() => '<div class="skel"></div>').join('') + '</div></div>').join('') + '</div>'
     if (!this.groups.length) return '<div class="empty-board"><b>还没有卡片组</b><span>新建一个卡片组，或从落盘项目导入。</span><button type="button" class="btn primary" data-new-group>' + ic('plus') + '新建卡片组</button></div>'
-    const q = this.q
-    if (q) { const hit = this.hitsHtml(q); if (hit) return hit }
-    const vis = this.cards.filter((c) => !c.archivedAt).filter((c) => !q || (c.t + ' ' + c.links.join(' ') + ' ' + this.cardDesc(c) + ' ' + (this.grp(c.g)?.repos.map((r) => r.name).join(' ') ?? '')).toLowerCase().includes(q))
+    if (this.bqOpen) return this.searchHtml()
+    const vis = this.cards.filter((c) => !c.archivedAt)
     return this.groups.filter((g) => !g.archivedAt).map((g) => {
       const all = vis.filter((c) => c.g === g.id)
       const cs = all.filter((c) => !c.pending)
@@ -1434,20 +1480,298 @@ export class BoardView {
     this.render()
     requestAnimationFrame(() => { const el = this.root.querySelector('[data-lane="' + CSS.escape(id) + '"]'); el?.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
   }
-  /** v101 ②：搜索同时命中卡片与卡片组，归档的也在结果里（结果面板替代看板，点一条直接打开）。 */
-  private hitsHtml(q: string): string {
-    const k = this.normName(q)
-    if (!k) return ''
-    const cards = this.cards.filter((c) => this.normName(c.t).includes(k) || this.normName(this.grp(c.g)?.name ?? '').includes(k))
-    const groups = this.groups.filter((g) => this.normName(g.name).includes(k))
-    const arcN = cards.filter((c) => c.archivedAt).length + groups.filter((g) => g.archivedAt).length
-    if (!cards.length && !groups.length) return '<div class="bq"><div class="bq-h"><b>没有命中</b></div><div class="bq-e">换一个关键词。卡片和卡片组都会搜，归档的也在结果里。</div></div>'
-    const row = (kind: 'card' | 'group', id: string, name: string, meta: string, arc: boolean): string => '<button type="button" class="bq-r' + (arc ? ' is-arc' : '') + '" data-' + (kind === 'card' ? 'bqcard' : 'bqgroup') + '="' + esc(id) + '"><span class="k">' + (kind === 'card' ? '卡片' : '组') + '</span><span class="tt"><b>' + esc(name) + '</b><span>' + esc(meta) + '</span></span>' + (arc ? '<span class="arc">已归档</span>' : '<span></span>') + '</button>'
-    const rows = cards.map((c) => { const g = this.grp(c.g); const st = g?.statuses.find((x) => x.id === c.col); return row('card', c.id, c.t, (g?.name ?? '') + (st ? ' · ' + st.name : '') + ' · 任务 ' + this.taskDone(c) + '/' + c.tasks.length + (c.pending ? ' · pending' : ''), !!c.archivedAt) }).join('')
-      + groups.map((g) => row('group', g.id, g.name, this.cards.filter((c) => c.g === g.id).length + ' 张卡片 · ' + this.cards.filter((c) => c.g === g.id && !c.archivedAt).length + ' 张活跃', !!g.archivedAt)).join('')
-    return '<div class="bq"><div class="bq-h"><b>命中 ' + cards.length + ' 张卡片 · ' + groups.length + ' 个卡片组</b><span>含已归档 ' + arcN + ' 项</span><span class="grow"></span><span>点一条直接打开</span></div><div class="bq-l">' + rows + '</div></div>'
+  /* ── v158 / v159：看板搜索（卡片 + 卡片组 + 落盘项目；本地规则，不调模型） ───────── */
+  private searchInput(): { groups: Group[]; cards: SCard[]; states: StateInfo[]; kb: SearchKb[]; rev: number } {
+    /* v178：知识卡只搜索引字段（标题 / 摘要 / 标签）；列表没到时 kb 维度记 0，不阻塞其它维度 */
+    const kb: SearchKb[] = this.kbItems.map((k) => ({ id: k.id, title: k.title, summary: k.summary, tags: k.tags, type: k.type }))
+    return { groups: this.groups, cards: this.cards, states: this.snap?.states ?? [], kb, rev: this.snap?.rev ?? 0 }
   }
-
+  private searchHtml(): string {
+    const r = searchView(this.searchInput(), { q: this.q, scope: this.bScope, type: this.bType, sel: this.bSel, openLf: this.bOpenLf, recent: this.recent, dim: this.bDim, exp: this.bExp })
+    this.bRows = r.rows
+    if (this.bSel > r.rows.length - 1) this.bSel = Math.max(0, r.rows.length - 1)
+    return r.html
+  }
+  /** 进入搜索界面：记下看板滚动位置（退出时还原）、空词先显示空态 + 最近搜索。 */
+  private openSearch(): void {
+    if (this.bqOpen) return
+    this.bqOpen = true
+    const wrap = this.root.querySelector('.board-wrap') as HTMLElement | null
+    this.bScroll = wrap ? wrap.scrollTop : 0
+    this.bSel = 0
+    this.render()
+  }
+  private focusSearch(): void {
+    if (!this.bqOpen) this.openSearch()
+    const i = this.$<HTMLInputElement>('#dpmQ')
+    if (i) { try { i.focus(); i.select() } catch { /* 输入框已卸载 */ } }
+  }
+  private closeSearch(restore = true): void {
+    if (!this.bqOpen && !this.q) return
+    this.bqOpen = false
+    this.q = ''
+    this.bSel = 0
+    this.bOpenLf.clear()
+    const i = this.$<HTMLInputElement>('#dpmQ')
+    if (i) { i.value = ''; try { i.blur() } catch { /* 已卸载 */ } }
+    this.qclr(false)
+    this.render()
+    if (restore) {
+      const y = this.bScroll
+      requestAnimationFrame(() => { const w = this.root.querySelector('.board-wrap') as HTMLElement | null; if (w) w.scrollTop = y })
+    }
+  }
+  private setQuery(q: string): void {
+    this.bqOpen = true
+    this.q = q
+    this.bSel = 0
+    this.bOpenLf.clear()
+    this.syncDim(q)
+    const i = this.$<HTMLInputElement>('#dpmQ')
+    if (i) { i.value = q; try { i.focus() } catch { /* 同上 */ } }
+    this.qclr(!!q)
+    this.render()
+  }
+  private qclr(on: boolean): void { const b = this.root.querySelector('[data-qclr]') as HTMLElement | null; if (b) b.hidden = !on }
+  /** v178：查询变了就重置维度 —— 前缀（任务: …）把它那一维设成当前维度，没前缀回「全部」；展开态一起收。 */
+  private syncDim(q: string): void {
+    this.bExp.clear()
+    this.bDim = parseQuery(q).dim ?? 'all'
+  }
+  private moveSel(d: number): void {
+    if (!this.bRows.length) return
+    this.bSel = Math.max(0, Math.min(this.bRows.length - 1, this.bSel + d))
+    this.paintSearchSel(true)
+  }
+  private paintSearchSel(scroll = false): void {
+    const box = this.root.querySelector('.board-wrap') as HTMLElement | null
+    if (!box) return
+    let on: HTMLElement | null = null
+    box.querySelectorAll<HTMLElement>('[data-v158i]').forEach((el) => {
+      const yes = Number(el.dataset.v158i) === this.bSel
+      el.classList.toggle('on', yes)
+      el.setAttribute('aria-selected', String(yes))
+      if (yes) on = el
+    })
+    if (on && scroll) (on as HTMLElement).scrollIntoView({ block: 'nearest' })
+    const live = this.root.querySelector('#v158Live')
+    if (live) live.textContent = on ? ((on as HTMLElement).querySelector('.v158tt')?.textContent ?? '') : ''
+  }
+  /** 点一行 / 回车：卡片开详情、卡片组跳过去、落盘项目展开它对应的卡片。 */
+  private activateRow(i = this.bSel): void {
+    const r = this.bRows[i]
+    if (!r) return
+    const q = this.q
+    if (r.entry.kind === 'card') {
+      this.recent = rememberRecent(this.recent, q)
+      const id = r.entry.id
+      const top = shownHits(r, this.bDim)[0]
+      this.closeSearch()
+      this.sel = id
+      this.render()
+      if (top) this.openCardAt(id, top.fid, true)
+      else this.showDetail(id)
+      return
+    }
+    if (r.entry.kind === 'group') {
+      this.recent = rememberRecent(this.recent, q)
+      const gid = r.entry.id
+      this.closeSearch(false)
+      void this.openGroupFromSearch(gid)
+      return
+    }
+    const k = r.entry.key as string
+    if (this.bOpenLf.has(k)) this.bOpenLf.delete(k)
+    else this.bOpenLf.add(k)
+    this.recent = rememberRecent(this.recent, q)
+    this.render()
+    this.paintSearchSel()
+  }
+  /** ⌥Enter / 定位按钮：在板上把这一条指出来（归档卡片在「已归档卡片」托盘里）。 */
+  private locateRow(id: string, isGroup: boolean): void {
+    if (isGroup) {
+      this.closeSearch(false)
+      requestAnimationFrame(() => { const el = this.root.querySelector('[data-lane="' + CSS.escape(id) + '"]'); el?.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
+      return
+    }
+    const c = this.card(id)
+    if (!c) return
+    this.closeSearch()
+    if (c.archivedAt) {
+      this.tray.add(c.g)
+      this.render()
+      requestAnimationFrame(() => { const el = this.root.querySelector('[data-lane="' + CSS.escape(c.g) + '"]'); el?.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
+      this.host.toast('「' + c.t + '」已归档：在「' + (this.grp(c.g)?.name ?? '') + '」的「已归档卡片」里；搜索结果里可以直接打开只读详情')
+      return
+    }
+    void this.focusCard(id)
+    this.host.toast('已定位到「' + c.t + '」')
+  }
+  /* ── v178：搜索命中直达（打开详情 → 滚到那一项 → 高亮 1.2s） ────────────── */
+  private openCardAt(cardId: string, fid: string, restored = false): void {
+    const c = this.card(cardId)
+    if (!c) return
+    if (!restored) { this.closeSearch(); this.sel = cardId; this.render() }
+    this.showDetail(cardId)
+    /* 详情可能是「看板面板里的」，也可能是全局详情（另一份 BoardView）—— 跳转要落在真正在显示的那一份上 */
+    const run = (): void => {
+      const v = this.opts.detailOnly ? this : globalDetailView()
+      if (!v) return
+      const el = v.hitTarget(c, fid)
+      if (!el) return
+      /* 窄详情里分区默认收成一行「任务 10/11」那种目录 —— 跳转前先把它展开，否则滚到的是收起来的那一段 */
+      const sec = el.closest('section.sec') as HTMLElement | null
+      if (sec && sec.classList.contains('cl') && !sec.classList.contains('x')) {
+        const h = sec.querySelector('h3') as HTMLElement | null
+        if (h) { h.click(); window.setTimeout(run, 180); return }
+      }
+      v.revealHit(el)
+    }
+    run()
+    for (const d of [120, 320, 800]) window.setTimeout(run, d)
+  }
+  /** 命中 id → 详情里那一行（任务 / 子任务落到它的任务卡；说明 / 链接 / 文件 / 知识卡落到行本身）。 */
+  private hitTarget(c: Card, fid: string): HTMLElement | null {
+    const det = this.root.querySelector('.detail') as HTMLElement | null
+    if (!det) return null
+    const at = fid.indexOf(':')
+    if (at < 0) return null
+    const kind = fid.slice(0, at), key = fid.slice(at + 1)
+    const q = (s: string): HTMLElement | null => det.querySelector(s) as HTMLElement | null
+    const esc1 = (s: string): string => CSS.escape(s)
+    if (kind === 'task' || kind === 'tasknote') return q('.tile[data-tile="' + esc1(key) + '"]') ?? q('.task[data-tid="' + esc1(key) + '"]')
+    if (kind === 'sub' || kind === 'subnote') {
+      const parent = key.replace(/s\d+$/, '')
+      const tile = q('.tile[data-tile="' + esc1(parent) + '"]') ?? q('.task[data-tid="' + esc1(parent) + '"]')
+      if (tile) return tile
+      return q('.task.child[data-tid="' + esc1(key) + '"]')
+    }
+    if (kind === 'note' || kind === 'notebody') return q('.nk[data-nk="' + esc1(key) + '"]')
+    if (kind === 'link' || kind === 'linkurl') {
+      let idx = (c.webLinks ?? []).findIndex((l) => (l.id ?? '') === key)
+      if (idx < 0 && /^i\d+$/.test(key)) idx = Number(key.slice(1))
+      return idx < 0 ? null : q('.wl[data-wl="' + idx + '"]')
+    }
+    if (kind === 'file' || kind === 'filep') return q('[data-fid="' + esc1(key) + '"]')
+    if (kind === 'kb' || kind === 'kbs' || kind === 'kbt') {
+      const id = kind === 'kbt' ? key.replace(/:\d+$/, '') : key
+      return q('.kbrw[data-kbrid="' + esc1(id) + '"]')
+    }
+    return null
+  }
+  /** 滚到那一项（只滚它自己的滚动区，不带着整页跑）+ 行与分区头高亮 1.2s。 */
+  private revealHit(el: HTMLElement): void {
+    let box: HTMLElement | null = null
+    for (let p2 = el.parentElement; p2; p2 = p2.parentElement) {
+      const cs = getComputedStyle(p2)
+      if (/(auto|scroll)/.test(cs.overflowY) && p2.scrollHeight > p2.clientHeight + 4) { box = p2; break }
+    }
+    if (box) {
+      const br = box.getBoundingClientRect(), er = el.getBoundingClientRect()
+      const inView = er.top >= br.top + 8 && er.bottom <= br.bottom - 8
+      if (!inView) {
+        const want = box.scrollTop + (er.top - br.top) - Math.max(16, box.clientHeight * 0.3 - er.height / 2)
+        box.scrollTo({ top: Math.max(0, Math.min(Math.max(0, box.scrollHeight - box.clientHeight), want)), behavior: 'smooth' })
+      }
+    }
+    if (el.dataset.v178hl === '1') return
+    el.dataset.v178hl = '1'
+    el.classList.add('v178hl')
+    const head = (el.closest('section.sec')?.querySelector('h3') ?? null) as HTMLElement | null
+    if (head) head.classList.add('v178hl-soft')
+    window.setTimeout(() => { el.classList.remove('v178hl'); delete el.dataset.v178hl; if (head) head.classList.remove('v178hl-soft') }, 1200)
+  }
+  /** 搜索结果里的点击（在通用按钮分发之前吃掉，行是 role="option" 不是 button）。 */
+  private searchClick(e: Event): boolean {
+    const el = e.target as HTMLElement
+    if (!el || !el.closest) return false
+    const qclrBtn = el.closest('[data-qclr]')
+    if (qclrBtn) { e.preventDefault(); this.setQuery(''); return true }
+    // 搜索框已聚焦时再点它不会触发 focusin —— 点框内任何位置都要把搜索界面打开（不拦默认：输入框照常定位光标）
+    if (el.closest('#dpmQ, .searchbox')) { this.openSearch(); return false }
+    const focus = el.closest('[data-v158focus]')
+    if (focus) { e.preventDefault(); this.focusSearch(); return true }
+    const loc = el.closest('[data-v158loc]') as HTMLElement | null
+    if (loc) { e.preventDefault(); e.stopPropagation(); this.locateRow(loc.dataset.v158loc as string, !!loc.dataset.v158locGroup); return true }
+    const mini = el.closest('[data-v158card]') as HTMLElement | null
+    if (mini) {
+      e.preventDefault()
+      this.recent = rememberRecent(this.recent, this.q)
+      const id = mini.dataset.v158card as string
+      this.closeSearch()
+      this.sel = id
+      this.render()
+      this.showDetail(id)
+      return true
+    }
+    const back = el.closest('[data-v158back]')
+    if (back) { e.preventDefault(); this.closeSearch(); return true }
+    const sc = el.closest('[data-v158scope]') as HTMLElement | null
+    if (sc) { e.preventDefault(); this.bScope = sc.dataset.v158scope as SearchScope; this.bSel = 0; this.render(); return true }
+    const ty = el.closest('[data-v158type]') as HTMLElement | null
+    if (ty) { e.preventDefault(); this.bType = ty.dataset.v158type as SearchType; this.bSel = 0; this.render(); return true }
+    const drop = el.closest('[data-v158drop]') as HTMLElement | null
+    if (drop) {
+      e.preventDefault()
+      e.stopPropagation()
+      const q = drop.dataset.v158drop as string
+      const cardEl = drop.closest('[data-v158recent]') as HTMLElement | null
+      const done = (): void => { this.recent = forgetRecent(this.recent, q); this.render() }
+      if (cardEl) { cardEl.classList.add('gone'); window.setTimeout(done, 170) } else done()
+      return true
+    }
+    const pre = el.closest('[data-v158preset], [data-v158recent], [data-v158sug]') as HTMLElement | null
+    if (pre) { e.preventDefault(); this.setQuery((pre.dataset.v158preset || pre.dataset.v158recent || pre.dataset.v158sug) as string); return true }
+    const all = el.closest('[data-v158all]')
+    if (all) { e.preventDefault(); this.bScope = 'all'; this.bType = 'all'; this.bDim = 'all'; this.bSel = 0; this.render(); return true }
+    const clr = el.closest('[data-v158clear]')
+    if (clr) { e.preventDefault(); this.setQuery(''); return true }
+    const cr = el.closest('[data-v158clear-recent]')
+    if (cr) { e.preventDefault(); this.recent = dropRecent(); this.render(); this.host.toast('已清除最近搜索'); return true }
+    const lf = el.closest('[data-v158lf-row]') as HTMLElement | null
+    if (lf) {
+      e.preventDefault()
+      const k = lf.dataset.v158lfRow as string
+      if (this.bOpenLf.has(k)) this.bOpenLf.delete(k)
+      else this.bOpenLf.add(k)
+      this.bSel = Number(lf.dataset.v158i || 0)
+      this.render()
+      this.paintSearchSel()
+      return true
+    }
+    /* v178：命中维度 / 展开命中 / 去前缀 / 点一条命中直达 */
+    const dm = el.closest('[data-v178dim]') as HTMLElement | null
+    if (dm) { e.preventDefault(); this.bDim = dm.dataset.v178dim as DimF; this.bSel = 0; this.render(); return true }
+    const exp = el.closest('[data-v178exp]') as HTMLElement | null
+    if (exp) { e.preventDefault(); const id = exp.dataset.v178exp as string; if (this.bExp.has(id)) this.bExp.delete(id); else this.bExp.add(id); this.render(); return true }
+    if (el.closest('[data-v178pre]')) { e.preventDefault(); this.setQuery(parseQuery(this.q).text); return true }
+    const hit = el.closest('[data-v178hit]') as HTMLElement | null
+    if (hit) {
+      e.preventDefault(); e.stopPropagation()
+      const raw = String(hit.dataset.v178hit || '')
+      const at = raw.indexOf('|')
+      this.openCardAt(raw.slice(0, at), raw.slice(at + 1))
+      return true
+    }
+    const row = el.closest('[data-v158card-row], [data-v158group-row]') as HTMLElement | null
+    if (row) { e.preventDefault(); this.activateRow(Number(row.dataset.v158i || 0)); return true }
+    return false
+  }
+  /** 搜索界面的键盘：↑↓ 选择 · Enter 打开 · ⌥Enter 定位 · Esc 清词 / 退出。 */
+  private keySearch(e: KeyboardEvent): boolean {
+    if (e.isComposing) return false
+    if (e.key === 'ArrowDown') { e.preventDefault(); this.moveSel(1); return true }
+    if (e.key === 'ArrowUp') { e.preventDefault(); this.moveSel(-1); return true }
+    if (e.key === 'Enter') {
+      if (e.altKey) {
+        const r = this.bRows[this.bSel]
+        if (r && r.entry.kind !== 'lf') { e.preventDefault(); this.locateRow(r.entry.id, r.entry.kind === 'group'); return true }
+      }
+      if (this.bRows.length) { e.preventDefault(); this.activateRow(); return true }
+      return false
+    }
+    return false
+  }
   private taskTotal(c: Card): number { return c.tasks.length }
   private taskLeft(c: Card): number { return c.tasks.filter((t) => !t.done).length }
   private canArchiveCard(c: Card): boolean { return this.taskLeft(c) === 0 }
@@ -1468,8 +1792,8 @@ export class BoardView {
     const why = can ? '归档卡片' : '还有 ' + left + ' 个任务未完成，完成后才能归档'
     // 0.26 右上角悬停小工具条：复制 + 归档；未完成任务时归档保持原图标、只禁用并说明原因
     const arc = '<span class="cacts">' + pendBtn + '<button type="button" class="ib tipbtn" data-dup="' + esc(c.id) + '" aria-label="复制卡片「' + esc(c.t) + '」">' + ic('dup') + '<span class="tip" aria-hidden="true">复制卡片</span></button><button type="button" class="ib tipbtn" data-archive-card="' + esc(c.id) + '" aria-disabled="' + String(!can) + '" aria-label="' + (can ? '归档卡片「' + esc(c.t) + '」' : why) + '">' + ic('archive') + '<span class="tip" aria-hidden="true">' + why + '</span></button></span>'
-    return '<div class="card' + (live ? ' live' : '') + '" role="button" tabindex="0" data-card="' + esc(c.id) + '" aria-pressed="' + (this.sel === c.id) + '" aria-label="' + esc(c.t) + '，打开详情；Alt+上下方向键调整顺序">'
-      + arc + '<h3>' + esc(c.t) + '</h3><p>' + esc(this.cardDesc(c)) + '</p><div class="foot">' + sess + task + '</div></div>'
+    return '<div class="card' + (live ? ' live' : '') + (c.star ? ' pstar-on' : '') + '" role="button" tabindex="0" data-card="' + esc(c.id) + '" aria-pressed="' + (this.sel === c.id) + '" aria-label="' + esc(c.t) + '，打开详情；Alt+上下方向键调整顺序">'
+      + arc + '<div class="pstar-top">' + pstarBtn('board', c) + '<h3>' + esc(c.t) + '</h3></div><p>' + esc(this.cardDesc(c)) + '</p><div class="foot">' + sess + task + '</div>' + (c.star ? PSTAR_SHEEN : '') + '</div>'
   }
 
   /** v86 · pending 托盘：按阶段分列，卡片只显示标题（虚线），点开是正常详情。 */
@@ -1596,20 +1920,20 @@ export class BoardView {
     }).join('')
     const repoBody = repos ? repos + (ro ? '' : '<p class="meta">移除只影响这张卡片，卡片组的共用仓库和其他卡片不变。</p>') : '<p class="ar-empty">' + (ro ? '没有仓库。' : '这张卡片还没有仓库。点「新增仓库」，可以一键带上卡片组的共用仓库。') + '</p>'
     const sess = this.linkedHtml(c, ro)
-    return '<aside class="detail' + (ro ? ' ro' : '') + '" data-card="' + esc(c.id) + '" aria-labelledby="dpmDT" tabindex="-1"><div class="d-h dh3" id="dpmDH">' + (this.back && this.back.to === c.id && this.card(this.back.from) ? '<button type="button" class="d-back" data-back aria-label="返回「' + esc((this.card(this.back.from) as Card).t) + '」（Esc）">' + ic('chev') + '<span>返回「' + esc((this.card(this.back.from) as Card).t) + '」</span></button>' : '')
+    return '<aside class="detail' + (ro ? ' ro' : '') + (c.star ? ' pstar-on' : '') + '" data-card="' + esc(c.id) + '" aria-labelledby="dpmDT" tabindex="-1">' + (c.star ? PSTAR_SHEEN : '') + '<div class="d-h dh3" id="dpmDH">' + (this.back && this.back.to === c.id && this.card(this.back.from) ? '<button type="button" class="d-back" data-back aria-label="返回「' + esc((this.card(this.back.from) as Card).t) + '」（Esc）">' + ic('chev') + '<span>返回「' + esc((this.card(this.back.from) as Card).t) + '」</span></button>' : '')
       // 0.28（v58）：卡片组 · 阶段在上，标题一行在下（放不下悬停整个标题栏走马灯）；默认只显示 ✕，悬停标题栏时复制 / 重命名 / 归档从右向左展开
       + '<div class="dh1"><div class="sub">' + esc(g.name) + ' · ' + esc(sts[i]?.name ?? '') + '</div>'
       + '<span class="hfold"><span class="fi">' + this.dPendBtn(c, ro) + '<button type="button" class="ib tipbtn" data-dup="' + esc(c.id) + '" aria-label="复制这张卡片">' + ic('dup') + '<span class="tip" aria-hidden="true">复制卡片</span></button>'
       + (ro ? '' : '<button type="button" class="ib tipbtn" data-rename-card aria-label="重命名卡片">' + ic('pencil') + '<span class="tip" aria-hidden="true">重命名</span></button><button type="button" class="ib tipbtn" data-archive-card="' + esc(c.id) + '" aria-disabled="' + String(!arcOk) + '" aria-label="' + (arcOk ? '归档这张卡片' : '还有 ' + arcLeft + ' 个任务未完成，完成后才能归档') + '">' + ic('archive') + '<span class="tip" aria-hidden="true">' + (arcOk ? '归档卡片' : '还有 ' + arcLeft + ' 个任务未完成，完成后才能归档') + '</span></button>')
       + '</span></span><button type="button" class="ib" data-close aria-label="关闭详情">' + ic('x') + '</button></div>'
       /* v129（5）：第 2 行 = 标题独占一行；第 3 行 = 状态胶囊（没拆任务的卡片才有） */
-      + '<h2 id="dpmDT">' + esc(c.t) + '</h2>' + (c.tasks.length ? '' : '<div class="dhst">' + stHtml(zoneOfKeys(['p|' + c.id]), 'data-dpm-st="p|' + esc(c.id) + '"') + '</div>') + '</div>'
+      + '<div class="pstar-dt">' + pstarBtn('detail', c, ro) + '<h2 id="dpmDT">' + esc(c.t) + '</h2></div>' + (c.tasks.length ? '' : '<div class="dhst">' + stHtml(zoneOfKeys(['p|' + c.id]), 'data-dpm-st="p|' + esc(c.id) + '"') + '</div>') + '</div>'
       // v86：Pending 说明条放在页头下面、内容上面（放页头里会把页头撑高、标题被挤）
       + this.pendBar(c)
       + (ro ? '<div class="arch-bar"><span class="txt"><b>已归档</b> · ' + esc(daysAgo(c.archivedAt)) + '，只能查看</span><button type="button" class="btn sm" data-unarchive-card="' + esc(c.id) + '">' + ic('unarchive') + '恢复活跃</button></div>' : '')
       + sess + '<div class="d-b">'
       + this.tasksSecHtml(c, ro)
-      + this.notesHtml(c, ro) + this.webLinksHtml(c, ro) + this.filesHtml(c, ro)
+      + this.notesHtml(c, ro) + this.kbSecHtml(c, ro) + this.webLinksHtml(c, ro) + this.filesHtml(c, ro)
       + '<section class="sec"><h3>' + ic('repo') + '仓库 · ' + crs.length + '<span class="grow"></span>' + (ro ? '' : this.hbtn('plus', '新增仓库', 'data-card-repo-add')) + '</h3>' + repoBody + '</section>'
       + '<section class="sec"><h3>' + ic('mem') + '关联的落盘项目' + (ownMem.length ? ' · ' + ownMem.length : '') + '<span class="grow"></span>' + memTg + (ro ? '' : '<button type="button" class="btn ghost sm" data-link-card>' + ic('plus') + '关联</button>') + '</h3>' + (ro ? '' : '<p class="meta mb">会话会自动读取「这张卡片 + 卡片组共用」的落盘项目记忆。</p>') + memBody + (ro ? '' : this.memActHtml(c, mem.length)) + '</section>'
       + this.relatedHtml(c, ro)
@@ -2044,7 +2368,7 @@ export class BoardView {
   /** v127（1）：排今天开关开着时，新建的任务保存后直接排进今天（等任务先落盘，否则服务端不认这个 key）。 */
   private schedNew(cid: string, keys: string[]): void {
     if (!swOn()) return
-    void this.tkChain.then(() => scheduleKeys(cid, keys)).then((r) => { this.host.toast('已排今天：进了今天的「未安排」和本日计划清单' + (r.planAdded ? ' · 甘特图今天补上了计划条' : '')); panelDirty() })
+    void this.tkChain.then(() => scheduleKeys(cid, keys)).then((r) => { this.host.toast('已排今天：直接进了今天的「已安排」' + (r.lane >= 0 ? '（第 ' + (r.lane + 1) + ' 行）' : '') + (r.planAdded ? ' · 甘特图今天补上了计划条' : '')); panelDirty() })
       .catch((e: unknown) => this.host.toast('没排进今天：' + (e instanceof Error ? e.message : String(e)), 'err'))
   }
   /** v127（3）：详情里勾完成 = 自动记录执行（今天面板里有、还没记过的）。 */
@@ -2133,7 +2457,8 @@ export class BoardView {
     if (this.tkClosed.has(pid)) { this.tkClosed.delete(pid); this.tkFresh = pid }
     this.tkAdd = { card: c.id, pid, v: '' }
     this.lastDetail = ''; this.renderDetail(); this.tkFresh = ''
-    ;(this.root.querySelector('#dpmKAdd') as HTMLInputElement | null)?.focus({ preventScroll: true })
+    /* v175（R9）：加子任务走同一个滚动函数（行本来就在视口里就只高亮 + 聚焦，不乱滚） */
+    this.revealRow(this.root.querySelector('#dpmKAddRow') as HTMLElement | null, '#dpmKAdd')
   }
   private kaddClose(focusBack = false): void {
     const a = this.tkAdd; if (!a) return
@@ -2241,12 +2566,68 @@ export class BoardView {
       + '<button type="button" class="pib" data-tk-newclose title="收起输入行（Esc）" aria-label="收起输入行">' + ic('x') + '</button>'
       + '</li>'
   }
+  /**
+   * v175（R9）：把详情滚到这一行 —— 缓动滚到「中间偏上」+ 高亮 1.15s + 滚到位再聚焦（不瞬跳、不抢滚动）。
+   * 只滚详情自己的滚动区（.d-b）：scrollIntoView 会连宿主外层一起滚（0.19 主实例踩过）。
+   */
+  private revealRow(el: HTMLElement | null, focusSel?: string): void {
+    /* 从这一行往上找真正的滚动区（详情可能同时存在看板面板 / 全局详情两份，按 root 查会挑错那份） */
+    const findBox = (e: HTMLElement): HTMLElement | null => {
+      for (let p = e.parentElement; p; p = p.parentElement) {
+        const cs = getComputedStyle(p)
+        if (/(auto|scroll)/.test(cs.overflowY) && p.scrollHeight > p.clientHeight + 4) return p
+      }
+      return null
+    }
+    let marked = false
+    let focused = false
+    let cancelled = false
+    const timers: number[] = []
+    /* 用户自己在滚 / 点就别抢（只在这一轮补滚期间监听一次） */
+    const onUser = (): void => { cancelled = true; for (const t of timers) clearTimeout(t) }
+    /* 刚渲染完那几帧量到的位置还不是最终位置（详情会被下一次重画重排、长列表要等布局稳住）——
+       现在 / 下一帧 / 160 / 340 / 800 / 1400ms 各量一次，只在没滚到位时补滚 */
+    const run = (): void => {
+      if (cancelled) return
+      /* 行可能已经被下一次重画换掉了（同一个 id 只会有这一行）—— 直接按 id 在文档里找当前那一份 */
+      const row = el && el.isConnected ? el : (document.querySelector('#dpmTkNewRow, #dpmKAddRow') as HTMLElement | null)
+      if (!row) return
+      const box = findBox(row)
+      if (!box) return
+      if (box.dataset.dpmReveal !== '1') {
+        box.dataset.dpmReveal = '1'
+        box.addEventListener('wheel', onUser, { passive: true, once: true })
+        box.addEventListener('pointerdown', onUser, { capture: true, once: true })
+      }
+      const br = box.getBoundingClientRect(), er = row.getBoundingClientRect()
+      const inView = er.top >= br.top + 8 && er.bottom <= br.bottom - 8
+      let dist = 0
+      if (!inView) {
+        const want = box.scrollTop + (er.top - br.top) - Math.max(16, (box.clientHeight - er.height) / 2 - 60)
+        const to = Math.max(0, Math.min(Math.max(0, box.scrollHeight - box.clientHeight), want))
+        dist = Math.abs(to - box.scrollTop)
+        if (dist > 4) box.scrollTo({ top: to, behavior: 'smooth' })
+      }
+      if (!marked) {
+        marked = true
+        row.classList.add('dpm-newrow')
+        setTimeout(() => row.classList.remove('dpm-newrow'), 1150)
+      }
+      if (!focused && focusSel) {
+        focused = true
+        setTimeout(() => { (this.root.querySelector(focusSel) as HTMLInputElement | null)?.focus({ preventScroll: true }) }, Math.min(560, 140 + dist / 3))
+      }
+    }
+    run()
+    requestAnimationFrame(run)
+    for (const d of [160, 340, 800, 1400]) timers.push(window.setTimeout(run, d))
+    if (focusSel) setTimeout(() => { if (!focused) { focused = true; (this.root.querySelector(focusSel) as HTMLInputElement | null)?.focus({ preventScroll: true }) } }, 380)
+  }
   private tkNewOpen(c: Card): void {
-    if (this.tkNew && this.tkNew.card === c.id) { (this.root.querySelector('#dpmTkNewIn') as HTMLInputElement | null)?.focus(); return }
+    if (this.tkNew && this.tkNew.card === c.id) { this.revealRow(this.root.querySelector('#dpmTkNewRow') as HTMLElement | null, '#dpmTkNewIn'); return }
     this.tkNew = { card: c.id, v: '', fresh: true }
     this.lastDetail = ''; this.renderDetail(); this.tkNew && (this.tkNew.fresh = false)
-    const i = this.root.querySelector('#dpmTkNewIn') as HTMLInputElement | null
-    i?.focus({ preventScroll: true })
+    this.revealRow(this.root.querySelector('#dpmTkNewRow') as HTMLElement | null, '#dpmTkNewIn')
   }
   private tkNewClose(focusBack = false): void {
     const a = this.tkNew; if (!a) return
@@ -2380,6 +2761,118 @@ export class BoardView {
     if (!(await this.act('card/noteitems', { id: c.id, items }))) return
     this.host.toast('已删除说明「' + x.t + '」', 'ok', { label: '撤销', run: () => { const cc = this.card(c.id); if (!cc) return; const now = (cc.noteItems ?? []).map((y) => ({ ...y })); if (x.pin && now[0]) delete now[0].pin; now.splice(Math.min(k, now.length), 0, x); void this.act('card/noteitems', { id: c.id, items: now }, '已恢复「' + x.t + '」') } })
   }
+  /* ── v163 S9：详情「知识卡」一节（挂载 + 三档 + 移除 + 搜索添加）。数据 = Card.kb + /kb 列表缓存 ── */
+  /** /kb 列表缓存（行要标题 / 类型 / 状态 / 摘要）；读不到就把行降级成 id，不打断看板 */
+  private kbItems: KbItem[] = []
+  private kbBusy = false
+  private kbNeedAt = 0
+  /** 「添加知识卡」选择器：card = 给哪张卡加，q = 搜索词；kbAddRows = 当前候选 */
+  private kbAdd: { card: string; q: string } | null = null
+  private kbAddRows: KbItem[] = []
+  private kbAddSeq = 0
+  private kbAddT = 0
+  private kbItemOf(id: string): KbItem | undefined { return this.kbItems.find((k) => k.id === id) }
+  private kbSig(): string { return this.kbItems.map((k) => k.id + k.updated).join() }
+  private async kbLoad(): Promise<void> {
+    if (this.kbBusy || this.disposed) return
+    this.kbBusy = true
+    const before = this.kbSig()
+    try {
+      const r = await getKb()
+      if (!this.disposed) this.kbItems = r.cards
+    } catch { /* 知识库读不到：行降级成 id，下次进详情再试 */ }
+    finally { this.kbBusy = false }
+    if (!this.disposed && this.kbSig() !== before) { this.lastDetail = ''; this.renderDetail() }
+  }
+  /** 详情里出现缓存里没有的 id（别处新建的卡 / 首次进详情）→ 拉一次，3 秒内不重复 */
+  private kbEnsure(): void {
+    if (this.kbBusy) return
+    const now = Date.now()
+    if (now < this.kbNeedAt) return
+    this.kbNeedAt = now + 3000
+    void this.kbLoad()
+  }
+  /** 三档（全文 / 摘要 / 不注入）：缺省档位按类型，带 data-def 打一圈细描边 */
+  private kbModHtml(id: string, type: string, mode?: KbMode): string {
+    const eff = kbEffMode(type, mode)
+    const label = this.kbItemOf(id)?.title ?? id
+    return '<span class="kbm" role="group" aria-label="「' + esc(label) + '」的注入档位">'
+      + (['full', 'sum', 'off'] as KbMode[]).map((m) => '<button type="button" data-kb-mode="' + m + '" data-kb-mid="' + esc(id) + '"' + (eff === m ? ' class="on"' : '') + (mode ? '' : ' data-def="1"') + ' title="' + (mode ? '' : '类型默认（' + esc(KB_TYPE_LABEL[type] ?? type) + '）· ') + esc(KB_MODE_HINT[m]) + '">' + esc(KB_MODE_LABEL[m]) + '</button>').join('')
+      + '</span>'
+  }
+  private kbRowHtml(a: { id: string; mode?: KbMode }, ro: boolean): string {
+    const k = this.kbItemOf(a.id)
+    const type = k?.type ?? 'howto'
+    const nm = k?.title ?? a.id
+    return '<div class="kbrw" data-kbrid="' + esc(a.id) + '">'
+      + '<span class="kbg">' + (KB_TYPE_GLYPH[type] ?? '') + '</span>'
+      + (k
+        ? '<button type="button" class="kbt2" data-kb-open="' + esc(a.id) + '" title="打开知识库并定位这张卡">' + esc(k.title) + '</button>'
+        : '<span class="kbt2 gone" title="这张知识卡不在知识库里了（文件被删或移走）">' + esc(a.id) + ' · 已不在知识库</span>')
+      + (ro ? '' : '<button type="button" class="ib sm krm" data-kb-rm="' + esc(a.id) + '" aria-label="从这张卡片移除「' + esc(nm) + '」" title="从这张卡片移除（知识卡本身还在知识库里）">' + ic('trash') + '</button>')
+      + '<span class="m1">' + this.kbModHtml(a.id, type, a.mode)
+      + (k ? '<span class="kt2">' + esc(KB_TYPE_LABEL[k.type] ?? k.type) + (k.status === 'verified' ? '' : ' · ' + esc(KB_STATUS_LABEL[k.status])) + '</span>' : '')
+      + '</span><span class="m2">' + esc(k?.summary ?? '') + '</span></div>'
+  }
+  /** 「添加知识卡」= 搜索选择器（/kb/search）+ 新建草稿并挂上 */
+  private kbAddListHtml(c: Card): string {
+    const have = new Set((c.kb ?? []).map((a) => a.id))
+    const rows = this.kbAddRows.filter((k) => !have.has(k.id))
+    if (!rows.length) return '<p class="kbadd-e">没有可加的知识卡 —— 下面可以新建一张草稿。</p>'
+    return rows.map((k) => '<button type="button" class="kbadd-i" data-kb-pick="' + esc(k.id) + '"><span class="kbg">' + (KB_TYPE_GLYPH[k.type] ?? '') + '</span><span class="t">' + esc(k.title) + '</span><span class="d">' + esc(KB_TYPE_LABEL[k.type] ?? k.type) + (k.status === 'verified' ? '' : ' · ' + esc(KB_STATUS_LABEL[k.status])) + '</span></button>').join('')
+  }
+  private kbAddPanelHtml(c: Card): string {
+    const q = this.kbAdd?.q ?? ''
+    return '<div class="kbadd" id="dpmKbAdd" role="region" aria-label="添加知识卡">'
+      + '<div class="kbadd-h">' + ic('search') + '<label class="sr-only" for="dpmKbAddQ">搜索知识卡</label><input id="dpmKbAddQ" type="text" autocomplete="off" spellcheck="false" placeholder="搜索知识卡（标题 / 标签 / 摘要 / 正文）…" value="' + esc(q) + '"></div>'
+      + '<div class="kbadd-l" id="dpmKbAddList">' + this.kbAddListHtml(c) + '</div>'
+      + '<div class="kbadd-f"><button type="button" class="btn sm" data-kb-new-card="' + esc(c.id) + '">' + ic('plus') + '新建草稿并挂上</button><span class="grow"></span><span class="meta">新增一律草稿；只有用户能转「已验证」</span></div></div>'
+  }
+  private async kbAddSearch(): Promise<void> {
+    const a = this.kbAdd
+    if (!a) return
+    const my = ++this.kbAddSeq
+    const q = a.q.trim()
+    let rows: KbItem[] = this.kbItems.slice(0, 20)
+    if (q) {
+      try { rows = (await searchKb(q, { limit: 20 })).cards } catch { rows = [] }
+    }
+    if (my !== this.kbAddSeq || this.kbAdd !== a || this.disposed) return
+    this.kbAddRows = rows
+    const c = this.card(a.card)
+    const box = this.root.querySelector('#dpmKbAddList') as HTMLElement | null
+    if (c && box) box.innerHTML = this.kbAddListHtml(c)
+  }
+  private async kbAttach(c: Card, id: string): Promise<void> {
+    const k = this.kbItemOf(id)
+    const next = [...(c.kb ?? []), { id }]
+    this.kbAdd = null
+    this.kbAddRows = []
+    if (await this.act('card/kb', { id: c.id, kb: next }, '已挂上「' + (k?.title ?? id) + '」· 档位 = 类型默认（' + KB_MODE_LABEL[kbEffMode(k?.type ?? 'howto')] + '）')) this.landEl('.detail .kbrw[data-kbrid="' + CSS.escape(id) + '"]')
+  }
+  private async kbSetMode(c: Card, id: string, mode: KbMode): Promise<void> {
+    const k = this.kbItemOf(id)
+    const next = (c.kb ?? []).map((a) => (a.id === id ? { id: a.id, mode } : a))
+    await this.act('card/kb', { id: c.id, kb: next }, '「' + (k?.title ?? id) + '」档位 = ' + KB_MODE_LABEL[mode] + '：' + KB_MODE_HINT[mode].split('：')[1])
+  }
+  private async kbRemove(c: Card, id: string): Promise<void> {
+    const prev = (c.kb ?? []).slice()
+    const k = this.kbItemOf(id)
+    const next = prev.filter((a) => a.id !== id)
+    this.kbAdd = null
+    if (await this.act('card/kb', { id: c.id, kb: next })) this.host.toast('已从这张卡片移除「' + (k?.title ?? id) + '」· 知识卡本身还在知识库里', 'ok', { label: '撤销', run: () => void this.act('card/kb', { id: c.id, kb: prev }) })
+  }
+  private kbSecHtml(c: Card, ro = false): string {
+    const list = c.kb ?? []
+    if (list.some((a) => !this.kbItemOf(a.id))) this.kbEnsure()
+    const add = ro ? '' : this.hbtn('plus', '添加知识卡（搜索已有 / 就地新建草稿）', 'data-kb-add')
+    const rows = list.map((a) => this.kbRowHtml(a, ro)).join('')
+    const pa = !ro && this.kbAdd && this.kbAdd.card === c.id ? this.kbAddPanelHtml(c) : ''
+    const body = (list.length ? '<div class="kb-klist">' + rows + '</div>' : '<p class="kb-kt">' + (ro ? '没有挂知识卡。' : '这张卡片还没有挂知识卡。挂上之后，从它打开的会话会自动看到这些知识（按右边档位决定全文 / 摘要 / 不注入）。') + '</p>') + pa
+    const hint = ro ? '' : '<p class="kb-kh">档位只影响 <b>注入</b>：全文 = 正文以消息注入（同一版本只注一次，压缩后补注）；摘要 = 系统提示里一行；不注入 = 只留在知识库。点标题打开知识库定位这张卡。</p>'
+    return '<section class="sec" id="dpmKbSec"><h3>' + BOOK_SVG + '知识卡 · ' + list.length + '<span class="grow"></span>' + add + '</h3>' + body + hint + '</section>'
+  }
+
   // ── 0.24 关联卡片（单向；选择面板就地展开；点卡片 = 打开它的详情，标题上方「‹ 返回」） ──
   private rp: { card: string; q: string; sel: Set<string>; off?: boolean } | null = null
   /** v136：仓库行内编辑（名字 + 注入开关）。 */
@@ -4414,6 +4907,19 @@ export class BoardView {
     this.on(r, 'mousedown', (e) => { const it = (e.target as HTMLElement).closest?.('[data-tk-pref]') as HTMLElement | null; const c = this.sel ? this.card(this.sel) : undefined; if (it && c) { e.preventDefault(); this.tkPickRef(c, it.dataset.tkPref as string) } else if ((e.target as HTMLElement).closest?.('[data-tk-ref]')) e.preventDefault() })
     for (const ev of ['keyup', 'mouseup', 'select'] as const) this.on(r, ev, (e) => { const t = e.target as HTMLTextAreaElement; if (t.id === 'dpmTaskNote') this.tkCaret = [t.selectionStart, t.selectionEnd] })
     this.on(r, 'input', (e) => this.onInput(e))
+    this.on(r, 'focusin', (e) => { const t = e.target as HTMLElement; if (t.id === 'dpmQ' && !this.bqOpen) this.openSearch() })
+    this.on(window, 'keydown', (e) => { const k = e as KeyboardEvent; if (!(k.metaKey || k.ctrlKey) || (k.key !== 'k' && k.key !== 'K')) return; if (!this.root.isConnected) return; k.preventDefault(); this.focusSearch() }, true)
+    /* Esc 在搜索界面里由插件自己接管（焦点落在结果行 / body 上时，宿主的 Esc 会先吃掉事件）：先清词，再退出搜索。 */
+    this.on(window, 'keydown', (e) => {
+      const k = e as KeyboardEvent
+      if (k.key !== 'Escape' || !this.bqOpen || !this.root.isConnected) return
+      const t = k.target as HTMLElement | null
+      if (t && (t.closest?.('dialog') || (t.tagName === 'INPUT' && t.id !== 'dpmQ') || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      k.preventDefault()
+      k.stopPropagation()
+      if (this.q) this.setQuery('')
+      else this.closeSearch()
+    }, true)
     this.on(r, 'compositionstart', () => { this.composing = true })
     this.on(r, 'compositionend', (e) => { this.composing = false; this.onInput(e); if (this.pushPend && !this.pushT) this.pushT = window.setTimeout(() => this.pushFlush(), 0) })
     /* v121（5）：焦点离开输入框后补一次被推迟的重画 */
@@ -4490,8 +4996,9 @@ export class BoardView {
     const nkr = this.dp ? (e.target as HTMLElement).closest('.detail .nk[data-nk]:not(.editing)') as HTMLElement | null : null
     if (nkr && this.dp && !(e.target as HTMLElement).closest('.nksw, .nk-acts, .ngrip, .npin, a, input, textarea')) {
       const nm = nkr.querySelector('.nk-t')?.textContent ?? ''
-      if (nm) { e.preventDefault(); this.dp.open('note', nm); return }
+      if (nm) { e.preventDefault(); openNote(this.bctx as BubbleCtx, (this.sel ? this.card(this.sel) : undefined) ?? null, nm, undefined, nkr); return }
     }
+    if (this.searchClick(e)) return
     const t = (e.target as HTMLElement).closest('button, [role="button"]') as HTMLElement | null
     const area = (e.target as HTMLElement).closest('[data-toggle-area]') as HTMLElement | null
     if (area && (!t || !area.contains(t))) return this.toggleGroup(area.dataset.toggleArea as string)
@@ -4511,7 +5018,7 @@ export class BoardView {
       if (t.id === 'dpmArInj' && this.ar) this.ar.on = on
       return
     }
-    if (d.dpmSw !== undefined) { e.preventDefault(); const on = swToggle(); this.host.toast(on ? '排今天：开 —— 新建的任务保存后直接进今天的「未安排」和本日计划清单（记住）' : '排今天：关'); return }
+    if (d.dpmSw !== undefined) { e.preventDefault(); const on = swToggle(); this.host.toast(on ? '排今天：开 —— 新建的任务保存后直接进今天的「已安排」最后一行（记住）' : '排今天：关'); return }
     if (d.dupForce !== undefined) {
       const nd = this.$<HTMLDialogElement>('#dpmDlgName')
       if (nd?.open) { this.nameForce = true; this.$<HTMLButtonElement>('#dpmNameOk').click(); return }
@@ -4542,6 +5049,20 @@ export class BoardView {
     if (d.gArch) return this.archiveGroup(d.gArch)
     if (t.getAttribute('aria-disabled') === 'true') return
     if (d.pend && t.getAttribute('aria-disabled') !== 'true') { e.stopPropagation(); e.preventDefault(); return this.pendCard(d.pend, d.pendOn !== '0') }
+    // v172：项目星标 —— 点它不打开详情、不拖拽，只切一个布尔
+    if (d.cardStar !== undefined) {
+      e.preventDefault(); e.stopPropagation()
+      const id = d.cardStar, now = this.card(id)
+      if (!now) return
+      const on = now.star !== true
+      if (!(await this.act('card/star', { id, on }))) return
+      /* 详情里点星：强制重画详情（缓存按 html 比对，星标只改根类与按钮态时也要重建一次） */
+      this.lastDetail = ''
+      this.renderDetail()
+      this.host.toast(on ? '已加星标「' + now.t + '」：看板卡 / 详情 / 甘特图目录格镶金边，执行安排里也带一颗金星' : '已取消星标「' + now.t + '」')
+      window.dispatchEvent(new Event('dpm-gold'))
+      return
+    }
     if (d.card && (t.classList.contains('card') || t.classList.contains('pcard'))) { e.stopPropagation(); return this.showDetail(d.card) }
     if (d.dup) { e.stopPropagation(); return this.dupCard(d.dup) }
     if (d.archiveCard) return this.archiveCard(d.archiveCard)
@@ -4703,6 +5224,28 @@ export class BoardView {
       ;(dl.querySelector('[data-dlg-cancel]') as HTMLElement | null)?.focus()
       return
     }
+    /* v163 S9：详情「知识卡」一节 —— 添加 / 移除 / 三档 / 跳知识库 */
+    if (d.kbAdd !== undefined && c) {
+      this.kbAdd = { card: c.id, q: '' }
+      this.kbAddRows = this.kbItems.slice(0, 20)
+      this.lastDetail = ''
+      this.renderDetail()
+      ;(this.root.querySelector('#dpmKbAddQ') as HTMLElement | null)?.focus()
+      void this.kbAddSearch()
+      return
+    }
+    if (d.kbPick && c) return this.kbAttach(c, d.kbPick)
+    if (d.kbMode && c) return this.kbSetMode(c, t.getAttribute('data-kb-mid') ?? '', d.kbMode as KbMode)
+    if (d.kbRm && c) return this.kbRemove(c, d.kbRm)
+    if (d.kbOpen) { this.host.openKb?.({ cardId: d.kbOpen }); return }
+    if (d.kbNewCard && c) {
+      this.kbAdd = null
+      this.kbAddRows = []
+      this.lastDetail = ''
+      if (this.host.openKb) this.host.openKb({ newCard: c.id })
+      else this.host.toast('当前 dsh 版本不能从看板打开知识库（刷新页面或重启 dsh 再试）', 'err')
+      return
+    }
     if (d.rcAdd !== undefined && c) { this.rp = { card: c.id, q: '', sel: new Set() }; this.lastDetail = ''; this.renderDetail(); (this.root.querySelector('#dpmRpQ') as HTMLElement | null)?.focus(); return }
     if (d.rpCancel !== undefined) { this.rp = null; this.lastDetail = ''; this.renderDetail(); if (this.kbd) (this.root.querySelector('[data-rc-add]') as HTMLElement | null)?.focus(); return }
     if (d.rpOk !== undefined && c && this.rp) {
@@ -4791,7 +5334,11 @@ export class BoardView {
       this.focusTask('[data-tk-brief]')
       return
     }
-    if (d.tkView && c && this.dp) { e.preventDefault(); this.dp.open('task', d.tkView); return }
+    if (d.tkView && c && this.dp) {
+      e.preventDefault()
+      openTask(this.bctx as BubbleCtx, c, d.tkView, (e.target as HTMLElement).closest('.detail .task[data-tid]') as HTMLElement | null)
+      return
+    }
     if (d.tkView && c) {
       const k = d.tkView
       if (this.tkDetail !== c.id) { if (this.tkViewOpen.has(k)) this.tkViewOpen.delete(k); else this.tkViewOpen.add(k) }
@@ -4846,6 +5393,7 @@ export class BoardView {
       this.focusTask('[data-tk-subbtn="' + CSS.escape(pk) + '"]')
       return
     }
+    if (d.cleanup !== undefined) { void openCleanup({ toast: (m, k) => this.host.toast(m, k), refresh: () => this.refresh() }); return }
     if (d.import !== undefined) return this.openImport()
     if (d.stdel !== undefined) return this.stEdit((list) => { list.splice(Number(d.stdel), 1) })
     if (d.stup !== undefined) {
@@ -4897,7 +5445,17 @@ export class BoardView {
 
   private onInput(e: Event): void {
     const t = e.target as HTMLInputElement
-    if (t.id === 'dpmQ') { if ((e as InputEvent).isComposing) return; this.q = t.value.trim().toLowerCase(); this.render(); return }
+    if (t.id === 'dpmQ') {
+      if ((e as InputEvent).isComposing) return
+      this.bqOpen = true
+      this.q = t.value
+      this.bSel = 0
+      this.bOpenLf.clear()
+      this.syncDim(t.value)
+      this.qclr(!!t.value)
+      this.render()
+      return
+    }
     if (t.id === 'dpmAddIn') { this.addDraft = t.value; this.addForce = false; this.paintDedupe(); return }
     if (t.id === 'dpmNameInput') {
       /* v101 ①：这里加了查重分支就 return 了，把「确定」的可用状态一起带上（否则新名字也点不了确定） */
@@ -4924,6 +5482,14 @@ export class BoardView {
     if (t.id === 'dpmTaskEd' && this.taskEdit) { this.taskEdit.t = t.value; if (this.taskEdit.err) { this.taskEdit.err = ''; t.removeAttribute('aria-invalid'); this.root.querySelector('#dpmTaskEdE')?.remove() } return }
     if (t.id === 'dpmTaskNote' && this.taskEdit) { this.taskEdit.n = t.value; this.tkRefTrack(t as unknown as HTMLTextAreaElement); return }
     if (t.id === 'dpmRpQ' && this.rp) { if ((e as InputEvent).isComposing) return; this.rp.q = t.value; this.lastDetail = ''; this.renderDetail(); return }
+    /* v163 S9：知识卡选择器 —— 只重画候选列表，输入框不失焦 */
+    if (t.id === 'dpmKbAddQ' && this.kbAdd) {
+      if ((e as InputEvent).isComposing) return
+      this.kbAdd.q = t.value
+      clearTimeout(this.kbAddT)
+      this.kbAddT = window.setTimeout(() => void this.kbAddSearch(), 160)
+      return
+    }
     if (t.id === 'dpmTkLpQ' && this.tkLp) { if ((e as InputEvent).isComposing) return; this.tkLp.q = t.value; this.lastDetail = ''; this.renderDetail(); return }
     if (t.id === 'dpmArFpIn' && this.ar?.fp) { this.ar.fp.text = t.value; this.arFpPaint(); clearTimeout(this.arFpTimer); this.arFpTimer = window.setTimeout(() => void this.arFpCheck(), 250); return }
     if (t.id === 'dpmFaIn' && this.fa) { this.fa.text = t.value; clearTimeout(this.faTimer); this.faTimer = window.setTimeout(() => void this.faCheck(), 250); return }
@@ -5014,7 +5580,9 @@ export class BoardView {
 
   private async onKey(e: KeyboardEvent): Promise<void> {
     const t = e.target as HTMLElement
-    if ((e.key === 'Enter' || e.key === ' ') && this.dp && t.dataset?.nkOpen !== undefined) { e.preventDefault(); this.dp.open('note', t.textContent ?? ''); return }
+    const typing = t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable
+    if (this.bqOpen && (t.id === 'dpmQ' || !typing) && this.keySearch(e)) return
+    if ((e.key === 'Enter' || e.key === ' ') && this.dp && t.dataset?.nkOpen !== undefined) { e.preventDefault(); openNote(this.bctx as BubbleCtx, (this.sel ? this.card(this.sel) : undefined) ?? null, t.textContent ?? '', undefined, (t.closest('.nk') as HTMLElement | null)); return }
     // 0.30.1：分区标题栏可 Tab 聚焦，回车 / 空格切换展开
     if ((e.key === 'Enter' || e.key === ' ') && t.matches?.('.detail .d-b .sec.cl > h3')) {
       e.preventDefault()
@@ -5154,6 +5722,7 @@ export class BoardView {
       return
     }
     if (e.key === 'Escape' && t.id === 'dpmRpQ') { e.preventDefault(); this.rp = null; this.lastDetail = ''; this.renderDetail(); (this.root.querySelector('[data-rc-add]') as HTMLElement | null)?.focus(); return }
+    if (e.key === 'Escape' && t.id === 'dpmKbAddQ') { e.preventDefault(); this.kbAdd = null; this.kbAddRows = []; clearTimeout(this.kbAddT); this.lastDetail = ''; this.renderDetail(); (this.root.querySelector('[data-kb-add]') as HTMLElement | null)?.focus(); return }
     if (e.key === 'Escape' && this.back && !this.root.querySelector('dialog[open]')) { e.preventDefault(); this.goBack(); return }
   }
 
@@ -5442,7 +6011,8 @@ export class BoardView {
   private cdDown(e: PointerEvent): void {
     if (e.button !== 0 || this.cd || this.gd) return
     const t = e.target as HTMLElement
-    if (t.closest?.('.cacts')) return
+    /* v172：悬停工具条与星标按钮都不算「按住卡片」——否则 setPointerCapture 会把 click 重定向到卡片、点星变成开详情 */
+    if (t.closest?.('.cacts') || t.closest?.('[data-card-star]')) return
     const src = t.closest?.('.card[data-card], .pcard[data-card]') as HTMLElement | null
     if (!src || !this.root.contains(src) || !this.card(src.dataset.card as string)) return
     const r = src.getBoundingClientRect()
@@ -6083,21 +6653,131 @@ export class BoardView {
     this.arCheck()
   }
   private focusLastSel(): void { const a = this.ar; const i = a ? this.root.querySelector('[data-arname="' + (a.sel.length - 1) + '"]') as HTMLInputElement | null : null; if (i) { i.focus(); i.select() } }
-  /** 「选择文件夹…」：调 dsh 的选文件夹对话框；网页文件浏览器模式下（不支持）降级为手输绝对路径。 */
+  /** 「选择文件夹…」：先试 dsh 原生对话框（桌面版）；不是函数 / 报错 / 800ms 没回来 → 自动走应用内浏览器（v183 2.1）。 */
   private async pickFolder(): Promise<void> {
     const a = this.ar
     if (!a || a.busy) return
     a.busy = true
     this.arCheck()
     let path: string | null = null
-    try { path = await this.host.pickDirectory() } catch (e) {
-      if (this.ar === a) { this.arFpOpen(true) }
-      // 细节进控制台（点名失败对象），界面只给可操作的一句话
-      console.warn('[dsh-project-manager] uiWorkspace.pickDirectory 失败，改为手输路径：', e)
-      this.host.toast('当前 dsh 打不开系统选文件夹对话框，请在「粘贴路径」里输入文件夹的绝对路径', 'err')
-    } finally { a.busy = false }
+    let native = true
+    try {
+      path = await Promise.race([
+        this.host.pickDirectory(),
+        new Promise<never>((_, rej) => { setTimeout(() => rej(new Error('pickDirectory timeout')), 800) }),
+      ])
+    } catch (e) {
+      native = false
+      // 细节只进控制台；界面不再弹「打不开系统对话框」的红字，直接换应用内浏览器
+      console.info('[dsh-project-manager] 系统选文件夹不可用，改用应用内浏览器：', e)
+    }
+    if (!native) path = await this.pickFolderInApp()
+    a.busy = false
     if (this.ar !== a) return
     if (path && this.arAdd(path)) { this.renderSel([path]); this.focusLastSel() } else this.arCheck()
+  }
+  /** v183（2.1）：应用内文件夹浏览器（只读列子文件夹）。选中的路径返回；取消 / 关闭 = null。 */
+  private pickFolderInApp(): Promise<string | null> {
+    const d = this.$<HTMLDialogElement>('#dpmDlgPick')
+    return new Promise((resolve) => {
+      if (!d) { resolve(null); return }
+      this.pkWaiter = resolve
+      this.pk = null
+      this.pkWire()
+      const ok0 = this.$<HTMLButtonElement>('#dpmPkOk')
+      if (ok0) ok0.disabled = false
+      void this.pkGo('')
+      d.returnValue = ''
+      d.showModal()
+    })
+  }
+  private pkWire(): void {
+    const d = this.$<HTMLDialogElement>('#dpmDlgPick')
+    if (!d || d.dataset.wired === '1') return
+    d.dataset.wired = '1'
+    d.addEventListener('close', () => this.pkFinish(null))
+    d.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement
+      const go = t.closest('[data-pk-go]') as HTMLElement | null
+      if (go) { e.preventDefault(); void this.pkGo(go.dataset.pkGo ?? '') }
+    })
+    d.querySelector('#dpmPkOk')?.addEventListener('click', () => { const p = this.pk?.path ?? ''; this.pkFinish(p || null) })
+    /* v183（2.1.4）键盘：↑↓ 在文件夹之间走，Enter 进（原生 button 的 Enter 就是点它），Esc 由 dialog 自己关 */
+    d.addEventListener('keydown', (e) => {
+      const k = e as KeyboardEvent
+      if (k.key !== 'ArrowDown' && k.key !== 'ArrowUp') return
+      const items = Array.from(d.querySelectorAll<HTMLElement>('#dpmPkDirs .pk-dir'))
+      if (!items.length) return
+      k.preventDefault()
+      const cur = items.indexOf(document.activeElement as HTMLElement)
+      const next = cur < 0 ? 0 : Math.min(items.length - 1, Math.max(0, cur + (k.key === 'ArrowDown' ? 1 : -1)))
+      items[next]?.focus()
+    })
+  }
+  private pkFinish(v: string | null): void {
+    const d = this.$<HTMLDialogElement>('#dpmDlgPick')
+    if (d?.open) d.close()
+    const r = this.pkWaiter
+    this.pkWaiter = null
+    if (r) { this.pk = null; r(v); return }
+    this.pk = null
+  }
+  private async pkGo(path: string): Promise<void> {
+    try {
+      const r = await this.host.listDirs(path)
+      this.pk = { ...r, busy: false }
+      this.pkPaint()
+    } catch (e) {
+      /* v183（2.1.5）旧宿主降级：没有 fs/dirs 这条路由（NOT_FOUND）时不再只弹一条红字 ——
+         应用内浏览器里给「重启后可用」的空态，并把人送回「粘贴路径」（弹窗外的那个入口）。 */
+      if (e instanceof ApiError && e.code === 'NOT_FOUND') { this.pkRestart(); return }
+      const msg = e instanceof ApiError ? e.message : (e instanceof Error ? e.message : String(e))
+      this.host.toast(msg, 'err')
+    }
+  }
+  /** v183（2.1.5）：旧宿主（没有 fs/dirs）→ 弹窗内「重启后可用」空态，明确告诉人走粘贴路径。 */
+  private pkRestart(): void {
+    const d = this.$<HTMLDialogElement>('#dpmDlgPick')
+    if (!d) return
+    this.pk = null
+    this.$('#dpmPkCrumbs').innerHTML = ''
+    this.$('#dpmPkSide').innerHTML = ''
+    this.$('#dpmPkDirs').innerHTML = '<div class="pk-restart">'
+      + '<b>重启后可用</b>'
+      + '<p>这个功能要重启 DSH 才生效：宿主还在跑旧代码，没加载「列文件夹」这条接口。<br>现在可以关掉这个窗口，用右边的「粘贴路径」手敲绝对路径。</p>'
+      + '</div>'
+    const p = this.$<HTMLInputElement>('#dpmPkPath')
+    if (p) p.value = ''
+    const ok = this.$<HTMLButtonElement>('#dpmPkOk')
+    if (ok) ok.disabled = true
+    this.host.toast('宿主还是旧代码：重启 DSH 后应用内选文件夹才可用，现在先用「粘贴路径」', 'err')
+  }
+  private pkPaint(): void {
+    const pk = this.pk
+    const d = this.$<HTMLDialogElement>('#dpmDlgPick')
+    if (!pk || !d) return
+    const FOLDER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2.4h9v9.6H3.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>'
+    const UP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M6.5 11.5 12 6l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    const segs = pk.path.split('/').filter(Boolean)
+    let acc = ''
+    this.$('#dpmPkCrumbs').innerHTML = '<button type="button" class="pk-cr" data-pk-go="/">/</button>'
+      + segs.map((s) => { acc += '/' + s; return '<i aria-hidden="true">›</i><button type="button" class="pk-cr" data-pk-go="' + esc(acc) + '">' + esc(s) + '</button>' }).join('')
+    /* v183（2.1.4）：常用位置 = 主目录 / 桌面 / 文档 / 下载 / 项目区 / DSH / 插件数据目录。
+       后三个只有宿主知道（staging 是 ~/.dsh-staging，主实例是 ~/.dsh）→ 用 fs/dirs 带回的 areas；
+       旧宿主没有 areas 时退回 home 下的保守路径（不猜）。 */
+    const a0 = pk.areas
+    const shortcuts = [
+      { p: pk.home, t: '主目录' },
+      { p: pk.home + '/Desktop', t: '桌面' },
+      { p: pk.home + '/Documents', t: '文档' },
+      { p: pk.home + '/Downloads', t: '下载' },
+      ...(a0 ? [{ p: a0.hub, t: '项目区' }, { p: a0.dsh, t: 'DSH' }] : []),
+      { p: a0 ? a0.data : pk.home + '/.dsh', t: '插件数据目录' },
+    ]
+    this.$('#dpmPkSide').innerHTML = '<p class="pk-sl">常用位置</p>' + shortcuts.map((s) => '<button type="button" class="pk-sc" data-pk-go="' + esc(s.p) + '">' + FOLDER + '<span>' + esc(s.t) + '</span></button>').join('')
+    this.$('#dpmPkDirs').innerHTML = (pk.parent ? '<button type="button" class="pk-dir back" data-pk-go="' + esc(pk.parent) + '">' + UP + '<span>上一级</span></button>' : '')
+      + (pk.dirs.length ? pk.dirs.map((x) => '<button type="button" class="pk-dir" data-pk-go="' + esc(x.path) + '">' + FOLDER + '<span>' + esc(x.name) + '</span></button>').join('') : '<p class="pk-none">这个文件夹里没有子文件夹（可以直接用当前文件夹）</p>')
+    this.$<HTMLInputElement>('#dpmPkPath').value = pk.path
   }
   /** 复制路径图标（图标 → 对勾 1.2 秒，与相关链接的复制一致）。 */
   private copyPathBtn(p: string): string { return '<button type="button" class="ib sm cp" data-copy-path="' + esc(p) + '" aria-label="复制路径 ' + esc(p) + '" title="复制路径">' + COPY_SVG + CHECK_SVG + '</button>' }
@@ -6286,6 +6966,11 @@ const DIALOGS = String.raw`
     <div id="dpmArInjSlot"></div>
     <div class="dlg-f"><span class="meta" id="dpmArCount"></span><span class="sp"></span><button class="btn" type="button" data-dlg-cancel>取消</button><button class="btn primary" id="dpmArOk" type="submit" value="ok" disabled>保存</button></div>
   </section>
+</form></dialog>
+<dialog class="dpm-dialog pk-dlg" id="dpmDlgPick" aria-labelledby="dpmPkT" aria-modal="true"><form method="dialog">
+  <div class="dlg-h"><h2 id="dpmPkT">选择文件夹</h2><p>应用内浏览器（只读列文件夹）。系统选文件夹对话框打不开时自动走这里，不用再手敲绝对路径。</p><button type="button" class="ib dlg-x" data-dlg-cancel aria-label="关闭选择文件夹">%X%</button></div>
+  <div class="dlg-b pk-b"><aside class="pk-side" id="dpmPkSide" aria-label="常用位置"></aside><div class="pk-main"><div class="pk-crumbs" id="dpmPkCrumbs" aria-label="当前路径"></div><div class="pk-dirs" id="dpmPkDirs" role="list" aria-label="子文件夹"></div></div></div>
+  <div class="dlg-f"><label class="lbl" for="dpmPkPath">当前文件夹</label><input class="fld pk-path" id="dpmPkPath" readonly><span class="sp"></span><button class="btn" type="button" data-dlg-cancel>取消</button><button class="btn primary" type="button" id="dpmPkOk">用这个文件夹</button></div>
 </form></dialog>
 <dialog class="dpm-dialog xwide" id="dpmDlgSess" aria-labelledby="dpmLsT"><form method="dialog">
   <div class="dlg-h"><h2 id="dpmLsT">关联已有会话</h2><p id="dpmLsP"></p></div>

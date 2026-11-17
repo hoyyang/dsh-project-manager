@@ -20,6 +20,11 @@ export interface SessDeps {
   open(id: string): void
   /** 写 task.sess（'' = 取消关联）。 */
   link(cardId: string, taskId: string, sid: string): Promise<void>
+  /** v175：写一组关联（顺序 = 代表会话在前；空数组 = 取消全部）。一个任务只能有一个活跃会话由宿主再校验一次。 */
+  assoc?(cardId: string, taskId: string, ids: string[]): Promise<void>
+  /** v175：归档 / 恢复这个会话（宿主会话级；返回是否真的做了）。 */
+  archive?(sid: string): Promise<boolean>
+  restore?(sid: string): Promise<boolean>
   /** 以此卡片 / 任务新建会话（taskId 空 = 只关联卡片）。 */
   newFor(cardId: string, taskId: string): Promise<void>
   /** 工作区里定位 + 彩色高光这些会话行（返回真正亮了的会话 id）。 */
@@ -47,6 +52,7 @@ export const IC = {
   swap: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7.5h11l-3-3M17 16.5H6l3 3"/></svg>',
   newc: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5h12v9H9.5L5.5 17.8V14h-1z"/><path d="M18.5 13.5v6M15.5 16.5h6"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>',
   up: '<svg class="up" viewBox="0 0 24 24" aria-hidden="true"><path d="m6.5 14.5 5.5-5.5 5.5 5.5"/></svg>',
   x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
 }
@@ -54,18 +60,21 @@ const ago = (ms: number): string => { if (!ms) return '较早'; const s = (Date.
 const warned = new Set<string>()
 
 /** 会话状态标签（v141 方角 + 左侧色块 + 「会话…中」；v142 悬停不长箭头）。会话不存在 = ''。 */
-export function chipHtml(sid: string, o: { name?: boolean } = {}): string {
+export function chipHtml(sid: string, o: { name?: boolean; extra?: string } = {}): string {
   if (!D || !sid) return ''
   const st = D.st(sid)
   /* 会话列表还没加载到 / 会话已删：先放一个空占位（同一个 data-dpm-schip），宿主列表一到 repaintChips 就原地补上；真不在了就一直空着 */
   if (!st) { if (!warned.has(sid) && D.listReady?.()) { warned.add(sid); console.warn('[dsh-project-manager] 任务关联的会话已经不在了：' + sid + '（胶囊不画）') } return '<span class="dpm-sst0" data-dpm-schip="' + esc(sid) + '" data-st="none"' + (o.name ? ' data-nm="1"' : '') + ' hidden></span>' }
   const name = D.title(sid)
   const nm = o.name ? '<span class="nm">' + esc(name) + '</span>' : ''
-  const tip = '会话「' + name + '」' + LB[st] + '：' + DESC[st] + (st === 'arch' ? '（已归档的会话不能直接打开）' : ' · 点一下立即打开这个会话')
-  if (st === 'arch') return '<span class="dpm-sst s-arch" data-dpm-schip="' + esc(sid) + '" data-st="arch"' + (o.name ? ' data-nm="1"' : '') + ' title="' + esc(tip) + '"><span class="ic">' + IC.arch + '</span><span class="lb">' + LB.arch + '</span>' + nm + '</span>'
+  /* v175（§4.1）：多关联时 tooltip 写全「显示的是哪个会话 + 一共几个关联 + 活跃的是哪个 / 全归档时是最新对话那个」 */
+  const tip = '会话「' + name + '」' + LB[st] + '：' + DESC[st] + (st === 'arch' ? '（已归档的会话不能直接打开）' : ' · 点一下立即打开这个会话') + (o.extra ? ' · ' + o.extra : '')
+  /* extra 跟着节点走：状态变了 repaintChips 原地重画时还能把这段话带回去 */
+  const xtra = o.extra ? ' data-dpm-x="' + esc(o.extra) + '"' : ''
+  if (st === 'arch') return '<span class="dpm-sst s-arch" data-dpm-schip="' + esc(sid) + '" data-st="arch"' + (o.name ? ' data-nm="1"' : '') + xtra + ' title="' + esc(tip) + '"><span class="ic">' + IC.arch + '</span><span class="lb">' + LB.arch + '</span>' + nm + '</span>'
   /* v143（2.1）：转圈 / 光带对齐同一个时钟 —— 每次重画都是新节点，动画用负延迟接上全局相位，不再从 0 开始（Agent 输出时一秒推好几次状态 = 看起来停住） */
   const ph = st === 'run' || st === 'done' ? ' style="--dpm-ph:-' + (performance.now() % 2400).toFixed(0) + 'ms"' : ''
-  return '<button type="button" class="dpm-sst s-' + st + '" data-dpm-sopen="' + esc(sid) + '" data-dpm-schip="' + esc(sid) + '" data-st="' + st + '"' + (o.name ? ' data-nm="1"' : '') + ph + ' title="' + esc(tip) + '" aria-label="' + esc(tip) + '"><span class="ic">' + IC[st] + '</span><span class="lb">' + LB[st] + '</span>' + nm + '</button>'
+  return '<button type="button" class="dpm-sst s-' + st + '" data-dpm-sopen="' + esc(sid) + '" data-dpm-schip="' + esc(sid) + '" data-st="' + st + '"' + (o.name ? ' data-nm="1"' : '') + xtra + ph + ' title="' + esc(tip) + '" aria-label="' + esc(tip) + '"><span class="ic">' + IC[st] + '</span><span class="lb">' + LB[st] + '</span>' + nm + '</button>'
 }
 /* ═══ v155 · 项目卡（卡片级）的会话状态 ═══
    前提（和实施端同一条数据规则）：执行安排 / 计划清单只放最小层级 —— 项目有任务就只放任务卡，
@@ -129,18 +138,49 @@ function openProjSess(btn: HTMLElement, cid: string): void {
   openPicker(btn, { cid, browse: true, cur: '', self: false, what: '卡片', onPick: (sid) => { if (sid) D?.open(sid) }, onNew: () => { void D?.newFor(cid, '') } })
 }
 
-/** 详情任务 / 子任务卡第二行右侧：关联会话 / 状态标签 + 更换 + 新建会话（黑底）。v143（4B）：任务 / 子任务都不显示会话名（名字在悬停提示和气泡窗里），标签可缩、两颗按钮不缩。 */
+/* ═══ v175：任务 / 子任务 ↔ 多个会话（活跃唯一） ═══
+   口径 = docs/design-card-task-sessions-v175.md §二（R1–R10）+ §4.1–§4.3：
+   - 关联是一组会话 id（Task.sess = 代表会话，Task.sessArch = 其余）；活跃（未归档）最多 1 个；
+   - 代表会话算出来：活跃那个 / 全归档时最近对话最新的那个；
+   - 行上 = 代表会话的胶囊 +（>1 个时）数量徽标 + 管理按钮；已归档卡片只显示胶囊。 */
+export interface Assoc { ids: string[]; live: string[]; rep: string; total: number; rows: Map<string, SessRow> }
+export function assocOf(c: Card | null, t: Task): Assoc {
+  const ids: string[] = []
+  for (const s of [t.sess, ...(t.sessArch ?? [])]) if (typeof s === 'string' && s && !ids.includes(s)) ids.push(s)
+  const rows = new Map<string, SessRow>((c && D ? D.cardSessions(c.id) : []).map((r) => [r.id, r]))
+  const ready = D?.listReady?.() !== false
+  /* 会话已删（列表里没有）→ 不画；列表还没加载完 → 先当它在（免得胶囊先消失再出来） */
+  const keep = ready ? ids.filter((sid) => rows.has(sid) || !!D?.st(sid)) : ids
+  const st = (sid: string): SessSt | null => (D ? D.st(sid) : null)
+  const live = keep.filter((sid) => st(sid) !== 'arch')
+  const arc = keep.filter((sid) => st(sid) === 'arch')
+  const ms = (sid: string): number => rows.get(sid)?.updatedAt ?? 0
+  const rep = live[0] ?? arc.slice().sort((a, b) => ms(b) - ms(a))[0] ?? ''
+  return { ids: keep, live, rep, total: keep.length, rows }
+}
+/** 关联的会话标题（拿不到就退回 id 前 8 位）。 */
+const sessName = (sid: string): string => D?.title(sid) || sid.slice(0, 8)
+/** 详情任务 / 子任务卡第二行右侧：代表会话胶囊（+ 数量徽标）+ 管理按钮 + 新建会话（黑底）。 */
 export function tcHtml(cid: string, t: Task, sub: boolean, ro: boolean): string {
-  const has = !!(t.sess && (D?.st(t.sess) || !D?.listReady?.()))
   const what = sub ? '子任务' : '任务'
   const key = esc(cid + '|' + (t.id ?? ''))
-  const a = has
-    ? chipHtml(t.sess as string, { name: false }) + (ro ? '' : '<button type="button" class="dpm-sib" data-dpm-slink="' + key + '" title="更换关联的会话" aria-label="更换「' + esc(t.text) + '」关联的会话" aria-haspopup="listbox">' + IC.swap + '</button>')
-    : (ro ? '' : '<button type="button" class="dpm-slk" data-dpm-slink="' + key + '" title="关联卡片会话：从这张卡片的会话里选一个关联到这个' + what + '" aria-haspopup="listbox">' + IC.link + '关联会话</button>')
-  /* v151（2.1）：已关联一个没归档的会话 = 不显示「以此新建会话」（黑色）；没关联 / 关联的已归档 = 显示 */
-  const liveSess = has && D?.st(t.sess as string) !== 'arch'
-  const nb = ro || liveSess ? '' : '<button type="button" class="dpm-sib dpm-snew" data-dpm-snew="' + key + '" title="以此' + what + '创建会话：新建一个会话，自动关联这张卡片和这个' + what + '" aria-label="以「' + esc(t.text) + '」创建会话">' + IC.newc + '</button>'
-  return a || nb ? '<span class="dpm-stc">' + a + nb + '</span>' : ''
+  const a = assocOf(D?.card(cid) ?? null, t)
+  const nb = ro || a.live.length ? '' : '<button type="button" class="dpm-sib dpm-snew" data-dpm-snew="' + key + '" title="以此' + what + '创建会话：新建一个会话，自动关联这张卡片和这个' + what + '" aria-label="以「' + esc(t.text) + '」创建会话">' + IC.newc + '</button>'
+  if (!a.total) {
+    const lk = ro ? '' : '<button type="button" class="dpm-slk" data-dpm-slink="' + key + '" title="关联会话：这个' + what + '可以关联多个会话（同一时间只能有一个活跃会话）" aria-haspopup="dialog" aria-expanded="false">' + IC.link + '关联会话</button>'
+    return lk || nb ? '<span class="dpm-stc">' + lk + nb + '</span>' : ''
+  }
+  /* v175（§4.1）：胶囊 tooltip 写全 —— 哪个会话 / 一共几个 / 活跃的是哪个（全归档 = 最近对话最新的那个） */
+  const extra = a.total > 1
+    ? (a.live.length
+      ? '这个' + what + '一共关联 ' + a.total + ' 个会话，活跃的是「' + sessName(a.live[0]) + '」，其余 ' + (a.total - a.live.length) + ' 个已归档'
+      : '这个' + what + '一共关联 ' + a.total + ' 个会话，全是归档会话：显示的是「最近对话最新」的那个')
+    : ''
+  const chip = chipHtml(a.rep, { name: false, extra })
+  const cnt = a.total > 1 ? '<b class="dpm-scnt s-' + (D?.st(a.rep) ?? 'idle') + '" title="这个' + what + '一共关联了 ' + a.total + ' 个会话">' + a.total + '</b>' : ''
+  const tip = '管理这个' + what + '关联的会话（' + a.total + ' 个：活跃 ' + a.live.length + ' · 归档 ' + (a.total - a.live.length) + '）'
+  const mg = ro ? '' : '<button type="button" class="dpm-sib" data-dpm-slink="' + key + '" title="' + esc(tip) + '" aria-label="' + esc(tip) + '" aria-haspopup="dialog" aria-expanded="false">' + IC.swap + '</button>'
+  return '<span class="dpm-stc">' + chip + cnt + mg + nb + '</span>'
 }
 /** v151（2.1）：这个会话还在（列表里有、没归档）。列表没加载完时当作「在」（避免按钮闪出来又消失）。 */
 export const sessLive = (sid?: string): boolean => !!sid && !!D && (D.st(sid) ? D.st(sid) !== 'arch' : !D.listReady?.())
@@ -198,6 +238,220 @@ export function openPicker(btn: HTMLElement, o: PickOpts): void {
   setTimeout(() => { const f = (el.querySelector('.dpm-spr.on') ?? el.querySelector('.dpm-spr')) as HTMLElement | null; f?.focus({ preventScroll: true }) }, 20)
 }
 
+/* ═══ v175 · 「关联会话」弹窗（详情任务 / 子任务行唯一入口） ═══
+   500 宽 / 最高 620；两段 + 底栏；停在任务列表左边、尖尖（13×26）指着这一张卡；窄窗按可用宽收窄。 */
+interface SP { el: HTMLElement; btn: HTMLElement | null; root: ParentNode; cid: string; tid: string }
+let SP: SP | null = null
+export const sessPanelOpen = (): boolean => !!SP
+export function sessPanelClose(refocus = false): void {
+  if (!SP) return
+  const btn = SP.btn
+  SP.el.remove()
+  if (btn?.setAttribute) btn.setAttribute('aria-expanded', 'false')
+  SP = null
+  if (refocus && btn && document.contains(btn)) { try { btn.focus({ preventScroll: true }) } catch { /* */ } }
+}
+const spTask = (): { t: Task; parent: Task | null } | null => (SP && D ? taskOf(D.card(SP.cid), SP.tid) : null)
+const spAnchor = (): HTMLElement | null => {
+  if (!SP) return null
+  if (SP.btn && document.contains(SP.btn)) return SP.btn
+  const b = SP.root.querySelector('.task[data-tid="' + CSS.escape(SP.tid) + '"] [data-dpm-slink]') as HTMLElement | null
+  if (b) SP.btn = b
+  return b
+}
+const spTile = (): HTMLElement | null => (SP ? (SP.root.querySelector('.task[data-tid="' + CSS.escape(SP.tid) + '"]') as HTMLElement | null) : null)
+/** 一个会话被这张卡片里几个任务 / 子任务关联（「另有 N 个」）。 */
+const linkedCount = (c: Card, sid: string): number => flat(c).filter((x) => { const ids = [x.t.sess, ...(x.t.sessArch ?? [])]; return ids.includes(sid) }).length
+/** 恢复这个会话会不会让某个任务出现两个活跃会话（v175 R5：会被挡，点名先归档哪个）。 */
+function restoreBlock(c: Card, tid: string, sid: string): { text: string; other: string; sub: boolean; self: boolean } | null {
+  for (const f of flat(c)) {
+    const a = assocOf(c, f.t)
+    if (!a.ids.includes(sid)) continue
+    const other = a.live.find((x) => x !== sid)
+    if (!other) continue
+    return { text: f.t.text, other, sub: !!f.parent, self: f.t.id === tid }
+  }
+  return null
+}
+/** 被挡住时的那句话（点名先归档哪个会话；同一个任务就说「现在那个」）。 */
+function restoreWhy(g: { text: string; other: string; sub: boolean; self: boolean }): string {
+  return (g.self ? '先归档这个' + (g.sub ? '子任务' : '任务') + '现在那个活跃会话「' + sessName(g.other) + '」'
+    : '先归档' + (g.sub ? '子任务' : '任务') + '「' + g.text + '」现在那个活跃会话「' + sessName(g.other) + '」') + '，才能把它恢复为活跃'
+}
+function spRow(c: Card, what: string, sid: string, o: { archived: boolean; mode: 'assoc' | 'avail'; off: boolean; offWhy?: string; block?: string | null }): string {
+  const st: SessSt = o.archived ? 'arch' : (D?.st(sid) ?? 'idle')
+  const row = D?.cardSessions(c.id).find((r) => r.id === sid)
+  const ms = row?.updatedAt ?? 0
+  const n = Math.max(0, linkedCount(c, sid) - 1)
+  const meta = LB[st] + ' · ' + ago(ms) + (n ? ' · 另有 ' + n + ' 个任务也关联了它' : '')
+  const name = esc(sessName(sid))
+  if (o.mode === 'avail') {
+    const off = o.off
+    return '<button type="button" class="dpm-spn-r av' + (off ? ' off' : '') + '" data-spn-pick="' + esc(sid) + '"' + (off ? ' aria-disabled="true" title="这个' + what + '已经有活跃会话了：先归档它或取消关联，再来关联新的"' : ' title="关联这个会话到这个' + what + '"') + '>'
+      + '<span class="dpm-spn-si s-' + st + '">' + IC[st] + '</span>'
+      + '<span class="dpm-spn-t"><b>' + name + '</b><small>' + esc(meta) + '</small></span>'
+      + (off ? '<span class="dpm-spn-k">' + IC.lock + '不可选</span>' : '<span class="dpm-spn-k">关联</span>') + '</button>'
+  }
+  const acts = o.archived
+    ? '<button type="button" data-spn-restore="' + esc(sid) + '"' + (o.block ? ' aria-disabled="true" title="' + esc(o.block) + '" data-spn-why="' + esc(o.block) + '"' : ' title="恢复活跃：它还是这个' + what + '的关联会话，恢复后就是这里的活跃会话"') + '>恢复活跃</button>'
+      + '<button type="button" class="u" data-spn-unlink="' + esc(sid) + '" title="取消关联（会话本身不受影响）">取消关联</button>'
+    : '<button type="button" data-spn-open="' + esc(sid) + '" title="打开这个会话">打开</button>'
+      + '<button type="button" data-spn-arch="' + esc(sid) + '" title="归档会话：它会从活跃会话变成归档会话（这个' + what + '的关联保留）">归档会话</button>'
+      + '<button type="button" class="u" data-spn-unlink="' + esc(sid) + '" title="取消关联（会话本身不受影响）">取消关联</button>'
+  return '<div class="dpm-spn-r' + (o.archived ? ' arch' : '') + '" data-row="' + esc(sid) + '">'
+    + '<span class="dpm-spn-si s-' + st + '">' + IC[st] + '</span>'
+    + '<span class="dpm-spn-t"><b>' + name + (o.archived ? '' : '<i class="dpm-spn-live">活跃</i>') + '</b><small>' + esc(meta) + '</small></span>'
+    + '<span class="dpm-spn-a">' + acts + '</span></div>'
+}
+function spPaint(): void {
+  if (!SP || !D) return
+  const c = D.card(SP.cid); const f = spTask()
+  if (!c || !f) { sessPanelClose(); return }
+  const what = f.parent ? '子任务' : '任务'
+  const a = assocOf(c, f.t)
+  const liveAll = D.cardSessions(c.id).filter((s) => !s.archived && D?.st(s.id) !== 'arch').sort((x, y) => y.updatedAt - x.updatedAt)
+  const avail = liveAll.filter((s) => !a.ids.includes(s.id))
+  const hasLive = a.live.length > 0
+  const sc = (SP.el.querySelector('.dpm-spn-b') as HTMLElement | null)?.scrollTop ?? 0
+  const head = '<div class="dpm-spn-h"><span class="dpm-spn-hi">' + IC.link + '</span>'
+    + '<div class="dpm-spn-ht"><b>关联会话</b><small>' + esc(what + '「' + f.t.text + '」· ' + a.total + ' 个关联（活跃 ' + a.live.length + ' · 归档 ' + (a.total - a.live.length) + '）') + '</small></div>'
+    + '<button type="button" class="dpm-spn-x" data-spn-x aria-label="关闭关联会话窗口" title="关闭（Esc）">' + IC.x + '</button></div>'
+  const aRows = a.ids.length
+    ? [...a.live, ...a.ids.filter((sid) => !a.live.includes(sid)).sort((x, y) => (a.rows.get(y)?.updatedAt ?? 0) - (a.rows.get(x)?.updatedAt ?? 0))]
+      .map((sid) => {
+        const g = D?.st(sid) === 'arch' ? restoreBlock(c, SP?.tid ?? '', sid) : null
+        return spRow(c, what, sid, { archived: D?.st(sid) === 'arch', mode: 'assoc', off: false, block: g ? restoreWhy(g) : null })
+      }).join('')
+    : '<div class="dpm-spn-empty">这个' + what + '还没有关联会话 —— 从下面挑一个活跃会话，或者点底部「以此' + what + '新建会话」。</div>'
+  const hint = hasLive
+    ? '<p class="dpm-spn-note">这个' + what + '已经有活跃会话「' + esc(sessName(a.live[0])) + '」—— <b>一个任务只能有一个活跃会话</b>：先把上面那个「归档会话」或「取消关联」，才能再关联新的。</p>'
+    : ''
+  const avRows = avail.map((s) => spRow(c, what, s.id, { archived: false, mode: 'avail', off: hasLive })).join('')
+  const avEmpty = avail.length ? '' : '<div class="dpm-spn-empty">' + (liveAll.length ? '这张卡片的活跃会话都已经关联给它了。' : '这张卡片现在没有活跃会话可以关联。') + '</div>'
+  const body = SP.el.querySelector('.dpm-spn-b') as HTMLElement | null
+  SP.el.innerHTML = '<div class="dpm-spn-in">' + head
+    + '<div class="dpm-spn-b">'
+    + '<section class="dpm-spn-sec"><div class="dpm-spn-sh"><b>已关联</b><i>' + a.total + '</i><small>' + (a.total ? '活跃 ' + a.live.length + ' · 归档 ' + (a.total - a.live.length) : '还没有关联') + '</small></div>' + aRows + '</section>'
+    + '<section class="dpm-spn-sec"><div class="dpm-spn-sh"><b>可关联的活跃会话</b><i>' + avail.length + '</i><small>这张卡片的活跃会话</small></div>' + hint + avEmpty + avRows + '</section>'
+    + '</div>'
+    + '<div class="dpm-spn-f"><button type="button" class="dpm-spn-new" data-spn-new' + (hasLive ? ' aria-disabled="true" title="这个' + what + '已经有活跃会话了：先归档或取消关联现在那个，再新建会话（一个任务只能有一个活跃会话）"' : '') + '>' + IC.newc + '以此' + what + '新建会话</button>'
+    + '<span class="dpm-spn-sum">一个任务只关联一个活跃会话</span>'
+    + '<button type="button" class="dpm-spn-done" data-spn-x>完成</button></div></div>'
+    + '<i class="dpm-spn-tail r" aria-hidden="true"></i>'
+  const b2 = SP.el.querySelector('.dpm-spn-b') as HTMLElement | null
+  if (b2) b2.scrollTop = sc
+  else if (body) body.scrollTop = sc
+}
+function spPlace(): void {
+  if (!SP) return
+  const el = SP.el
+  const tile = spTile()
+  const btn = spAnchor() ?? tile
+  if (!tile || !btn) return
+  /* 详情被切走 / 收起（任务行不在屏幕上）→ 弹窗跟着收起，不悬空指着空气 */
+  if (!tile.getClientRects().length) { sessPanelClose(); return }
+  const inner = el.querySelector('.dpm-spn-in') as HTMLElement | null
+  const tail = el.querySelector('.dpm-spn-tail') as HTMLElement | null
+  /* 先清掉上一次的收窄宽度：否则窗口变宽回来弹窗会一直停在窄版（量到的 W 只会越来越小） */
+  el.style.width = ''
+  let W = el.offsetWidth || 500
+  let H = (inner ? inner.offsetHeight : 0) || el.offsetHeight || 400
+  const clampY = (y: number): number => Math.max(8, Math.min(innerHeight - H - 8, y))
+  const head = (tile.querySelector(':scope > .tkhead') as HTMLElement | null) ?? tile
+  const hr = head.getBoundingClientRect()
+  const cy = Math.min(Math.max(hr.top + hr.height / 2, 26), innerHeight - 26)
+  const dir = (d: string, x: number, y: number): void => {
+    if (!tail) return
+    tail.className = 'dpm-spn-tail ' + d
+    el.style.setProperty('--spn-y', Math.round(y) + 'px')
+    el.style.setProperty('--spn-x', Math.round(x) + 'px')
+  }
+  /* 贴在任务列表的统一左缘（子任务卡片往里缩，用它自己的左缘会把弹窗压到父卡片上） */
+  const outer = (tile.closest('.task[data-lv="0"]') as HTMLElement | null) ?? tile
+  const listLeft = Math.round(outer.getBoundingClientRect().left)
+  const room = Math.round(listLeft - 8 - 15)
+  if (room >= 360) {
+    if (room < W) { W = room; el.style.width = W + 'px'; H = (inner ? inner.offsetHeight : 0) || H }
+    const left = Math.round(listLeft - W - 15)
+    const top = clampY(Math.round(cy - H / 2))
+    el.style.left = left + 'px'; el.style.top = top + 'px'
+    dir('r', 0, Math.max(20, Math.min(H - 22, Math.round(cy - top - 13))))
+    return
+  }
+  /* 左边放不下（窄窗）：贴视口最近的一侧，尖尖方向按按钮在弹窗哪一侧现算 */
+  const r = btn.getBoundingClientRect()
+  const bCx = r.left + r.width / 2, bCy = r.top + r.height / 2
+  const cl = (v: number, a2: number, b3: number): number => Math.max(a2, Math.min(b3, v))
+  const left = Math.round(cl(bCx - W / 2, 8, Math.max(8, innerWidth - W - 8)))
+  const top = Math.round(r.bottom + 9 + H <= innerHeight - 8 ? r.bottom + 9 : r.top - 9 - H >= 8 ? r.top - 9 - H : clampY(bCy - H / 2))
+  el.style.left = left + 'px'; el.style.top = top + 'px'
+  const tl = (v: number, len: number): number => Math.round(cl(v, 20, len - 42))
+  if (bCy <= top + 2) dir('u', tl(bCx - left - 13, W), 0)
+  else if (bCy >= top + H - 2) dir('d', tl(bCx - left - 13, W), 0)
+  else if (bCx <= left + 2) dir('r', 0, tl(bCy - top - 13, H))
+  else dir('l', 0, tl(bCy - top - 13, H))
+}
+async function spAct(fn: () => Promise<void> | void): Promise<void> {
+  try { await fn() } finally { if (SP) { spPaint(); spPlace() } }
+}
+export function openSessPanel(btn: HTMLElement, cid: string, tid: string): void {
+  if (SP && SP.btn === btn) { sessPanelClose(true); return }
+  sessPanelClose()
+  if (!D) return
+  const c = D.card(cid); if (!c) return
+  const el = document.createElement('div')
+  el.className = 'dpm-spn'
+  el.setAttribute('role', 'dialog')
+  el.setAttribute('aria-label', '关联会话')
+  el.tabIndex = -1
+  document.body.append(el)
+  SP = { el, btn, root: (btn.closest('.detail') as ParentNode | null) ?? document, cid, tid }
+  spPaint(); spPlace()
+  btn.setAttribute('aria-expanded', 'true')
+  el.addEventListener('pointerdown', (e) => e.stopPropagation())
+  el.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement
+    if (!SP) return
+    if (t.closest('[data-spn-x]')) { e.preventDefault(); sessPanelClose(true); return }
+    const nw = t.closest('[data-spn-new]') as HTMLElement | null
+    if (nw) {
+      e.preventDefault()
+      /* v175 R2：已经有活跃关联 → 不允许再新建（否则新会话关联会被宿主拒绝，白建一个孤儿会话） */
+      if (nw.getAttribute('aria-disabled') === 'true') return
+      const { cid: c2, tid: t2 } = SP; sessPanelClose(); void D?.newFor(c2, t2); return
+    }
+    const pick = t.closest('[data-spn-pick]') as HTMLElement | null
+    if (pick) { e.preventDefault(); if (pick.getAttribute('aria-disabled') === 'true') return; const sid = pick.dataset.spnPick as string; void spAct(() => D?.assoc?.(SP?.cid ?? '', SP?.tid ?? '', [sid, ...assocOf(D?.card(SP?.cid ?? '') ?? null, spTask()?.t ?? { text: '', done: true }).ids.filter((x) => x !== sid)]) ?? Promise.resolve()); return }
+    const un = t.closest('[data-spn-unlink]') as HTMLElement | null
+    if (un) { e.preventDefault(); const sid = un.dataset.spnUnlink as string; const s = SP; void spAct(() => D?.assoc?.(s.cid, s.tid, assocOf(D?.card(s.cid) ?? null, spTask()?.t ?? { text: '', done: true }).ids.filter((x) => x !== sid)) ?? Promise.resolve()); return }
+    const ar = t.closest('[data-spn-arch]') as HTMLElement | null
+    if (ar) { e.preventDefault(); const sid = ar.dataset.spnArch as string; void spAct(() => D?.archive?.(sid).then(() => undefined) ?? Promise.resolve()); return }
+    const rs = t.closest('[data-spn-restore]') as HTMLElement | null
+    if (rs) {
+      e.preventDefault()
+      /* v175（§4.4）：被挡的恢复 —— 点了不写数据，但要把「先归档哪个」说出来（只靠 title 在键盘 / 触屏上等于没提示） */
+      if (rs.getAttribute('aria-disabled') === 'true') {
+        const why = rs.dataset.spnWhy || ''
+        D?.toast('不能恢复「' + sessName(rs.dataset.spnRestore as string) + '」：' + why, 'err')
+        return
+      }
+      const sid = rs.dataset.spnRestore as string
+      void spAct(() => D?.restore?.(sid).then(() => undefined) ?? Promise.resolve())
+      return
+    }
+    const op2 = t.closest('[data-spn-open]') as HTMLElement | null
+    if (op2) { e.preventDefault(); D?.open(op2.dataset.spnOpen as string); sessPanelClose(); return }
+  })
+  setTimeout(() => { try { el.focus({ preventScroll: true }) } catch { /* */ } }, 20)
+}
+/* 跟随：滚详情 / 改窗口 / 列宽重算 / 锚点被重建（详情整块重画）都要重算位置 */
+let spT = 0
+const spAgain = (): void => {
+  if (!SP) return
+  spAnchor(); spPaint(); spPlace()
+  requestAnimationFrame(() => { if (SP) spPlace() })
+  clearTimeout(spT); spT = window.setTimeout(() => { if (SP) { spAnchor(); spPlace() } }, 120)
+}
 /* ── v151（4）点执行安排 / 计划清单的项目 / 任务 / 子任务 → 会话窗口切到对应会话（只在会话窗口正在展示时）──
    子任务（未完成）= 它的会话；任务（未完成）= 自己的会话 → 最上面的未完成子任务的会话；
    项目（未归档）= 项目自己的会话（卡片会话里没被任何任务 / 子任务关联的，列表最上面的）→ 最上面的未完成任务的会话 → 最上面的未完成子任务的会话。 */
@@ -287,7 +541,7 @@ export function repaintChips(root: ParentNode = document): void {
     const st = D.st(sid)
     if (st === el.dataset.st) continue
     if ((st ?? 'none') === el.dataset.st) continue
-    const html = chipHtml(sid, { name: el.dataset.nm === '1' })
+    const html = chipHtml(sid, { name: el.dataset.nm === '1', extra: el.dataset.dpmX || undefined })
     if (!html) { el.remove(); continue }
     const tmp = document.createElement('span'); tmp.innerHTML = html
     const n = tmp.firstElementChild as HTMLElement
@@ -310,7 +564,8 @@ export function installSess(deps: SessDeps): () => void {
       e.preventDefault(); e.stopPropagation()
       const [cid, tid] = (ln.dataset.dpmSlink as string).split('|')
       const f = taskOf(D.card(cid), tid); if (!f) return
-      openPicker(ln, { cid, cur: f.t.sess ?? '', self: true, what: f.parent ? '子任务' : '任务', onPick: (sid) => void D?.link(cid, tid, sid), onNew: () => void D?.newFor(cid, tid) })
+      /* v175：任务 / 子任务行 → 大的管理弹窗（多关联 + 归档 / 恢复 / 取消都在里面）；任务弹窗里的选择器仍用旧的 openPicker */
+      openSessPanel(ln, cid, tid)
       return
     }
     const nw = t.closest('[data-dpm-snew]') as HTMLButtonElement | null
@@ -328,16 +583,36 @@ export function installSess(deps: SessDeps): () => void {
   const down = (e: PointerEvent): void => {
     const t = e.target as HTMLElement | null
     if (pk && t && !pk.el.contains(t) && !pk.btn.contains(t)) pickClose()
+    if (SP && t && !SP.el.contains(t) && !(SP.btn && SP.btn.contains(t))) sessPanelClose()
     if (t?.closest?.('[data-dpm-snew], [data-dpm-sopen], [data-dpm-slink]')) e.stopPropagation()
   }
   const key = (e: KeyboardEvent): void => {
+    if (SP && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); sessPanelClose(true); return }
     if (!pk) return
     const rows = Array.from(pk.el.querySelectorAll<HTMLElement>('.dpm-spr'))
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); const b = pk.btn; pickClose(); try { b.focus() } catch { /* */ } return }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); const i = rows.indexOf(document.activeElement as HTMLElement); rows[(i + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length]?.focus() }
   }
+  /* v175：弹窗跟随（滚动 / 改窗口 / 列宽重算）；详情整块重画后也要重找锚点 */
+  const follow = (): void => { if (SP) spAgain() }
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => follow()) : null
+  const watched = new WeakSet<Element>()
+  const watchRoot = (): void => {
+    if (!ro || !SP) return
+    const r = SP.root instanceof Element ? SP.root : document.body
+    if (watched.has(r)) return
+    watched.add(r); ro.observe(r)
+  }
+  const followScroll = (): void => { if (!SP) return; watchRoot(); spPlace() }
   document.addEventListener('click', click, true)
   document.addEventListener('pointerdown', down, true)
   document.addEventListener('keydown', key, true)
-  return () => { document.removeEventListener('click', click, true); document.removeEventListener('pointerdown', down, true); document.removeEventListener('keydown', key, true); pickClose(); D = null }
+  document.addEventListener('scroll', followScroll, true)
+  window.addEventListener('resize', follow)
+  return () => {
+    document.removeEventListener('click', click, true); document.removeEventListener('pointerdown', down, true); document.removeEventListener('keydown', key, true)
+    document.removeEventListener('scroll', followScroll, true); window.removeEventListener('resize', follow)
+    ro?.disconnect(); clearTimeout(spT)
+    sessPanelClose(); pickClose(); D = null
+  }
 }

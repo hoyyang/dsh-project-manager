@@ -24,6 +24,8 @@ export function chipIconId(kind: string, body = ''): string {
   if (kind === 'repo' || kind === 'dir' || kind === 'folder') return 'folder'
   if (kind === 'card') return 'cards'
   if (kind === 'sess') return 'chat'
+  /* v163 S10：知识卡 = 开卷书（与侧栏「知识库」入口同一字形） */
+  if (kind === 'kb') return 'kb'
   if (kind === 'link') return 'link'
   if (kind === 'note') return 'note'
   return 'file'

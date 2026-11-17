@@ -49,6 +49,12 @@ export declare const fileText: (f: QFile) => string;
 export declare const repoText: (name: string, path: string) => string;
 export declare const cardText: (title: string, group: string) => string;
 /**
+ * v163 S10：知识卡引用原文 =「“标题”知识卡（/abs/path/<id>.md）」。
+ * 中间「知识卡」三个字把「”（」隔开 —— FILE_REF_RX（文件引用）与文件胶囊的正则都吃不到它；
+ * 文件名 = id、路径恒定，所以不需要 v154 那套搬家同步（改标题只影响显示）。
+ */
+export declare const kbText: (title: string, path: string) => string;
+/**
  * v97：任务的引用文本 = 这条任务的「任务说明」全文（子任务同理）；没有说明才退回标题。
  * 不再拼「任务 N：标题 / 状态 / 类型 / 链接 / 文件 / 子任务」那一大段 —— 那些在详情里都看得到。
  */
@@ -61,6 +67,24 @@ export declare function detectQuote(prefix: string, _first?: boolean): {
     len: number;
     query: string;
 } | null;
+/**
+ * v171：「）」/「)」（半角同理）引用知识卡触发 —— 行首（任意一行的第一个字符）或空格 / 全角空格 / NBSP 之后。
+ * 与 detectQuote 同构、同样纯函数：不碰 DOM，四处入口（对话框 / 任务说明 / 相关说明 / 知识卡正文）共用这一条规则。
+ * 不做「》」—— 那是「>」的兄弟（引用卡片内容）。
+ */
+export declare function detectKbQuote(prefix: string): {
+    len: number;
+    query: string;
+} | null;
+/**
+ * v171：面板被用户主动收起后的「别立刻重开」判定 —— 只认「触发字符左边那段原文」。
+ * 规则（原型 v171 J 组定稿）：左边那段原文没被改写、且后面紧跟着的仍是同一个触发字符（可隔一个空白），
+ * 就继续压着不弹；用户清掉 / 改写了左边那段、或换了个位置重新打触发字符 → 解除。
+ * 只对 esc / outside 记；pick / api（程序化关闭）不记。
+ */
+export declare function mutedBy(left: string, prefix: string): boolean;
+/** 触发字符左边那段原文（len = detectQuote / detectKbQuote 给的触发长度）。 */
+export declare const leftOf: (prefix: string, len: number) => string;
 /** 文件引用原文：「“标题”（[已删除：]路径）」。 */
 export declare const FILE_REF_RX: RegExp;
 /** 路径 / 文件名的最后一段（不依赖 model，避免循环依赖）。 */

@@ -29,6 +29,12 @@ export const fileRef = (f: QFile): string => nm(fileTitle(f)) + '（' + (f.exist
 export const fileText = (f: QFile): string => wrap(fileRef(f))
 export const repoText = (name: string, path: string): string => wrap(nm(name) + '（路径：' + path + '）')
 export const cardText = (title: string, group: string): string => wrap(nm(title) + '（卡片组：' + nm(group) + '）卡片')
+/**
+ * v163 S10：知识卡引用原文 =「“标题”知识卡（/abs/path/<id>.md）」。
+ * 中间「知识卡」三个字把「”（」隔开 —— FILE_REF_RX（文件引用）与文件胶囊的正则都吃不到它；
+ * 文件名 = id、路径恒定，所以不需要 v154 那套搬家同步（改标题只影响显示）。
+ */
+export const kbText = (title: string, path: string): string => wrap(nm(title) + '知识卡（' + path + '）')
 
 /**
  * v97：任务的引用文本 = 这条任务的「任务说明」全文（子任务同理）；没有说明才退回标题。
@@ -60,6 +66,37 @@ export function detectQuote(prefix: string, _first = true): { len: number; query
   }
   return null
 }
+
+/**
+ * v171：「）」/「)」（半角同理）引用知识卡触发 —— 行首（任意一行的第一个字符）或空格 / 全角空格 / NBSP 之后。
+ * 与 detectQuote 同构、同样纯函数：不碰 DOM，四处入口（对话框 / 任务说明 / 相关说明 / 知识卡正文）共用这一条规则。
+ * 不做「》」—— 那是「>」的兄弟（引用卡片内容）。
+ */
+export function detectKbQuote(prefix: string): { len: number; query: string } | null {
+  for (let i = prefix.length - 1; i >= 0; i--) {
+    const ch = prefix[i]
+    if (/\s/.test(ch)) return null
+    if (ch !== '）' && ch !== ')') continue
+    if (i === 0) return { len: prefix.length, query: prefix.slice(1) }
+    const prev = prefix[i - 1]
+    if (prev === ' ' || prev === '\u3000' || prev === '\u00a0') return { len: prefix.length - i + 1, query: prefix.slice(i + 1) }
+    return null
+  }
+  return null
+}
+
+/**
+ * v171：面板被用户主动收起后的「别立刻重开」判定 —— 只认「触发字符左边那段原文」。
+ * 规则（原型 v171 J 组定稿）：左边那段原文没被改写、且后面紧跟着的仍是同一个触发字符（可隔一个空白），
+ * 就继续压着不弹；用户清掉 / 改写了左边那段、或换了个位置重新打触发字符 → 解除。
+ * 只对 esc / outside 记；pick / api（程序化关闭）不记。
+ */
+export function mutedBy(left: string, prefix: string): boolean {
+  if (!prefix.startsWith(left)) return false
+  return /^[\s\u3000\u00a0]?[>》)\uff09]/.test(prefix.slice(left.length))
+}
+/** 触发字符左边那段原文（len = detectQuote / detectKbQuote 给的触发长度）。 */
+export const leftOf = (prefix: string, len: number): string => prefix.slice(0, Math.max(0, prefix.length - len))
 
 /* ── v154：文件引用原文的识别 / 改写 + 文件名归一（host 同步与修复、client 兜底共用一份） ── */
 

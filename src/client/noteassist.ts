@@ -7,6 +7,7 @@
 import { openedHow, openFileSmart, post } from './api.js'
 import { candidates, findMarks, type Mark } from './composer.js'
 import { fileText, linkText, noteText, repoText } from '../quote.js'
+import { openKbEditor, SEL_SEGS_HTML } from './kbdlg.js'
 
 export interface NaCard { links: Array<{ id?: string; text: string; type?: string; url: string }>; files: Array<{ id: string; path: string; title?: string; exists: boolean }>; repos: Array<{ name: string; path: string }>; notes: Array<{ t: string; v: string }> }
 export interface NaDeps {
@@ -61,7 +62,7 @@ export class NoteAssist {
   private stat = new Map<string, { k: 'file' | 'dir' | null; at: number }>()
   private statT = 0
   private raf = 0
-  private bub: HTMLButtonElement | null = null
+  private bub: HTMLElement | null = null
   private bubFor: (Mark & { r: Range }) | 'sel' | null = null
   private anchor: R | null = null
   private hideT = 0
@@ -140,23 +141,41 @@ export class NoteAssist {
     return null
   }
   /* ── 气泡（同对话框：安全区不闪、⌘ 提示、使用引用内容）── */
-  private ensure(): HTMLButtonElement {
+  private ensure(): HTMLElement {
     if (this.bub) return this.bub
-    const b = document.createElement('button')
-    b.type = 'button'; b.className = 'dpm-cbub dpm-nbub'; b.hidden = true
+    /* v168：容器换成 <div>，框选时装左右两个按钮（左说明 / 右知识卡） */
+    const b = document.createElement('div')
+    b.className = 'dpm-cbub dpm-nbub'; b.hidden = true
     b.addEventListener('pointerdown', (e) => e.preventDefault())
-    b.addEventListener('click', (e) => { e.stopPropagation(); void this.bubClick() })
+    b.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const t = e.target as HTMLElement | null
+      if (t && typeof t.closest === 'function' && t.closest('[data-kbseg]')) { e.preventDefault(); this.kbFromSel(); return }
+      void this.bubClick()
+    })
     ;(this.d.root()?.closest('dialog') ?? document.body).append(b)
     this.bub = b
     return b
+  }
+  /** v168：右半「添加为知识卡」—— 打开同一个新建弹窗，正文 = 框选原文（不自动挂当前项目卡） */
+  private kbFromSel(): void {
+    const t = this.selTxt
+    this.hide()
+    if (!String(t).trim()) { this.d.toast('先在说明里框选一段内容', 'err'); return }
+    openKbEditor({ mode: 'new', prefill: t, source: 'sel', toast: (m, k) => this.d.toast(m, k) })
   }
   private show(kind: string, rect: R, target: (Mark & { r: Range }) | 'sel', use: boolean): void {
     const b = this.ensure()
     const host = this.d.root()?.closest('dialog'); if (host && b.parentElement !== host) host.append(b)
     clearTimeout(this.hideT); this.hideT = 0
-    b.classList.toggle('use', use)
+    /* v168：框选（说明）= 左右两半；其它保持单颗 */
+    const split = kind === 'note' && target === 'sel'
+    b.classList.toggle('split', split)
+    b.classList.toggle('use', use && !split)
     const lab = use ? '使用引用内容' : LAB[kind]
-    b.innerHTML = (use ? IC.use : IC[kind]) + '<span>' + lab + '</span>' + (kind === 'note' ? '<small>' + Math.min(999, this.selTxt.length) + ' 字</small>' : '<small class="cmdh">' + OPEN_HINT[kind] + '</small>')
+    b.innerHTML = split
+      ? SEL_SEGS_HTML
+      : (use ? IC.use : IC[kind]) + '<span>' + lab + '</span>' + (kind === 'note' ? '<small>' + Math.min(999, this.selTxt.length) + ' 字</small>' : '<small class="cmdh">' + OPEN_HINT[kind] + '</small>')
     b.dataset.kind = kind; b.dataset.use = use ? '1' : ''
     b.setAttribute('aria-label', lab + (target !== 'sel' ? '：' + target.text : ''))
     this.bubFor = target
@@ -165,7 +184,10 @@ export class NoteAssist {
     const x = Math.max(8, Math.min(innerWidth - bw - 8, cx - bw / 2))
     const up = rect.bottom + 6 + bh > innerHeight - 6
     b.style.left = Math.round(x) + 'px'; b.style.top = Math.round(up ? rect.top - 6 - bh : rect.bottom + 6) + 'px'
-    b.style.setProperty('--ax', Math.round(cx - x - 4) + 'px'); b.classList.toggle('up', up)
+    /* v168：框选时尖尖钉在两半中间的分隔线下方（--ax = 左半宽度）；单颗时仍跟选区中心 */
+    const seg = split ? (b.querySelector('.nseg') as HTMLElement | null) : null
+    b.style.setProperty('--ax', (seg ? seg.offsetWidth : Math.max(4, Math.round(cx - x - 4))) + 'px')
+    b.classList.toggle('up', up)
     this.anchor = rect
   }
   private hide(): void { clearTimeout(this.hideT); this.hideT = 0; if (this.bub) this.bub.hidden = true; this.bubFor = null; this.anchor = null; if (this.hov) { this.hov = null; this.paint() } }

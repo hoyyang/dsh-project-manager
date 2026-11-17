@@ -10,6 +10,8 @@ const P: Record<string, string> = {
   // v99：内联加任务那一行的「编辑详情」= 带笔的清单
   listpen: '<path d="M5 4.5h14v15H5zM8 9h8M8 12.5h5"/><path d="M13 17.5l5-5 2 2-5 5-2.6.6z" fill="currentColor" stroke="none"/>',
   check: '<path d="m5 12 5 5 9-10"/>',
+  // v172：项目星标（与 v140 星标链接同一颗星，全站只有一种「金星」）
+  star: '<path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/>',
   cards: '<rect x="3" y="7" width="14" height="12" rx="3"/><path d="M7 4h11a3 3 0 0 1 3 3v9"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   fplus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 10v6M9 13h6"/>',
@@ -35,6 +37,8 @@ const P: Record<string, string> = {
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
   filex: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="m10 12 4 4m0-4-4 4"/>',
   note: '<path d="M5 4h14v16H5z"/><path d="M9 9h6M9 13h6M9 17h3"/>',
+  // v163 S10：知识卡（开卷书，与侧栏「知识库」入口同一字形）
+  kb: '<path d="M12 6.5C9.9 5.2 7.4 4.9 4.6 5.5v12.6c2.8-.6 5.3-.3 7.4 1 2.1-1.3 4.6-1.6 7.4-1V5.5c-2.8-.6-5.3-.3-7.4 1Z"/><path d="M12 6.5v12.6"/><path d="M7 8.7h2.6M7 11.5h2.6M14.4 8.7h2.6M14.4 11.5h2.6"/>',
   pin: '<path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/>',
   save: '<path d="M12 4v10m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/>',
   refresh: '<path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/>',
@@ -64,6 +68,8 @@ const P: Record<string, string> = {
   term: '<path d="m5 7 4 4-4 4M12.5 16H19"/>',
   finder: '<path d="M3 7.5a2 2 0 0 1 2-2h3.6l2 2H19a2 2 0 0 1 2 2V12"/><path d="M3 7.5V17a2 2 0 0 0 2 2h6"/><circle cx="16.5" cy="16" r="3.2"/><path d="m18.8 18.3 2.4 2.4"/>',
   design: '<path d="m12 19 7-7 3 3-7 7z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18z"/><path d="m2 2 7.6 7.6"/><circle cx="11" cy="11" r="2"/>',
+  // v180：清理关联文件（扫帚 —— 与原型同一颗）
+  broom: '<path d="M14.5 4.5 9 10"/><path d="M8.2 9.2c2.4-.9 4.9.2 5.8 2.6l.7 1.9-7.6 2.7-1.4-3.8c-.6-1.7.2-3.6 1.8-4.3Z"/><path d="M6.6 15.4 3.4 20"/><path d="M10.2 13.2 8.8 16.6M13.2 12.2l-1 3.1"/>',
 }
 export const ic = (id: string): string => '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' + (P[id] ?? '') + '</svg>'
 /** v153：同一个图标做成 CSS mask（DSH 对话框里是宿主画的胶囊，加不了子元素，只能用伪元素 + mask 画图标）。 */

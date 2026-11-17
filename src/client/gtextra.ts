@@ -103,16 +103,35 @@ export function zoneOfKeys(keys: string[]): string {
   return pickZone(zs)
 }
 
-/** v127：排今天（不切页面）：今天没有计划条先补上，再把 keys 加进今天的选中集合（= 「未安排」+ 本日计划清单）。 */
-export async function scheduleKeys(cardId: string, keys: string[]): Promise<{ planAdded: boolean }> {
+/** v127：排今天（不切页面）：今天没有计划条先补上，再把 keys 加进今天的选中集合。
+ *  v183（1.2）：默认 **直接进「已安排」最后一行**（该行满 2 张才新开一行，和「同一行 = 并行」一致）；
+ *  zone:'un' 保留老的「只进未安排」。 */
+export type ScheduleZone = 'arr' | 'un'
+export async function scheduleKeys(cardId: string, keys: string[], o?: { zone?: ScheduleZone }): Promise<{ planAdded: boolean; zone: ScheduleZone; lane: number }> {
   const d = await getGantt()
   const day = d.today
+  const zone: ScheduleZone = o?.zone ?? 'arr'
   let planAdded = false
   if (!(d.cards.find((c) => c.id === cardId)?.plan ?? []).includes(day)) { planAdded = true; await postGantt('plan', { card: cardId, day, on: true }) }
   const sel = new Set([...(d.panels?.[day]?.sel ?? []), ...keys])
-  const r = await postGantt('panel', { day, sel: [...sel] })
+  const patch: Record<string, unknown> = { day, sel: [...sel] }
+  let lane = -1
+  if (zone === 'arr') {
+    const lanes = ((d.panels?.[day]?.lanes ?? []) as string[][]).map((l) => [...l])
+    const pending = keys.filter((k) => !lanes.some((l) => l.includes(k)))
+    if (pending.length) {
+      let last = lanes[lanes.length - 1]
+      for (const k of pending) {
+        if (!last || last.length >= 2) { last = []; lanes.push(last) }
+        last.push(k)
+      }
+      lane = lanes.length - 1
+      patch.lanes = lanes
+    }
+  }
+  const r = await postGantt('panel', patch)
   if (r.gantt) setPanelCache(r.gantt)
-  return { planAdded }
+  return { planAdded, zone, lane }
 }
 
 /* ── v145（1.1）/ v146：会话开始工作 → 关联的任务 / 子任务（= 父任务卡）/ 没有任务的卡片（= 项目卡）今天一起进「执行中」──
@@ -174,7 +193,7 @@ export function runForSession(sid: string, find: (d: GanttData) => Array<Omit<Ru
 const SW_KEY = 'dpm-sched-today'
 export const swOn = (): boolean => { try { return localStorage.getItem(SW_KEY) === '1' } catch { return false } }
 export function swToggle(): boolean { const v = !swOn(); try { localStorage.setItem(SW_KEY, v ? '1' : '0') } catch { /* 本机存不了就只这次生效 */ } document.querySelectorAll('[data-dpm-sw]').forEach((b) => b.setAttribute('aria-checked', String(v))); return v }
-export const swHtml = (): string => '<button type="button" class="v7sw" role="switch" data-dpm-sw aria-checked="' + swOn() + '" aria-label="排今天：开 = 保存后立刻出现在今天任务执行安排的「未安排」和本日计划清单里（甘特图今天没有计划条会补上）"><i aria-hidden="true"></i><span>排今天</span></button>'
+export const swHtml = (): string => '<button type="button" class="v7sw" role="switch" data-dpm-sw aria-checked="' + swOn() + '" aria-label="排今天：开 = 保存后直接进今天任务执行安排的「已安排」最后一行（甘特图今天没有计划条会补上）"><i aria-hidden="true"></i><span>排今天</span></button>'
 
 /* ── 截止日期 ── */
 const DP = (s: string): number => { const a = s.split('-').map(Number); return Date.UTC(a[0], a[1] - 1, a[2]) }

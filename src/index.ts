@@ -17,17 +17,20 @@ import * as M from './model.js'
 import { historyPage, historyRows } from './history.js'
 import { BoardStore } from './store.js'
 import { StateCatalog } from './states.js'
+import { KbStore } from './kb.js'
+import { loadDict } from './i18n.js'
 import { groupDir, hubDir, syncHub } from './hub.js'
-import { cardBlock, maskBlock, memoryText } from './memory.js'
+import { cardBlock, kbAutoRead, kbLines, maskBlock, memoryText } from './memory.js'
 import { isPointer, MergeEngine, type MergeRec } from './merge.js'
 import { MigrateEngine } from './migrate.js'
 import { matchStates, specHint, specIssues, suggestFolder, type SpecCtx } from './lfspec.js'
 import { openMode, mountRoutes, ROUTE_PREFIX } from './routes.js'
 import { registerTools, registerLandfillTool } from './tools.js'
 import * as G from './gantt.js'
+import * as C from './cleanup.js'
 import { clip } from './text.js'
 import { SessionDaysCache } from './sessiondays.js'
-import { detectIntent, guardReason, intentHint, isIndexed, Landfill, listDocs, PLAN_HINT, SKILL_NAME, skillFile } from './landfill.js'
+import { detectMemoryRequests, guardReason, intentHint, isIndexed, Landfill, listDocs, PLAN_HINT, SKILL_NAME, skillFile } from './landfill.js'
 
 export const name = 'dsh-project-manager'
 
@@ -37,6 +40,8 @@ export interface Config {
   hubTitle: string
   projectSessionMode: 'danger-full-access' | 'inherit'
   memoryMaxBytes: number
+  kbIndexMaxBytes: number
+  kbFullMaxBytes: number
   landfill: boolean
   agentsHome: string
 }
@@ -47,6 +52,8 @@ export const Config: z<Config> = z.object({
   hubTitle: z.string().default('项目区').description('工作区列表里「项目区」的标题'),
   projectSessionMode: z.union(['danger-full-access', 'inherit']).default('danger-full-access').description('项目会话默认权限：完全访问 / 跟随全局'),
   memoryMaxBytes: z.natural().min(1000).max(32000).default(6000).description('每个会话注入的项目记忆上限（字节）'),
+  kbIndexMaxBytes: z.natural().min(500).max(32000).default(4000).description('系统提示「卡片档案」末尾知识卡索引的上限（字节）'),
+  kbFullMaxBytes: z.natural().min(2000).max(64000).default(12000).description('挂载为「全文」的知识卡单次注入上限（字节）'),
   landfill: z.boolean().default(true).description('落盘项目：landfill 工具 + 自动识别「落盘项目 / 回忆」+ 拦截直写 ~/.ai + 收尾检查（经 ~/.ai/tools/ai-memory 写；需要 python3，不支持 Windows）'),
   agentsHome: z.string().default('').description('landfill-project skill 软链所在的 ~/.agents 目录（缺省 ~/.agents）'),
 }) as z<Config>
@@ -94,6 +101,8 @@ export function apply(ctx: HostCtx, config: Config): void {
   const log = ctx.logger?.('dsh-project-manager')
   const store = new BoardStore(dataDir)
   const states = new StateCatalog(aiRoot)
+  // v163 S4：知识卡目录（知识库 v1；一卡一个 md，KbStore 负责读写与签名）
+  const kb = new KbStore(join(dataDir, 'kb'))
 
   // ── 0.31 任务日程看板：会话按天活跃（实际条自动来源）+ 事件日志缓存（默认计划段要归档 / 恢复历史）──
   const ganttEventsPath = join(dataDir, 'events.jsonl')
@@ -160,6 +169,8 @@ export function apply(ctx: HostCtx, config: Config): void {
   }
   /** warm = 真的起一轮后台统计（只有日程页发；打开卡片详情走 ganttMeta）。 */
   const ganttData = async (warm = false): Promise<Record<string, unknown>> => {
+    /* v184：每次取看板数据前先懒结算一次「昨天」（幂等；已有 autoRec 直接返回，不读盘不写盘） */
+    await settleAuto()
     const b = store.get()
     const refs = b.sessions.map((x) => x.sessionId)
     sdays.prune(new Set(refs))
@@ -171,6 +182,29 @@ export function apply(ctx: HostCtx, config: Config): void {
     const body = G.payload(b, ganttState(b), auto, degraded, ganttEvents())
     return { rev: G.revOf(body), ...body }
   }
+  /** v184：过 00:00 给「昨天」收口 —— 宿主唯一写入口；启动 + 每 60s + /gantt 取数时都跑一次（幂等）。
+   *  只结算昨天、一天只写一次（autoRec）；失败只记日志，绝不拖垮看板。 */
+  let autoSettling: Promise<void> | null = null
+  function settleAuto(): Promise<void> {
+    if (autoSettling) return autoSettling
+    autoSettling = (async () => {
+      try {
+        const dayKey = G.ymd(Date.now() - G.DAY)
+        const r = await store.mutate((b) => G.autoCloseDay(ganttState(b), b.cards, dayKey, Date.now()),
+          (x) => x ? [{ at: new Date().toISOString(), actor: 'agent' as const, kind: 'gantt/auto-rec', from: dayKey, to: String(x.n) }] : [])
+        if (r) log?.info?.('自动记录执行：' + dayKey + ' 共 ' + r.n + ' 张卡（等外部 ' + r.z.wait + ' · 个人暂停 ' + r.z.pause + ' · 执行中 ' + r.z.run + '）')
+      } catch (e) {
+        log?.warn('自动记录执行失败（不影响看板）：' + (e instanceof Error ? e.message : String(e)))
+      } finally { autoSettling = null }
+    })()
+    return autoSettling
+  }
+  void settleAuto()
+  ctx.effect(() => {
+    const t = setInterval(() => { void settleAuto() }, 60_000)
+    return () => { clearInterval(t) }
+  }, 'dsh-project-manager: auto close day')
+
   /** v90：只回 ui（卡片详情宽度）与统计实况 —— 不构建甘特数据、不起后台统计。
    *  打开卡片详情只为读一个宽度，旧代码走完整 /gantt 会在宿主里放一轮 6 秒的解压，把切会话拖慢。 */
   const ganttMeta = (): Record<string, unknown> => ({ ui: { ...(ganttState(store.get()).ui ?? {}) }, stats: sdays.stats() })
@@ -349,14 +383,16 @@ export function apply(ctx: HostCtx, config: Config): void {
     cardBlock: (key) => cardBlock(store.get(), key, new Date().toISOString(), store.boardPath, statePathOf),
     log,
   })
-  const MERGE_RE = /^\s*合并落盘项目（dsh-project-manager 合并 (mg[a-z0-9]+)）/
   /** 系统提示里本卡片那一段（「AI 收到的原文」浮层与 systemPrompt.context 用同一个函数）。 */
+  // v163 S6：每会话已注入的知识卡全文（id → updated），compaction 后清空重注。ponytail: 只增不减，会话上千才需要按会话回收。
+  const kbSeen = new Map<string, Map<string, string>>()
+  const kbSeenOf = (sid: string): Map<string, string> => { let m = kbSeen.get(sid); if (!m) { m = new Map(); kbSeen.set(sid, m) } return m }
   const memoryFor = (sid: string): string => {
     const b = store.get()
     const card = M.cardOfSession(b, sid)
     if (!card) return ''
     const index = M.memoryOf(b, card).map((m) => ({ ...m, state: states.get(m.key), ...(landfill.status.ok ? { required: landfill.brief(m.key).required, full: true } : {}) }))
-    return memoryText(b, card, index, config.memoryMaxBytes, undefined, statePathOf)
+    return memoryText(b, card, index, config.memoryMaxBytes, undefined, statePathOf, kbLines(kb.list(), card.kb, { maxBytes: config.kbIndexMaxBytes, summaryOf: (c) => kb.summaryOf(c) }))
   }
   /** 合并完成卡片的数据（递归：合并前的项目若本身是合并结果，带上它自己的）。 */
   const mergeView = (r: MergeRec): Record<string, unknown> => ({
@@ -387,7 +423,10 @@ export function apply(ctx: HostCtx, config: Config): void {
       // 0.20 信息卡发起的落盘这一轮的结局；卡片组的落盘文件夹；每个落盘项目的规范问题与迁移记录
       lfRun: lr ? { ...lr, ago: Date.now() - lr.at } : null,
       folder: { group: g.name, value: g.lfProject ?? null, suggest: g.lfProject ? null : folderSuggest(g), registered: !!g.lfProject && existsSync(join(aiRoot, 'projects', g.lfProject, 'memory')) },
-      cardInfo: { id: c.id, stage: g.statuses.find((s) => s.id === c.col)?.name ?? '', archived: !!c.archivedAt, repos: c.repos ?? [], tasks: c.tasks, notes: c.noteItems ?? [], links: c.webLinks ?? [], related: (c.related ?? []).map((id) => b.cards.find((x) => x.id === id)).filter((x): x is M.Card => !!x).map((r) => { const rg = b.groups.find((x) => x.id === r.g); return { id: r.id, title: r.t, group: rg?.name ?? '', stage: rg?.statuses.find((x) => x.id === r.col)?.name ?? '', archived: !!r.archivedAt, dirs: rg ? M.memoryOf(b, r).map((m) => { const p = statePathOf(m.key); return p ? dirname(p) : m.key }) : [] } }), files: (c.files ?? []).map((f) => ({ id: f.id, path: f.path, title: f.title, exists: existsSync(f.path), ...(f.prev?.length ? { prev: f.prev } : {}) })), sessions: b.sessions.filter((x) => x.cardId === c.id).map((x) => ({ id: x.sessionId, title: x.title ?? '' })), lfDirs: M.memoryOf(b, c).map((m) => { const p = statePathOf(m.key); return p ? dirname(p) : '' }).filter(Boolean) },
+      cardInfo: { id: c.id, stage: g.statuses.find((s) => s.id === c.col)?.name ?? '', archived: !!c.archivedAt, repos: c.repos ?? [], tasks: c.tasks, notes: c.noteItems ?? [], links: c.webLinks ?? [], related: (c.related ?? []).map((id) => b.cards.find((x) => x.id === id)).filter((x): x is M.Card => !!x).map((r) => { const rg = b.groups.find((x) => x.id === r.g); return { id: r.id, title: r.t, group: rg?.name ?? '', stage: rg?.statuses.find((x) => x.id === r.col)?.name ?? '', archived: !!r.archivedAt, dirs: rg ? M.memoryOf(b, r).map((m) => { const p = statePathOf(m.key); return p ? dirname(p) : m.key }) : [] } }), files: (c.files ?? []).map((f) => ({ id: f.id, path: f.path, title: f.title, exists: existsSync(f.path), ...(f.prev?.length ? { prev: f.prev } : {}) })), sessions: b.sessions.filter((x) => x.cardId === c.id).map((x) => ({ id: x.sessionId, title: x.title ?? '' })), lfDirs: M.memoryOf(b, c).map((m) => { const p = statePathOf(m.key); return p ? dirname(p) : '' }).filter(Boolean),
+        /* v163 S10：本卡挂载的知识卡（输入框「>」引用菜单 / 胶囊用）。prompt 类连带正文 —— 它插进输入框的是正文本身（当提示词用），
+           与 noteItems 带正文同一先例。ponytail: 只带 prompt 正文，其余类到正文走 /kb/card 按需读。 */
+        kb: (c.kb ?? []).flatMap((a) => { const x = kb.get(a.id); return x ? [{ id: x.id, title: x.title, type: x.type, status: x.status, summary: kb.summaryOf(x), path: x.path, ...(x.type === 'prompt' ? { body: x.body } : {}) }] : [] }) },
       memDetail: mem,
       merging: run ? { id: run.id, key: run.key, srcs: run.srcs.map((s) => s.key), ...merges.progress(run) } : null,
       mergeTool: { ok: landfill.status.ok && landfill.status.toolVersion >= 3, version: landfill.status.toolVersion },
@@ -668,6 +707,93 @@ export function apply(ctx: HostCtx, config: Config): void {
     return { path: from }
   }
 
+  /* ── v180（0.75.0）清理关联文件：扫描 / 删除并解除关联 / 仅解除关联 / 撤销 ─────────────
+     判定口径只走 src/cleanup.ts（cleanupRows）：按路径汇总「还有几张活跃卡片、还有几个未完成任务」，
+     两条都干净才算无用。删除 = 先把能删的挪到废纸篓，再一次写盘解除关联；写盘失败 = 全部放回原处。
+     已归档卡片只放宽「文件登记」（removeFileIn），标题 / 说明 / 任务 / 阶段仍只读。 */
+  const lfDirsOf = (c: M.Card): string[] => {
+    const keys = new Set<string>([...(c.links ?? [])])
+    try { for (const k of M.group(store.get(), c.g).links ?? []) keys.add(k) } catch { /* 组不在了（半截数据）*/ }
+    const out: string[] = []
+    for (const k of keys) {
+      try { const d = landfill.dirOf(k); if (d && !out.includes(d)) out.push(d) } catch { /* 这个 key 已经没有 STATE */ }
+    }
+    return out
+  }
+  const statOf = (p: string): C.CleanupInfo => {
+    try { const st = statSync(p); return { size: st.isFile() ? st.size : 0, exists: st.isFile() } } catch { return { size: 0, exists: false } }
+  }
+  const cleanupScan = async (): Promise<Record<string, unknown>> => ({ ...C.cleanupRows(store.get(), lfDirsOf, statOf) })
+  const cleanupApply = async (mode: string, keys: unknown): Promise<Record<string, unknown>> => {
+    if (mode !== 'trash' && mode !== 'unlink') throw new M.BoardError('BAD_ARG', 'mode 必须是 trash / unlink')
+    if (!Array.isArray(keys) || !keys.length || keys.length > 500 || keys.some((x) => typeof x !== 'string')) throw new M.BoardError('BAD_ARG', 'keys 必须是 1–500 个文件行')
+    const want = new Set(keys as string[])
+    const scan = C.cleanupRows(store.get(), lfDirsOf, statOf)
+    const picked = scan.rows.filter((r) => want.has(r.key))
+    if (!picked.length) throw new M.BoardError('NOT_LINKED', '选中的文件已经不在卡片里了（可能刚被别处清理过），重新打开就能看到最新清单')
+    if (mode === 'trash' && !existsSync(trashDir)) throw new M.BoardError('NO_TRASH', '找不到废纸篓 ' + trashDir)
+    const items: Array<{ key: string; cardId: string; file: M.FileRef; index: number; tasks: string[]; trashed: string }> = []
+    const moved: Array<{ from: string; to: string }> = []
+    for (const r of picked) {
+      if (mode !== 'trash' || !C.canTrash(r)) { items.push({ key: r.key, cardId: r.cardId, file: { id: r.fileId, path: r.path }, index: -1, tasks: [], trashed: '' }); continue }
+      try {
+        const to = join(trashDir, uniq(trashDir, basename(r.path)))
+        moveFile(r.path, to)
+        moved.push({ from: r.path, to })
+        items.push({ key: r.key, cardId: r.cardId, file: { id: r.fileId, path: r.path }, index: -1, tasks: [], trashed: to })
+      } catch (e) {
+        items.push({ key: r.key, cardId: r.cardId, file: { id: r.fileId, path: r.path }, index: -1, tasks: [], trashed: '' })
+        log?.warn('清理关联文件：挪到废纸篓失败，改成只解除关联 ' + r.path, e)
+      }
+    }
+    try {
+      await store.mutate((b) => {
+        for (const it of items) {
+          const c = M.card(b, it.cardId)
+          try { const r = M.removeFileIn(c, it.file.id); it.file = r.file; it.index = r.index; it.tasks = r.tasks }
+          catch (e) { if (!(e instanceof M.BoardError) || e.code !== 'NOT_LINKED') throw e }
+        }
+      }, () => items.map((it) => ({ at: new Date().toISOString(), actor: 'user', kind: 'card/files-cleanup', card: it.cardId, mode, id: it.file.id, from: it.file.path, ...(it.trashed ? { to: it.trashed } : {}) })))
+    } catch (e) {
+      for (const m of moved) { try { mkdirSync(dirname(m.from), { recursive: true }); moveFile(m.to, m.from) } catch { /* 下面整体报错 */ } }
+      throw e
+    }
+    const trashed = items.filter((x) => x.trashed).length
+    return { mode, items, trashed, unlinked: items.length - trashed }
+  }
+  const cleanupUndo = async (items: unknown): Promise<Record<string, unknown>> => {
+    const list = (Array.isArray(items) ? items : []) as Array<{ key?: unknown; cardId?: unknown; file?: unknown; index?: unknown; tasks?: unknown; trashed?: unknown }>
+    if (!list.length || list.length > 500) throw new M.BoardError('BAD_ARG', 'items 必须是 1–500 条清理记录')
+    const back: Array<{ from: string; to: string }> = []
+    for (const it of list) {
+      const to = typeof it.trashed === 'string' ? it.trashed : ''
+      const f = (it.file ?? {}) as { path?: unknown }
+      const from = typeof f.path === 'string' ? f.path : ''
+      if (!to || !from || !existsSync(to) || existsSync(from)) continue
+      mkdirSync(dirname(from), { recursive: true })
+      moveFile(to, from)
+      back.push({ from, to })
+    }
+    /* 恢复顺序 = 删除顺序的倒序（LIFO）：index 记的是「删除那一刻」的位置，同一张卡片删两个文件时
+       a(原 0) 删掉后 b 也就成了 0 —— 正序插回会把顺序反过来（b 跑前面），倒序插回才是原顺序。 */
+    const ordered = list.slice().reverse()
+    try {
+      await store.mutate((b) => {
+        for (const it of ordered) {
+          const c = M.card(b, String(it.cardId ?? ''))
+          try { M.restoreFileIn(c, it.file, it.index, it.tasks) } catch (e) { if (!(e instanceof M.BoardError) || e.code !== 'FILE_LINKED') throw e }
+        }
+      }, () => list.map((it) => {
+        const from = typeof (it.file as { path?: unknown } | undefined)?.path === 'string' ? String((it.file as { path: string }).path) : ''
+        return { at: new Date().toISOString(), actor: 'user', kind: 'card/files-cleanup-undo', card: String(it.cardId ?? ''), mode: 'undo', ...(from ? { from } : {}) }
+      }))
+    } catch (e) {
+      for (const x of back) { try { mkdirSync(dirname(x.to), { recursive: true }); moveFile(x.from, x.to) } catch { /* 报整体错 */ } }
+      throw e
+    }
+    return { restored: list.length }
+  }
+
   /**
    * v129 / v130：任务标题生成 —— 模型由用户在「配置生成标题模型」里手动选（dsh 已配置的 provider / 模型，推理档 = 模型元数据里的 efforts），
    * 不跟随会话模型；没配置 = 不能生成。kiro（dsh-kiro）不能生成标题，目录里整组隐藏。v120 保留：读 finish（error / aborted）原样透出失败原因、空响应自动重试一次。
@@ -766,6 +892,8 @@ export function apply(ctx: HostCtx, config: Config): void {
     const off = mountRoutes((h as HostCtx).webServer as never, {
       store,
       states,
+      kb,
+      i18n: () => loadDict(),
       hub: () => {
         const ws = hubWs ? ctx.workspaceRegistry.get(hubWs.id) : undefined
         const groups: Record<string, string> = {}
@@ -813,10 +941,16 @@ export function apply(ctx: HostCtx, config: Config): void {
         const reg = ctx.workspaceRegistry
         if (typeof reg.unarchiveSession !== 'function') throw new M.BoardError('UNARCHIVE_UNAVAILABLE', '当前 DSH 没有「恢复归档」能力（workspaceRegistry.unarchiveSession 不存在；需要 dsh-manage-sessions 的核心补丁）')
         if (!(reg.archivedSessionIds ?? []).includes(sessionId)) return { restored: false }
+        /* v175（R5）：恢复活跃 = 这个会话重新算「活跃关联」—— 任何入口（这里 / 弹窗 / 侧栏）都必须过同一道守卫：
+           某个也关联了它的任务已经有一个别的活跃会话 → 恢复后那个任务就出现两个活跃会话，直接拒绝并点名。 */
+        const clash = M.liveConflictForSession(store.get(), sessionId, (sid) => (reg.archivedSessionIds ?? []).includes(sid))
+        if (clash) throw new M.BoardError('BAD_ARG', '不能恢复这个会话：' + (clash.sub ? '子任务' : '任务') + '「' + clash.text + '」已经关联了活跃会话「' + clash.other + '」—— 一个任务只能有一个活跃会话，先归档那个再恢复')
         await reg.unarchiveSession(sessionId)
         return { restored: true }
       },
       canUnarchive: () => typeof ctx.workspaceRegistry.unarchiveSession === 'function',
+      /* v175：宿主侧唯一的口径 —— 一个会话现在是不是归档（任务多关联的「活跃最多一个」守卫用它，不另存标记） */
+      isSessionArchived: (sessionId) => (ctx.workspaceRegistry.archivedSessionIds ?? []).includes(sessionId),
       gantt: { data: ganttData, meta: ganttMeta, run: ganttMutate },
       landfill: () => landfill.snapshot(),
       adoptSkill: () => landfill.adopt(),
@@ -930,6 +1064,9 @@ export function apply(ctx: HostCtx, config: Config): void {
       fileTrash,
       fileTrashMany,
       fileUntrash,
+      cleanupScan,
+      cleanupApply,
+      cleanupUndo,
       ...(landfill.status.ok ? {
         merge: {
           // 0.20 合并结果放进卡片组的落盘文件夹（设了的话；第一次用到时登记）
@@ -950,6 +1087,29 @@ export function apply(ctx: HostCtx, config: Config): void {
           reject(new M.BoardError('PICK_FAILED', '打开系统选文件对话框失败：' + (String(stderr).trim() || err.message)))
         })
       }),
+      /* v183（2.1）：应用内「选择文件夹」的数据源（只读、只列目录；系统对话框打不开时界面自动走这里）。 */
+      listDirs: async (pathIn?: string) => {
+        const home = homedir()
+        const raw = String(pathIn ?? '').trim() || home
+        const p = (raw.replace(/^~(?=\/|$)/, home).replace(/\/+$/, '')) || '/'
+        if (!p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) throw new M.BoardError('BAD_ARG', '路径必须是绝对路径：' + raw)
+        let st: import('node:fs').Stats
+        try { st = statSync(p) } catch { throw new M.BoardError('NOT_FOUND', '文件夹不存在：' + p) }
+        if (!st.isDirectory()) throw new M.BoardError('NOT_DIR', '这不是文件夹：' + p)
+        const dirs: Array<{ name: string; path: string }> = []
+        try {
+          for (const ent of readdirSync(p, { withFileTypes: true })) {
+            if (!ent.isDirectory() || ent.name.startsWith('.')) continue
+            dirs.push({ name: ent.name, path: (p === '/' ? '' : p) + '/' + ent.name })
+          }
+        } catch { throw new M.BoardError('NO_ACCESS', '没有权限读这个文件夹：' + p) }
+        dirs.sort((x, y) => x.name.localeCompare(y.name, 'zh'))
+        const parent = p === '/' ? null : (p.split('/').slice(0, -1).join('/') || '/')
+        /* v183（2.1.4）：常用位置要能给出「项目区 / DSH / 插件数据目录」的真实路径 —— 只有宿主知道这几个目录
+           （staging 与主实例的 DSH_HOME 不同，客户端自己猜会给死快捷方式）。 */
+        const areas = { hub: hubDir(dataDir), data: dataDir, dsh: dshHome }
+        return { path: p, parent, home, dirs: dirs.slice(0, 500), areas }
+      },
       cleanup: async () => {
         hubWs = null
         await chain
@@ -964,7 +1124,7 @@ export function apply(ctx: HostCtx, config: Config): void {
   })
 
   ctx.inject(['tools'], (h) => {
-    registerTools((h as HostCtx).tools, store, states)
+    registerTools((h as HostCtx).tools, store, states, kb)
     if (landfill.status.ok) registerLandfillTool((h as HostCtx).tools, landfill, merges)
   })
 
@@ -986,10 +1146,9 @@ export function apply(ctx: HostCtx, config: Config): void {
       if (!sid || d?.kind === 'reject' || !Array.isArray(d?.messages)) return d
       const extra: Msg[] = []
       try {
-        const text = (p.messages ?? []).filter((m) => (m as { source?: { kind?: string } })?.source?.kind === 'user').map(textOf).join('\n')
-        const mm = MERGE_RE.exec(text)
-        if (mm) merges.arm(sid, mm[1])
-        const i = text ? detectIntent(text, states.list()) : null
+        const requests = detectMemoryRequests(p.messages ?? [], states.list())
+        for (const id of requests.merges) merges.arm(sid, id)
+        const i = requests.intent
         if (i) {
           const plan = i.want === 'persist' && planActive(p.agent)
           const t = landfill.begin(sid, p.turn ?? 0, i, plan)
@@ -1017,10 +1176,17 @@ export function apply(ctx: HostCtx, config: Config): void {
         const s = p.agent?.session
         const at = typeof s?.seq === 'number' ? s.seq : undefined
         const from = landfill.scannedTo(sid, at)
-        if (at !== undefined && from !== undefined && typeof s?.eventAt === 'function') for (let i = Math.max(from, at - 20000); i < at; i++) if (s.eventAt(i)?.type.startsWith('compaction/')) { landfill.contextLost(sid); break }
+        if (at !== undefined && from !== undefined && typeof s?.eventAt === 'function') for (let i = Math.max(from, at - 20000); i < at; i++) if (s.eventAt(i)?.type.startsWith('compaction/')) { landfill.contextLost(sid); kbSeenOf(sid).clear(); break }
         const full = landfill.autoRead(sid, p.turn ?? 0)
         if (full) { extra.unshift(msg(full, 'landfill-autoread')); log?.info('落盘项目：注入最新全文 ' + full.length + ' 字（会话 ' + sid.slice(0, 20) + '）') }
       } catch (e) { log?.warn('落盘项目：注入全文失败', e) }
+      try {
+        // v163 S6：挂载为「全文」的知识卡，本会话没注入过这个 id + updated 的 → 注入全文；compaction 清账后自动重注
+        const card = M.cardOfSession(store.get(), sid)
+        const seen = kbSeenOf(sid)
+        const kbr = kbAutoRead(kb.list(), card?.kb, seen, config.kbFullMaxBytes)
+        if (kbr) { for (const x of kbr.injected) seen.set(x.id, x.updated); extra.push(msg(kbr.text, 'kb-autoread')); log?.info('知识卡：注入全文 ' + kbr.injected.length + ' 张（会话 ' + sid.slice(0, 20) + '）') }
+      } catch (e) { log?.warn('知识卡：注入全文失败', e) }
       return extra.length ? { ...d, messages: [...d.messages, ...extra] } : d
     }) as never)
 
@@ -1070,7 +1236,7 @@ export function apply(ctx: HostCtx, config: Config): void {
           if (!agent || typeof agent.steer !== 'function') return { kind: 'error', text: '/' + name + ' 只能在会话里用' }
           const sid = agent.session?.id
           const card = sid ? M.cardOfSession(store.get(), sid) : undefined
-          const target = arg || (card ? M.memoryOf(store.get(), card).map((m) => m.key.split('/')[1]).join('、') : '')
+          const target = arg || (card ? M.memoryOf(store.get(), card).map((m) => m.key).join('、') : '')
           if (!target && verb === '回忆') return { kind: 'error', text: '用法：/recall <项目名>（这个会话没有关联卡片，不知道回忆哪个）' }
           const text = verb + ' ' + (target || '当前项目')
           agent.steer({ id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })

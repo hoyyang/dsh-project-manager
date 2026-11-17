@@ -6,10 +6,18 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Board } from './model.js';
 import type { BoardStore } from './store.js';
 import type { StateCatalog } from './states.js';
+import type { KbStore } from './kb.js';
 export declare const ROUTE_PREFIX = "/_dsh/dsh-project-manager";
 export interface Services {
     store: BoardStore;
     states: StateCatalog;
+    /** v163 S4：知识卡目录（知识库 v1，<dataDir>/kb/）。 */
+    kb: KbStore;
+    /** v182：英文词典（lib/i18n/en.json）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
+    i18n?(): {
+        v: string;
+        dict: Record<string, string>;
+    } | null;
     /** groups = 卡片组 id → 它的子工作区 id（侧栏按 data-row-key 找组行用）。 */
     hub(): {
         workspaceId: string | null;
@@ -45,6 +53,8 @@ export interface Services {
         restored: boolean;
     }>;
     canUnarchive(): boolean;
+    /** v175：这个会话现在是不是归档状态（宿主侧唯一来源 = workspaceRegistry.archivedSessionIds；多关联守卫用）。 */
+    isSessionArchived(sessionId: string): boolean;
     /** 0.16 落盘项目环境（看板顶部提示 / 接管按钮用）。 */
     landfill(): import('./landfill.js').LandfillStatus & {
         toolOutdated?: boolean;
@@ -60,6 +70,21 @@ export interface Services {
     };
     /** 弹系统选文件框（可多选）；取消返回 null；不支持的平台抛 BoardError('PICK_UNAVAILABLE')。 */
     pickFiles(): Promise<string[] | null>;
+    /** v183（2.1）：列文件夹（应用内「选择文件夹」用；只读，只返回直接子文件夹，隐藏目录不列）。 */
+    listDirs?(path?: string): Promise<{
+        path: string;
+        parent: string | null;
+        home: string;
+        dirs: Array<{
+            name: string;
+            path: string;
+        }>;
+        areas?: {
+            hub: string;
+            data: string;
+            dsh: string;
+        };
+    }>;
     /** 0.15：慢请求日志（超过阈值时记每一步耗时）。 */
     warn?(msg: string): void;
     /** 0.19 会话信息卡：卡片资料明细 + 落盘项目明细 + 合并卡片。 */
@@ -123,6 +148,10 @@ export interface Services {
     /** v138：会话输入框里 ⌘ 点击识别出的路径（不要求登记在卡片上）：文件夹 = 访达；文件 = 默认应用（可执行文件只在访达里选中，不运行）。 */
     openLocal?(path: string, dry?: boolean): Promise<Json>;
     fileUntrash?(cardId: string, file: unknown, index: unknown, tasks: unknown, trashed: string): Promise<Json>;
+    /** v180（0.75.0）清理关联文件：扫描（判定 + 体积）/ 删除并解除关联 / 仅解除关联 / 撤销。 */
+    cleanupScan?(): Promise<Json>;
+    cleanupApply?(mode: string, keys: unknown): Promise<Json>;
+    cleanupUndo?(items: unknown): Promise<Json>;
     /** 0.31 任务日程看板：派生快照（计划 / 实际 / 截止 / 三条边的宽度）与变更。 */
     gantt?: {
         /** warm = 起一轮后台会话统计（只有日程页传 true）。 */

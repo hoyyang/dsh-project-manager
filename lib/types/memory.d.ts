@@ -1,5 +1,6 @@
 import { Board, Card, memoryOf } from './model.js';
 import type { StateInfo } from './states.js';
+import type { KbCard } from './kb.js';
 export declare const BLOCK_TITLE = "## \uD83D\uDDC2 \u5361\u7247\u6863\u6848\uFF08dsh-project-manager \u6309\u770B\u677F\u751F\u6210\uFF0C\u52FF\u624B\u6539\uFF1B\u4EE5\u770B\u677F\u4E3A\u51C6\uFF09";
 export declare const MASK = "\uFF08\u672C\u5361\u7247\u7684\u5361\u7247\u6863\u6848\u89C1\u7CFB\u7EDF\u63D0\u793A\u300C\u5361\u7247\u6863\u6848\uFF08\u5B9E\u65F6\uFF09\u300D\uFF0C\u8FD9\u91CC\u7701\u7565\u4EE5\u514D\u91CD\u590D\uFF09";
 /** statePath = 落盘项目 key → STATE.md 绝对路径（关联卡片只注入记忆文件夹路径用）。 */
@@ -22,6 +23,29 @@ export declare const notesText: (c: Card) => string;
 export declare function cardLines(b: Board, c: Card, o: CardOpts, skipKey?: string): string[];
 /** 系统提示里的卡片档案（实时）。 */
 export declare function cardSection(b: Board, c: Card, notesMax?: number, statePath?: (key: string) => string | undefined): string;
+/** kbLines 选项：索引预算与摘要兜底（index.ts 传 KbStore.summaryOf）。 */
+export interface KbLinesOpts {
+    maxBytes?: number;
+    summaryOf?: (c: Pick<KbCard, 'summary' | 'body'>) => string;
+}
+/**
+ * 「卡片档案（实时）」末尾的知识卡索引节：挂在本卡片的知识卡按挂载顺序一行一张。
+ * 只放稳定字段（id / 标题 / 类型 / 状态 / 摘要 / 路径，不放 updated）——系统提示不因改正文每步变；
+ * mode=off 与 stale 不出现；草稿行尾加「（草稿）」；moc 多一行子卡标题；超预算从后省略并注明数量。
+ */
+export declare function kbLines(cards: KbCard[], attach: Card['kb'] | undefined, o?: KbLinesOpts): string[];
+/**
+ * pre-step 每步调用：挂载里 mode=full（显式或按类型缺省，kbMode）且本会话没注入过「这个 id + 这个 updated」的知识卡 →
+ * 拼成一条 [dsh-project-manager · 知识卡全文] 消息。seen（会话 → id → 已注入的 updated）由 index.ts 保管，
+ * 这里只读；返回 injected 让调用方落账（纯函数不藏状态）。预算放不下的卡整张跳过（不落账、下一步重算），块尾注明数量。
+ */
+export declare function kbAutoRead(cards: KbCard[], attach: Card['kb'] | undefined, seen: ReadonlyMap<string, string>, maxBytes?: number): {
+    text: string;
+    injected: Array<{
+        id: string;
+        updated: string;
+    }>;
+} | null;
 /** 写进 STATE 的卡片档案块；没有任何卡片 / 卡片组关联这个 key → 空串。卡片级最多 5 张。 */
 export declare function cardBlock(b: Board, key: string, at: string, boardPath?: string, statePath?: (key: string) => string | undefined): string;
 /**
@@ -49,6 +73,6 @@ export interface IndexInfo {
     required?: string[];
     full?: boolean;
 }
-/** 系统提示单段：卡片档案（实时）+ 记忆索引。索引按字节预算从后往前省略并注明。 */
-export declare function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes?: number, notesMaxBytes?: number, statePath?: (key: string) => string | undefined): string;
+/** 系统提示单段：卡片档案（实时）+ 知识卡索引（kb，v163 S6）+ 记忆索引。索引按字节预算从后往前省略并注明。 */
+export declare function memoryText(b: Board, c: Card, index: IndexInfo[], maxBytes?: number, notesMaxBytes?: number, statePath?: (key: string) => string | undefined, kb?: string[]): string;
 export { memoryOf };

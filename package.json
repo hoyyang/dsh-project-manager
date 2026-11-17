@@ -1,6 +1,6 @@
 {
   "name": "dsh-project-manager",
-  "version": "0.57.0",
+  "version": "0.79.0",
   "description": "Project board, task schedule (gantt) and project memory for DeepSeek Harness: sessions opened from a card auto-load it.",
   "keywords": [
     "dsh-plugin",
@@ -62,7 +62,7 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
-    "build:client": "node scripts/gen-css.mjs && node scripts/gen-ftype.mjs && tsdown",
+    "build:client": "node scripts/gen-css.mjs && node scripts/gen-i18n.mjs && node scripts/gen-ftype.mjs && tsdown",
     "test": "node --test test/*.test.mjs && python3 -m unittest discover -s bin/tests -q",
     "prepublishOnly": "npm run build && npm run build:client && npm test"
   },

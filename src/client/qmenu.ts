@@ -1,13 +1,18 @@
 /**
- * 0.27 会话输入框「>」引用卡片内容（原型 v52 / v53 定稿）。
- * 宿主的触发服务只认「@」「/」（dsh-client-ui-input-trigger 写死），所以由插件自己读输入框的文字和光标、
- * 自己画上拉列表（外形照宿主「/」菜单），选中后用宿主给会话插槽的 inputActions.insertText 替换「空格 + >筛选词」。
- * 读不到输入框 / 没有 inputActions → 不弹（照常输入，不报错打扰）。全部监听挂在 document 上，dispose 即净。
+ * 0.63.0（v165）：会话输入框「>」引用卡片内容 = 引用伴手弹窗（quotepanel.ts 的唯一组件）。
+ *
+ * 这里只留两件事：
+ *  1) buildQuoteRows = 八类数据的唯一口径（面板只渲染，不再各处自己拼条目）；
+ *  2) QuoteMenu = 对话框这一侧的触发与插入（读光标 / 认「>」/ 把引用原文插回去，宿主 inputActions）。
+ * 旧的外壳（.dpm-qm 浮层 / 列表 / 键盘）已删，面板统一画。
  */
-import { cardText, detectQuote, fileText, linkText, noteText, repoText, sessionText, taskText } from '../quote.js'
-import type { SessionInfo } from './api.js'
+import { cardText, detectKbQuote, detectQuote, fileText, kbText, leftOf, linkText, mutedBy, noteText, repoText, sessionText, taskText } from '../quote.js'
+import { secHay, splitSections } from '../sections.js'
+import { searchKb, type KbRef, type SessionInfo } from './api.js'
 import { ftype } from './board.js'
-import { esc, ic } from './icons.js'
+import { KB_STATUS_LABEL, KB_TYPE_LABEL } from './kb.js'
+import { closeQuotePanel, isQuotePanelOpen, openQuotePanel, repaintQuotePanel, type QpGroup, type QpItem } from './quotepanel.js'
+import { ensureKbCards, kbBodyNow, kbCardsNow, kbQuoteGroups, warmKbBodies, warmKbSecs } from './kbdlg.js'
 
 type Span = { start: number; end: number; draftRev: number }
 export interface InputActions { captureInsertion(): Span; insertText(text: string, span: Span): boolean }
@@ -20,70 +25,150 @@ export interface QuoteHost {
   toast(msg: string, kind?: 'ok' | 'err'): void
 }
 export type ActiveGroup = { id: string; name: string; items: Array<{ id: string; title: string; card: string | null; at: number }> }
-export type Item = { icon: string; name: string; kw?: string; alias?: string; desc?: string; cls?: string; lv?: number; sec?: string | null; text: string; parent?: number }
-export type Group = { t: string; items: Item[] }
 /** 引用菜单的数据来源（会话作用域）：弹窗说明框用同一份构造，条目与会话输入框完全一致。 */
 export interface QuoteSource { info(): SessionInfo | null; active(): ActiveGroup[]; sid: string }
 
-const qi = (k: string): string => '<span class="qi">' + ic(k) + '</span>'
-const cb = (on: boolean, mix = false): string => '<span class="qi cb' + (on ? ' on' : mix ? ' mix' : '') + '">' + (on ? ic('check') : '') + '</span>'
 const home = (p: string): string => p.replace(/^\/Users\/[^/]+\//, '~/').replace(/^\/home\/[^/]+\//, '~/')
 const base = (p: string): string => p.replace(/\/+$/, '').split('/').pop() || p
+const host = (u: string): string => String(u || '').replace(/^https?:\/\//i, '').split('/')[0]
+const oneLine = (s: string): string => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 64)
 
-export function buildQuoteGroups(src: QuoteSource): Group[] {
-    const i = src.info(), ci = i?.cardInfo
-    if (!ci) return []
-    const G: Group[] = []
-    const ti: Item[] = []
-    const qc = { tasks: ci.tasks.map((t) => ({ ...t, done: !!t.done })), links: ci.links.map((l) => ({ ...l, url: l.url })), files: ci.files.map((f) => ({ id: f.id, path: f.path, title: f.title, exists: f.exists })) }
-    ci.tasks.forEach((t, a) => {
-      const subs = t.subs ?? [], sd = subs.filter((x) => x.done).length, mix = !!subs.length && sd > 0 && !t.done
-      ti.push({ icon: cb(!!t.done, mix), name: (a + 1) + '　' + t.text, cls: t.done ? 'done' : '', desc: (subs.length ? '<span class="qx">子任务 ' + sd + '/' + subs.length + '</span>' : '') + (t.type ? '<span class="qt">' + esc(t.type) + '</span>' : ''), text: taskText(qc, a) })
-      const pi = ti.length - 1
-      subs.forEach((x, k) => ti.push({ lv: 1, icon: cb(!!x.done), name: (a + 1) + '.' + (k + 1) + '　' + x.text, cls: x.done ? 'done' : '', desc: x.type ? '<span class="qt">' + esc(x.type) + '</span>' : '', text: taskText(qc, a, k), parent: pi }))
-    })
-    G.push({ t: '任务', items: ti })
-    // v88：开关只影响 AI 自动注入——关闭的说明照样出现在引用菜单里，右侧标「不注入」
-    G.push({ t: '相关说明', items: ci.notes.map((n) => ({ icon: qi('note'), name: n.t, desc: '<span class="qx">' + esc(n.v.split('\n')[0]) + '</span>' + (n.off ? '<span class="qt">不注入</span>' : ''), text: noteText(n.t, n.v) })) })
-    const types = [...new Set(ci.links.map((l) => l.type || '无类型'))]
-    G.push({ t: '相关链接', items: types.flatMap((ty) => ci.links.filter((l) => (l.type || '无类型') === ty).map((l, k) => ({ sec: k === 0 ? ty : null, icon: qi('link'), name: l.text, alias: l.url.replace(/^[a-z]+:\/\//i, '').split('/')[0], desc: '<span class="qt">' + esc(l.type || '无类型') + '</span>', text: linkText(l) }))) })
-    const dirs = ci.lfDirs ?? []
-    G.push({ t: '相关文件', items: ci.files.map((f) => { const ty = ftype(f.path); const inLf = dirs.some((d) => f.path.startsWith(d + '/')); return { icon: qi(f.exists ? ty?.icon ?? 'file' : 'filex'), name: f.title || base(f.path), cls: f.exists ? '' : 'gone', desc: (ty ? '<span class="qt">' + ic(ty.icon) + esc(ty.label) + '</span>' : '') + (f.exists ? '<span class="qt ok">存在</span>' : '<span class="qt gone">已删除</span>') + (inLf ? '<span class="qt lf">在落盘项目里</span>' : ''), text: fileText({ path: f.path, title: f.title, exists: f.exists }) } }) })
-    G.push({ t: '仓库', items: ci.repos.map((r) => ({ icon: qi('repo'), name: r.name, alias: home(r.path), text: repoText(r.name, r.path) })) })
-    G.push({ t: '关联卡片', items: (ci.related ?? []).map((x) => ({ icon: qi('cards'), name: x.title, desc: '<span class="qx">' + esc(x.group + (x.stage ? ' · ' + x.stage : '')) + '</span>' + (x.archived ? '<span class="qt r">已归档</span>' : ''), text: cardText(x.title, x.group) })) })
-    // 0.27.2「本卡片的会话」→「活跃会话」（原型 v56）：按卡片组分小节；当前会话所在的组排最前、当前会话置顶；
-    // 每项 = 会话名 + 灰字卡片名（没卡片 =「还没有卡片」）+「当前会话」标签；筛选也认卡片名 / 卡片组名
-    const AG = src.active().map((g) => ({ ...g, items: g.items.slice().sort((a, b) => (b.id === src.sid ? 1 : 0) - (a.id === src.sid ? 1 : 0)) }))
-    AG.sort((a, b) => (b.items.some((x) => x.id === src.sid) ? 1 : 0) - (a.items.some((x) => x.id === src.sid) ? 1 : 0))
-    G.push({ t: '活跃会话', items: AG.flatMap((g) => g.items.map((x, k) => ({ sec: k === 0 ? g.name : null, icon: qi('chat'), name: x.title, kw: g.name + ' ' + (x.card ?? ''), desc: '<span class="qx">' + (x.card ? esc(x.card) : '还没有卡片') + '</span>' + (x.id === src.sid ? '<span class="qt cur">当前会话</span>' : ''), text: sessionText(x.title, g.name, x.card ?? undefined, x.id) }))) })
-    return G
-  }
+/** v163 S10：一张知识卡 → 面板条目。prompt 类插正文（它就是可复用指令），其余插引用原文。 */
+const kbRow = (k: KbRef, pre = false): QpItem => {
+  /* v179：正文按需二段式预取 —— 到齐后自动补「N 段」，先出的列表不等它 */
+  const prompt = k.type === 'prompt'
+  const body = kbBodyNow(k.id) ?? (prompt ? (k.body ?? '') : '')
+  const secs = body ? splitSections(body, prompt ? { kind: 'task' } : { kind: 'kb', title: k.title, path: k.path }) : []
+  return {
+    kind: 'leaf',
+    icon: 'kb',
+    id: k.id,
+    title: k.title,
+    chip: (KB_TYPE_LABEL[k.type] ?? k.type) + (k.status === 'verified' ? '' : ' · ' + (KB_STATUS_LABEL[k.status] ?? '')),
+    meta: oneLine(k.summary ?? ''),
+    text: prompt ? body : kbText(k.title, k.path),
+    secs,
+    hay: ((k.title ?? '') + ' ' + (k.summary ?? '') + ' ' + (secs.length ? secHay(secs) : '')).toLowerCase(),
+    ...(pre ? { pre: true } : {}),
+  } as QpItem & { pre?: boolean }
+}
 
- export class QuoteMenu {
-  private box: HTMLElement | null = null
-  private st: { len: number; query: string; hi: number; launch: number | null } | null = null
-  private dis: string | null = null
-  private skip = false
-  /** 最近一次弹出的「>」身份（光标前文字长度 + 筛选词 + 整段文字）。 */
-  private lastKey: string | null = null
+/**
+ * 八类 = 面板的行数据（顺序固定：任务 → 相关说明 → 知识卡 → 相关链接 → 相关文件 → 仓库 → 关联卡片 → 活跃会话）。
+ * 任务只列未完成的；子任务也只在未完成时出现（已完成条数写进 subDone / subTotal）。
+ */
+export function buildQuoteRows(src: QuoteSource): QpGroup[] {
+  const i = src.info()
+  const ci = i?.cardInfo
+  if (!ci) return []
+  const G: QpGroup[] = []
+  const qc = { tasks: ci.tasks.map((t) => ({ ...t, done: !!t.done })), links: ci.links.map((l) => ({ ...l, url: l.url })), files: ci.files.map((f) => ({ id: f.id, path: f.path, title: f.title, exists: f.exists })) }
+  const undone = ci.tasks.map((t, a) => ({ t, a })).filter(({ t }) => !t.done)
+  const doneN = ci.tasks.length - undone.length
+  G.push({
+    key: 'task', name: '任务', icon: 'task',
+    hint: '未完成 · 说明全文' + (doneN ? ' · 已完成 ' + doneN + ' 项不显示' : ''),
+    empty: '<b>任务都完成了</b> · 本版只列未勾选的' + (doneN ? '（已完成 ' + doneN + ' 项不显示）' : ''),
+    items: undone.map(({ t, a }) => {
+      const subsAll = t.subs ?? []
+      const subs = subsAll.map((x, k) => ({ x, k })).filter(({ x }) => !x.done)
+      const txt = taskText(qc, a)
+      const secs = splitSections(txt, { kind: 'task' })
+      return {
+        kind: 'task',
+        id: t.id ?? 't' + a,
+        title: t.text,
+        chip: t.type ?? '',
+        text: txt,
+        secs,
+        hay: ((t.text ?? '') + ' ' + txt + (secs.length ? ' ' + secHay(secs) : '')).toLowerCase(),
+        subDone: subsAll.filter((x) => x.done).length,
+        subTotal: subsAll.length,
+        subs: subs.map(({ x, k }) => {
+          const st = taskText(qc, a, k)
+          return { id: x.id ?? 's' + a + '_' + k, title: x.text, chip: x.type ?? '', text: st, secs: splitSections(st, { kind: 'task' }) }
+        }),
+      } as QpItem
+    }),
+  })
+  // v88：开关只影响 AI 自动注入 —— 关闭的说明照样出现在引用面板里，右侧标「不注入」
+  G.push({
+    key: 'note', name: '相关说明', icon: 'note', hint: '标题：内容',
+    items: ci.notes.map((n) => ({ kind: 'leaf', icon: 'note', id: n.t, title: n.t, chip: n.off ? '不注入' : '', meta: oneLine(n.v.split('\n')[0]), text: noteText(n.t, n.v) })),
+  })
+  const kbIds = (ci.kb ?? []).map((k) => ({ id: k.id, title: k.title, path: k.path, type: k.type }))
+  G.push({
+    key: 'kb', name: '知识卡', icon: 'kb', hint: 'prompt 插正文 · 其余引用原文',
+    items: kbIds.map((k) => kbRow(k as KbRef)),
+  })
+  warmKbSecs(kbIds, repaintQuotePanel)
+  G.push({
+    key: 'link', name: '相关链接', icon: 'link', hint: '标题（URL）· 星标镶金',
+    items: ci.links.map((l) => ({ kind: 'leaf', icon: 'link', id: l.id ?? l.url, title: l.text, chip: l.type || '无类型', meta: host(l.url), gold: !!l.star, text: linkText(l) })),
+  })
+  const dirs = ci.lfDirs ?? []
+  G.push({
+    key: 'file', name: '相关文件', icon: 'file', hint: '标题（路径）',
+    items: ci.files.map((f) => {
+      const ty = ftype(f.path)
+      return {
+        kind: 'leaf', icon: 'file', id: f.id ?? f.path, title: f.title || base(f.path),
+        chip: ty ? ty.label : '文件', meta: f.path, gone: !f.exists,
+        text: fileText({ path: f.path, title: f.title, exists: f.exists }),
+        ...(dirs.some((d) => f.path.startsWith(d + '/')) ? { lf: true } : {}),
+      } as QpItem
+    }),
+  })
+  G.push({
+    key: 'repo', name: '仓库', icon: 'repo', hint: '名字（路径）',
+    items: ci.repos.map((r) => ({ kind: 'leaf', icon: 'repo', id: r.path, title: r.name, chip: '仓库', meta: home(r.path), text: repoText(r.name, r.path) })),
+  })
+  G.push({
+    key: 'related', name: '关联卡片', icon: 'cards', hint: '名字（卡片组）',
+    items: (ci.related ?? []).map((x) => ({ kind: 'leaf', icon: 'cards', id: x.id, title: x.title, chip: x.group, meta: x.archived ? '已归档' : (x.stage ?? ''), text: cardText(x.title, x.group) })),
+  })
+  const AG = src.active().map((g) => ({ ...g, items: g.items.slice().sort((a, b) => (b.id === src.sid ? 1 : 0) - (a.id === src.sid ? 1 : 0)) }))
+  AG.sort((a, b) => (b.items.some((x) => x.id === src.sid) ? 1 : 0) - (a.items.some((x) => x.id === src.sid) ? 1 : 0))
+  G.push({
+    key: 'sess', name: '活跃会话', icon: 'chat', hint: '名字（卡片 · 会话）',
+    items: AG.flatMap((g) => g.items.map((x) => ({ kind: 'leaf', icon: 'chat', id: x.id, title: x.title, chip: x.card ?? '还没有卡片', meta: x.id === src.sid ? '当前会话' : g.name, text: sessionText(x.title, g.name, x.card ?? undefined, x.id) }))),
+  })
+  return G.filter((g) => g.items.length || g.key === 'task')
+}
+
+export class QuoteMenu {
+  private st: { len: number; q: string; ch: string; launch: number | null } | null = null
+  /** v171：用户主动收起后「别重开」= 触发位置 + 触发字符左边那段原文（继续打字不复活） */
+  private dis: { left: string; at: number; len: number } | null = null
+  /** v167：这次按下是否已经「收起过」面板（时间戳；不设成布尔，免得一次没配上 click 就把下次点击也吞掉）。 */
+  private skippedAt = 0
+
   private raf = 0
   private dead = false
+  private kbHits: QpItem[] = []
+  private kbQ = ''
+  private kbT = 0
+  /** v166：信息卡按钮（真正被点的那颗）—— 面板按它定位，不再按输入框 / 光标 */
+  private trigger: HTMLElement | null = null
+  /** v171：这一次弹的是哪种身份（「>」= quote /「）」= kb，同一块面板） */
+  private kind: 'quote' | 'kb' = 'quote'
+  private kbLoading = false
   constructor(private readonly root: HTMLElement, private readonly host: QuoteHost) {
-    document.addEventListener('keydown', this.onKey, true)
     document.addEventListener('input', this.onEdit, true)
     document.addEventListener('selectionchange', this.onEdit)
-    document.addEventListener('mousedown', this.onDown, true)
+    // v167：用 pointerdown（与面板自己的外部点击同相位，且本监听先注册）——
+    // 否则面板会先在 pointerdown 里关掉，这里就记不到「再点同一个按钮 = 收起」的 skip
+    document.addEventListener('pointerdown', this.onDown, true)
     window.addEventListener('resize', this.onResize)
   }
   dispose(): void {
     this.dead = true
     cancelAnimationFrame(this.raf)
-    document.removeEventListener('keydown', this.onKey, true)
     document.removeEventListener('input', this.onEdit, true)
     document.removeEventListener('selectionchange', this.onEdit)
-    document.removeEventListener('mousedown', this.onDown, true)
+    document.removeEventListener('pointerdown', this.onDown, true)
     window.removeEventListener('resize', this.onResize)
-    this.close()
+    closeQuotePanel('composer')
   }
   /** 本会话的输入框：和信息卡在同一个输入区里的 [data-composer-card] 下的 contenteditable。 */
   private editor(): HTMLElement | null {
@@ -116,144 +201,180 @@ export function buildQuoteGroups(src: QuoteSource): Group[] {
     if (this.dead || this.raf) return
     this.raf = requestAnimationFrame(() => { this.raf = 0; this.track() })
   }
-  private onResize = (): void => { if (this.box) this.place() }
+  private onResize = (): void => { /* 面板自己监听 resize 重定位 */ }
   private track(): void {
     const ed = this.editor()
     // 0.27.2 与「/」菜单一致：焦点离开输入框（点了输入区里的工具栏等）不关，只有按在输入区外（onDown）/ Esc / 光标挪出「>」词才关
-    if (!ed) return this.close()
+    if (!ed) return closeQuotePanel('composer')
     if (document.activeElement !== ed) return
     const ci = this.host.info()?.cardInfo
-    if (!ci || !this.host.actions()) return this.close()
+    if (!ci || !this.host.actions()) return closeQuotePanel('composer')
     const p = this.prefix()
-    if (!p) return this.close()
+    if (!p) return closeQuotePanel('composer')
     // 信息卡按钮打开的：光标前从打开处起的文字当筛选词；遇到空白 / 光标退到打开处之前就关
     if (this.st?.launch !== null && this.st?.launch !== undefined) {
-      const now = this.host.actions()!.captureInsertion().start
-      const n = now - this.st.launch
-      const q = n > 0 ? p.text.slice(-n) : ''
-      if (n < 0 || /\s/.test(q) || q.length !== n) return this.close()
-      this.st.len = n; this.st.query = q; return this.paint()
+      /* v167：这块面板没有「触发词」可依赖，唯一存活条件 = 面板还开着。关掉之后光标动一下、
+         退格回空、再打普通文字，都不许把它复活（用户报的「怎么也关不掉」的根因）。
+         丢掉 launch 态后继续往下走：这一次输入可能正是新打的「>」，别把它吞掉。 */
+      if (!isQuotePanelOpen()) {
+        this.st = null; this.trigger = null
+      } else {
+        const now = this.host.actions()!.captureInsertion().start
+        const n = now - this.st.launch
+        const q = n > 0 ? p.text.slice(-n) : ''
+        if (n < 0 || /\s/.test(q) || q.length !== n) return closeQuotePanel('composer')
+        if (n === 0) { // 没在打字：保持现状；删回空词时才把筛选刷回全量
+          if (this.st.len !== 0 || this.st.q !== '') { this.st.len = 0; this.st.q = ''; this.paint() }
+          return
+        }
+        this.st.len = n; this.st.q = q; this.paint(); return
+      }
     }
     const hit = detectQuote(p.text, p.first)
-    // 0.27.2 同「/」：收起后光标挪开再挪回同一个「>」也不弹；文字变了（打字 / 删除）才清掉记忆
-    if (!hit) { if (this.dis && this.dis.split('|')[1] !== ed.textContent) this.dis = null; return this.close() }
-    const key = p.text.length + ':' + hit.query + '|' + ed.textContent
-    if (this.dis === key) return
-    this.lastKey = key
-    this.dis = null
-    const same = this.st && this.st.query === hit.query
-    this.st = { len: hit.len, query: hit.query, hi: same ? this.st!.hi : 0, launch: null }
+    const khit = hit ? null : detectKbQuote(p.text)
+    /* 输入变短 / 被清空 = 上一次的「别重开」作废（清空后再在行首打触发字符要能重新弹） */
+    if (this.dis && p.text.length < this.dis.len) this.dis = null
+    /* v171：主动收起过、还停在同一处触发位置、左边那段原文也没被改写 → 继续压着（继续打字不复活） */
+    if (this.dis) {
+      const h = hit ?? khit
+      const caret = this.host.actions()?.captureInsertion().start ?? 0
+      /* 变短 / 被清空也算「改写」：清空输入框后再在同一个位置打触发字符，要能重新弹 */
+      if (h && p.text.length >= this.dis.len && this.dis.at === caret - h.len && mutedBy(this.dis.left, p.text)) return closeQuotePanel('composer')
+      this.dis = null
+    }
+    /* v171：「）」/「)」（行首或空格后）= 知识卡引用；两种触发互不影响（同一个「别重开」记忆） */
+    if (!hit) {
+      if (!khit) { this.dis = null; return closeQuotePanel('composer') }
+      this.kind = 'kb'
+      this.st = { len: khit.len, q: khit.query, ch: '）', launch: null }
+      this.kbLoad()
+      this.paint()
+      return
+    }
+    this.kind = 'quote'
+    this.st = { len: hit.len, q: hit.query, ch: this.chOf(hit.len), launch: null }
+    this.kbQueue()
     this.paint()
   }
-  /** 信息卡「> 引用卡片内容」：在当前光标处打开（不插入「>」）。 */
-  launch(): void {
+  private chOf(len: number): string {
+    const p = this.prefix()
+    const t = p ? p.text : ''
+    return t[t.length - len] === '》' ? '》' : '>'
+  }
+  /** 信息卡「> 引用卡片内容」：在当前光标处打开（不插入「>」）。trigger = 被点的那颗按钮（v166 锚点）。 */
+  launch(trigger?: HTMLElement): void {
     // 0.27.1 再点一次「> 引用卡片内容」= 收起（按下时 onDown 已关掉并记下）
-    if (this.skip) { this.skip = false; return }
+    if (this.skippedAt && Date.now() - this.skippedAt < 500) { this.skippedAt = 0; return }
     const ed = this.editor(), ia = this.host.actions()
     if (!ed || !ia) { this.host.toast('没找到这个会话的输入框，没法插入引用', 'err'); return }
     // 按钮在 mousedown 时已阻止抢焦点：输入框焦点与光标都还在，直接从当前光标处打开
     if (document.activeElement !== ed) ed.focus()
-    this.st = { len: 0, query: '', hi: 0, launch: ia.captureInsertion().start }
+    this.trigger = trigger ?? null
+    this.kind = 'quote'
+    this.st = { len: 0, q: '', ch: '>', launch: ia.captureInsertion().start }
     this.paint()
   }
-  private groups(): Group[] { return buildQuoteGroups(this.host) }
-
-  /** 筛选：标题 / 别名包含输入的字；子任务命中时带出它的父任务；链接分类小标题跟着第一条走。 */
-  private list(): Group[] {
-    const k = (this.st?.query ?? '').trim().toLowerCase()
-    return this.groups().map((g) => {
-      const secOf = new Map<Item, string>(); let cur = ''
-      for (const x of g.items) { if (x.sec) cur = x.sec; if (cur) secOf.set(x, cur) }
-      const keep = new Set<number>()
-      g.items.forEach((x, i) => { if (!k || (x.name + ' ' + (x.alias ?? '') + ' ' + (x.kw ?? '')).toLowerCase().includes(k)) { keep.add(i); if (x.parent !== undefined) keep.add(x.parent) } })
-      let last = ''
-      const items = g.items.filter((_, i) => keep.has(i)).map((x) => { const sc = secOf.get(x) ?? ''; const o = { ...x, sec: sc && sc !== last ? sc : null }; last = sc; return o })
-      return { t: g.t, items }
-    }).filter((g) => g.items.length)
+  /** 组数据 = 八类 + 输入词搜到的知识卡（前 8 条，按 id 去掉已挂的）。 */
+  private groups(): QpGroup[] {
+    const G = buildQuoteRows(this.host)
+    if (!this.kbHits.length) return G
+    const g = G.find((x) => x.key === 'kb')
+    if (!g) return G
+    const have = new Set(g.items.map((x) => x.id))
+    const add = this.kbHits.filter((x) => !have.has(x.id)).slice(0, 8)
+    if (add.length) g.items = g.items.concat(add)
+    return G
   }
-  private place(): void {
-    const box = this.box, c = this.card()
-    if (!box || !c) return
-    const r = c.getBoundingClientRect()
-    box.style.left = r.left + 'px'
-    box.style.width = r.width + 'px'
-    box.style.bottom = (innerHeight - r.top + 8) + 'px'
-    box.style.maxHeight = Math.max(160, Math.min(400, r.top - 84)) + 'px'
+  /* ── v171：知识卡身份的数据（全量六类分组；提示词正文按需预取，到齐后重画一次） ── */
+  private kbLoad(): void {
+    const again = (): void => { if (!this.dead && isQuotePanelOpen()) this.paint() }
+    const had = kbCardsNow()
+    if (had) { warmKbBodies(had, again); return }
+    if (this.kbLoading) return
+    this.kbLoading = true
+    void ensureKbCards().then((cards) => { this.kbLoading = false; warmKbBodies(cards, again); again() }).catch(() => { this.kbLoading = false })
+  }
+  /* ── v163 S10：输入词 → host /kb/search（160ms 防抖），结果并进「知识卡」组 ── */
+  private kbQueue(): void {
+    const q = (this.st?.q ?? '').trim()
+    if (q === this.kbQ) return
+    this.kbQ = q
+    clearTimeout(this.kbT)
+    if (this.kbHits.length) { this.kbHits = []; this.paint() }
+    if (!q) return
+    this.kbT = window.setTimeout(() => {
+      void searchKb(q, { limit: 12 }).then((r) => {
+        if (this.dead || (this.st?.q ?? '').trim() !== q) return
+        this.kbHits = (r.cards ?? []).map((c) => kbRow({ id: c.id, title: c.title, type: c.type, status: c.status, summary: c.summary, path: c.path }, true))
+        this.paint()
+      }).catch(() => undefined)
+    }, 160)
   }
   private paint(): void {
-    const st = this.st, i = this.host.info()
-    if (!st || !i?.card) return this.close()
-    const G = this.list(), flat = G.flatMap((g) => g.items)
-    if (st.hi >= flat.length) st.hi = Math.max(0, flat.length - 1)
-    let n = 0
-    const body = G.map((g) => '<div class="qm-g" role="presentation">' + esc(g.t) + '</div>' + g.items.map((x) => {
-      const id = n++
-      return (x.sec ? '<div class="qm-s" role="presentation">' + esc(x.sec) + '</div>' : '') + '<button type="button" tabindex="-1" role="option" id="dpmQo' + id + '" class="qm-i' + (x.lv ? ' lv1' : '') + (x.cls ? ' ' + x.cls : '') + (id === st.hi ? ' on' : '') + '" aria-selected="' + (id === st.hi) + '" data-qi="' + id + '">' + x.icon + '<span class="qn">' + esc(x.name) + '</span>' + (x.alias ? '<span class="qa">' + esc(x.alias) + '</span>' : '') + (x.desc ? '<span class="qd">' + x.desc + '</span>' : '') + '</button>'
-    }).join('')).join('')
-    const cur = flat[st.hi]
-    const q = st.query
-    const fresh = !this.box
-    if (!this.box) { this.box = document.createElement('div'); this.box.className = 'dpm-qm'; document.body.append(this.box); this.box.addEventListener('mousemove', this.onMove) }
-    // 0.27.1 入场动画只在第一次出现时播；之后光标移动 / 筛选只换内容（原来每次重画都重播 = 闪）
-    const inner = '<div class="qm-h">' + ic('cards') + '引用卡片<b>「' + esc(i.card.title) + '」</b>' + (q ? '<span>筛选</span><span class="q">' + esc(q) + '</span>' : '') + '</div>'
-      + '<div class="qm-v" role="listbox" aria-label="卡片内容"' + (cur ? ' aria-activedescendant="dpmQo' + st.hi + '"' : '') + '>' + (body || '<div class="qm-e">' + (q ? '没有和「' + esc(q) + '」匹配的内容' : '这张卡片还没有可以引用的内容') + '</div>') + '</div>'
-      + (cur ? '<div class="qm-f"><span class="pv"><b>将插入</b>　' + esc(this.pv(cur.text)) + '</span><span class="keys"><kbd>↑</kbd><kbd>↓</kbd>选择　<kbd>↵</kbd>插入　<kbd>esc</kbd>关闭</span></div>' : '')
-    // 0.27.2 .qm 外框只在第一次建（带入场动画），之后只换里面内容：同一帧里 input / selectionchange / 点输入框连着重画，也不会重播动画
-    const frame = this.box.firstElementChild as HTMLElement | null
-    if (fresh || !frame) this.box.innerHTML = '<div class="qm in" role="dialog" aria-label="引用卡片内容">' + inner + '</div>'
-    else frame.innerHTML = inner
-    this.place()
-    const o = this.box.querySelector('#dpmQo' + st.hi) as HTMLElement | null, v = this.box.querySelector('.qm-v') as HTMLElement | null
-    if (o && v) { const a = o.offsetTop, b = a + o.offsetHeight; if (a < v.scrollTop) v.scrollTop = a - 30; else if (b > v.scrollTop + v.clientHeight) v.scrollTop = b - v.clientHeight + 4 }
+    const st = this.st
+    const i = this.host.info()
+    if (!st || !i?.card) return closeQuotePanel('composer')
+    const ed = this.editor()
+    const anchor = (this.card() ?? ed) as HTMLElement | null
+    if (!anchor) return closeQuotePanel('composer')
+    /* v166：定位锚点 = 按钮 / 信息卡（含按钮的那一整行），不是输入框；anchor 仍留输入区（点输入框不关面板）。
+       按钮路径才有 trigger；打字「>」路径没有 trigger，靠 place 落到信息卡上方。 */
+    const place = (this.trigger?.closest('.dpm-sic') as HTMLElement | null)
+      ?? (document.querySelector('.dpm-dock.dpm-sic') as HTMLElement | null)
+      ?? (this.card() as HTMLElement | null)
+    openQuotePanel({
+      kind: this.kind,
+      where: 'composer',
+      label: 'DSH 对话框',
+      card: i.card.title,
+      cardId: i.card.id,
+      anchor,
+      trigger: this.trigger ?? undefined,
+      place: place ?? undefined,
+      host: document.body,
+      hit: { len: st.len, q: st.q, ch: st.ch },
+      build: () => (this.kind === 'kb' ? kbQuoteGroups(kbCardsNow() ?? []) : this.groups()),
+      insert: (text, hit) => this.insert(text, hit),
+      toast: (m, k) => this.host.toast(m, k),
+      /* v171：Esc / 点外面收起也记「别重开」（与 richnote / 任务说明同一条规则） */
+      onClose: (how) => { if (how === 'esc' || how === 'outside') this.remember() },
+    })
   }
-  private pv(t: string): string { return t.slice(1, -1).split('\n').slice(0, 3).join(' ⏎ ') }
-  private onMove = (e: MouseEvent): void => {
-    const it = (e.target as HTMLElement).closest?.('[data-qi]') as HTMLElement | null
-    if (!it || !this.st || +(it.dataset.qi as string) === this.st.hi) return
-    this.st.hi = +(it.dataset.qi as string)
-    this.box?.querySelectorAll('.qm-i.on').forEach((x) => { x.classList.remove('on'); x.setAttribute('aria-selected', 'false') })
-    it.classList.add('on'); it.setAttribute('aria-selected', 'true')
-    const cur = this.list().flatMap((g) => g.items)[this.st.hi], pv = this.box?.querySelector('.qm-f .pv')
-    if (cur && pv) pv.innerHTML = '<b>将插入</b>　' + esc(this.pv(cur.text))
-  }
-  private close(): void { this.st = null; this.box?.removeEventListener('mousemove', this.onMove); this.box?.remove(); this.box = null }
-  private pick(i: number): void {
-    const st = this.st, ia = this.host.actions()
-    const x = this.list().flatMap((g) => g.items)[i]
-    if (!st || !x || !ia) return
+  /** 插入：引用原文直接在「空格 + >筛选词」处插成胶囊（宿主 insert-reference）；接不住才退回插文字。 */
+  private insert(text: string, hit: { len: number; q: string; ch?: string }): void {
+    const ia = this.host.actions()
+    const st = this.st
+    if (!ia) return
     const cur = ia.captureInsertion()
-    const span = { start: st.launch ?? cur.start - st.len, end: cur.start, draftRev: cur.draftRev }
-    this.close()
-    /* v138（2.1）：引用原文直接在「空格 + >筛选词」处插成胶囊（宿主 insert-reference）；接不住才退回插文字 */
+    const span = { start: st?.launch ?? cur.start - (hit.len || 0), end: cur.start, draftRev: cur.draftRev }
     const cx = (window as unknown as { __dpmComposer?: { insertAt(sid: string, c: string, sp: Span): boolean } }).__dpmComposer
-    if (cx?.insertAt(this.host.sid, x.text, span)) { this.editor()?.focus(); return }
-    if (!ia.insertText(x.text, span)) this.host.toast('插入引用失败：输入框内容刚刚变了，再选一次', 'err')
+    if (cx?.insertAt(this.host.sid, text, span)) { this.editor()?.focus(); return }
+    if (!ia.insertText(text, span)) this.host.toast('插入引用失败：输入框内容刚刚变了，再选一次', 'err')
     this.editor()?.focus()
   }
-  private onDown = (e: MouseEvent): void => {
-    if (!this.box) return
+  private onDown = (e: PointerEvent): void => {
     const t = e.target as HTMLElement
-    if (this.box.contains(t)) { e.preventDefault(); const it = t.closest('[data-qi]') as HTMLElement | null; if (it) this.pick(+(it.dataset.qi as string)); return }
+    /* v179：分段列表挂在面板外面 —— 点它不算「点外面」（否则 pointerdown 先关面板，分段卡的 click 就落空） */
+    if (t.closest?.('.qpn-sgs')) return
+    if (isQuotePanelOpen() && t.closest?.('.qpn')) return
+    if (!isQuotePanelOpen()) return
     // 0.27.2 与宿主「/」菜单一致（dsh-client-ui-input-trigger：pointerdown 在 [data-composer-card] 里不关）：
     // 输入区里按下不关，光标还在「>」词里就留着，挪出去由 track 关、挪回来再弹；输入区外按下 = 收起并记住同一个「>」
-    if (t.closest?.('[data-qopen]')) { this.skip = true; this.dismiss(); return }
+    if (t.closest?.('[data-qopen]')) { this.skippedAt = Date.now(); this.dismiss(); return }
     if (this.card()?.contains(t)) return
     this.dismiss()
   }
-  /** 收起并记住当前「>」：track 看到同一个触发词不再弹。 */
-  private dismiss(): void {
-    // 按在输入区外时浏览器先把选区挪走了，prefix() 已读不到 → 用最后一次 track 记下的同一个「>」
-    if (this.st && this.st.launch === null) this.dis = this.lastKey
-    this.close()
+  /** 收起并记住当前触发位置：track 看到同一处触发词不再弹。 */
+  private remember(): void {
+    const st = this.st
+    const p = this.prefix()
+    /* 信息卡按钮那条路径没有触发词：不记 */
+    if (!st || !p || st.launch !== null) { this.dis = null; return }
+    const caret = this.host.actions()?.captureInsertion().start ?? 0
+    this.dis = { left: leftOf(p.text, st.len), at: caret - st.len, len: p.text.length }
   }
-  private onKey = (e: KeyboardEvent): void => {
-    if (!this.st || !this.box || e.isComposing || e.keyCode === 229) return
-    const ed = this.editor()
-    if (!ed || document.activeElement !== ed) return
-    const n = this.list().flatMap((g) => g.items).length
-    const stop = (): void => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation() }
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { stop(); if (n) { this.st.hi = (this.st.hi + (e.key === 'ArrowDown' ? 1 : -1) + n) % n; this.paint() } return }
-    if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && n) { stop(); this.pick(this.st.hi); return }
-    if (e.key === 'Escape') { stop(); this.dismiss() }
+  private dismiss(): void {
+    this.remember()
+    closeQuotePanel('composer')
   }
 }

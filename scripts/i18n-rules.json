@@ -1,0 +1,787 @@
+[
+ [
+  "^复制卡片「(.+)」$",
+  "",
+  "Copy card — $1"
+ ],
+ [
+  "^加星标「(.+)」$",
+  "",
+  "Star — $1"
+ ],
+ [
+  "^把「(.+)」设为 pending$",
+  "",
+  "Set pending — $1"
+ ],
+ [
+  "^打开卡片详情：(.+)$",
+  "",
+  "Open card — $1"
+ ],
+ [
+  "^打开卡片详情（右侧面板，不切看板）$",
+  "",
+  "Open card details (right panel, no view switch)"
+ ],
+ [
+  "^调整「(.+)」的顺序$",
+  "",
+  "Reorder — $1"
+ ],
+ [
+  "^归档卡片组「(.+)」$",
+  "",
+  "Archive group — $1"
+ ],
+ [
+  "^归档项目（v(\\d+)：甘特图不再显示）$",
+  "",
+  "Archive project (v$1: hidden from the gantt)"
+ ],
+ [
+  "^收起「(.+)」下的任务$",
+  "",
+  "Collapse tasks under — $1"
+ ],
+ [
+  "^收起「(.+)」下的子任务$",
+  "",
+  "Collapse subtasks under — $1"
+ ],
+ [
+  "^收起项目组「(.+)」$",
+  "",
+  "Collapse group — $1"
+ ],
+ [
+  "^收起子任务（点行内空白也能开合）$",
+  "",
+  "Collapse subtasks (blank space in the row also toggles)"
+ ],
+ [
+  "^收起任务（点行内空白也能开合）$",
+  "",
+  "Collapse tasks (blank space in the row also toggles)"
+ ],
+ [
+  "^收起这一组的项目（点整行也能开合）$",
+  "",
+  "Collapse this group (the whole row toggles)"
+ ],
+ [
+  "^只看 #(\\S+)（(\\d+) 张）$",
+  "",
+  "Only #$1 ($2)"
+ ],
+ [
+  "^还有 (\\d+) 张活跃卡片，全部归档后才能归档$",
+  "",
+  "$1 active cards left — archive them before archiving the group"
+ ],
+ [
+  "^还有 (\\d+) 个任务未完成，不能归档$",
+  "",
+  "$1 tasks unfinished — cannot archive yet"
+ ],
+ [
+  "^还有 (\\d+) 个任务绑定$",
+  "",
+  "$1 task links"
+ ],
+ [
+  "^会话「(.+)」 · 会话执行中$",
+  "",
+  "Session — $1 · running"
+ ],
+ [
+  "^会话「(.+)」 · 会话空闲中$",
+  "",
+  "Session — $1 · idle"
+ ],
+ [
+  "^会话「(.+)」 · 会话等待中$",
+  "",
+  "Session — $1 · waiting"
+ ],
+ [
+  "^会话「(.+)」 · 会话完成输出$",
+  "",
+  "Session — $1 · output ready"
+ ],
+ [
+  "^(\\d{4}-\\d{2}-\\d{2}) · 点它打开任务面板$",
+  "",
+  "$1 · open that day"
+ ],
+ [
+  "^(\\d{4}-\\d{2}-\\d{2}) · 任务面板正在看这一天$",
+  "",
+  "$1 · task panel is on this day"
+ ],
+ [
+  "^今天 · 点它打开今天的任务面板$",
+  "",
+  "Today · open today's task panel"
+ ],
+ [
+  "^(\\d+) 组 · (\\d+) 项 · (\\d+) 组有活跃会话$",
+  "",
+  "$1 groups · $2 items · $3 with live sessions"
+ ],
+ [
+  "^共 (\\d+) 组 · (\\d+) 项$",
+  "",
+  "$1 groups · $2 items"
+ ],
+ [
+  "^组状态同步 · (\\d+) 展开 ～ (\\d+) 收起$",
+  "",
+  "sync · $1 expanded / $2 collapsed"
+ ],
+ [
+  "^(\\d+) 个项目组都展开$",
+  "",
+  "expand all $1 groups"
+ ],
+ [
+  "^(\\d+) 个仓库 · (\\d+) 个阶段$",
+  "",
+  "$1 repos · $2 stages"
+ ],
+ [
+  "^(\\d+) 张卡片$",
+  "",
+  "$1 cards"
+ ],
+ [
+  "^(\\d+) 张$",
+  "",
+  "$1"
+ ],
+ [
+  "^(\\d+) 项目 · 实际 (\\d+) 天$",
+  "",
+  "$1 projects · $2 days actual"
+ ],
+ [
+  "^(\\d+) 项目 · Pending (\\d+) · 实际 (\\d+) 天$",
+  "",
+  "$1 projects · $2 pending · $3 days actual"
+ ],
+ [
+  "^记录今天已执行：(.+)$",
+  "",
+  "Log today — $1"
+ ],
+ [
+  "^记录执行：(.+)$",
+  "",
+  "Log run — $1"
+ ],
+ [
+  "^完成子任务「(.+)」；和卡片详情同一个状态$",
+  "",
+  "Complete subtask — $1; same state as the card detail"
+ ],
+ [
+  "^完成任务「(.+)」；和卡片详情里的勾选是同一个状态$",
+  "",
+  "Complete task — $1; same checkbox as the card detail"
+ ],
+ [
+  "^项目「(.+)」有 (\\d+) 个会话 点一下立即打开这个会话$",
+  "",
+  "Project — $1 has $2 sessions; click to open"
+ ],
+ [
+  "^以此任务创建会话：新建一个会话，自动关联这张卡片和这个任务$",
+  "",
+  "New session from this task: it is linked to the card and the task"
+ ],
+ [
+  "^以此卡片创建会话：新建一个会话，自动关联这张卡片$",
+  "",
+  "New session from this card: it is linked to the card"
+ ],
+ [
+  "^加星标：点亮后这张卡片在四处都镶金边$",
+  "",
+  "Star: lights up in all four places"
+ ],
+ [
+  "^队列中的消息$",
+  "",
+  "Queued message"
+ ],
+ [
+  "^(\\d+) 张卡片$",
+  "",
+  "$1 cards"
+ ],
+ [
+  "^(\\d+) 张$",
+  "",
+  "$1"
+ ],
+ [
+  "^(\\d+) 张 · (\\d+) 类型 · 挂载 (\\d+) 张$",
+  "",
+  "$1 cards · $2 types · $3 mounted"
+ ],
+ [
+  "^显示 (\\d+) 张$",
+  "",
+  "Showing $1"
+ ],
+ [
+  "^组状态同步 · (\\d+) 展开 \\/ (\\d+) 收起$",
+  "",
+  "Synced · $1 expanded / $2 collapsed"
+ ],
+ [
+  "^(\\d+) 个活跃卡片组 · (\\d+) 个有关联活跃会话的卡片$",
+  "",
+  "$1 active groups · $2 cards with live sessions"
+ ],
+ [
+  "^还有 (\\d+) 张活跃卡片，全部归档后才能归档卡片组$",
+  "",
+  "$1 active cards left — archive them before archiving the group"
+ ],
+ [
+  "^(\\d+)b · ([\\d.]+) 万字 · (\\d+) 个文件$",
+  "",
+  "$10 · 23k words · 20 files"
+ ],
+ [
+  "^(\\d{1,2}-\\d{1,2}) (\\d{1,2}:\\d{2})$",
+  "",
+  "Updated $1 $2"
+ ],
+ [
+  "^(\\d+) 个项目 · 与任务日程看板页头「共 (\\d+) 组 · (\\d+) 项」同一个数（.+）$",
+  "",
+  "$1 projects · same count as the “$2 groups · $3 items” header (project total across groups; pending and archived excluded; collapsed groups count)"
+ ],
+ [
+  "^(\\d+) 个文件$",
+  "",
+  "$1 files"
+ ],
+ [
+  "^(.+) · 只读；资料仍可查看和引用$",
+  "",
+  "$1 · read-only; profile still viewable and quotable"
+ ],
+ [
+  "^更新 (\\d{1,2}-\\d{1,2}) (\\d{1,2}:\\d{2})$",
+  "",
+  "Updated $1 $2"
+ ],
+ [
+  "^卡片：(.+)$",
+  "",
+  "Card: $1"
+ ],
+ [
+  "^(.+)，打开详情$",
+  "",
+  "$1 · open details"
+ ],
+ [
+  "^加星标「(.+)」：加星 = 看板卡金徽标 \\/ 详情整窗金框 \\/ 甘特图目录格金徽标 \\/ 任务执行安排左上角金角签$",
+  "",
+  "Star — $1: gold badge on the card, gold frame in the detail, gold badge in the gantt, gold corner tab in Task execution"
+ ],
+ [
+  "^添加 (\\d{2}-\\d{2}) (\\d{2}:\\d{2}) · 修改 (\\d{2}-\\d{2}) (\\d{2}:\\d{2})$",
+  "",
+  "Added $1 $2 · edited $3 $4"
+ ],
+ [
+  "^(.+) · (\\d+) 张$",
+  "",
+  "$1 · $2 cards"
+ ],
+ [
+  "^(.+)，打开详情 \\| (.+)$",
+  "",
+  "$1 · open details | $2"
+ ],
+ [
+  "^超过\\ ([\\d.]+)\\ MB\\ 的文件都会先问一次，不再直接失败$",
+  "",
+  "Files over $1 MB always ask once instead of failing"
+ ],
+ [
+  "^本组卡片关联的会话里，没归档的有\\ ([\\d.]+)\\ 个（实时）$",
+  "",
+  "$1 live sessions across this group's cards (live)"
+ ],
+ [
+  "^更新\\ (\\d{4}-\\d{2}-\\d{2})\\ ([\\d.]+):([\\d.]+)$",
+  "",
+  "Updated $1 $2:$3"
+ ],
+ [
+  "^([\\d.]+)\\ 张$",
+  "",
+  "$1"
+ ],
+ [
+  "^([\\d.]+)\\ 字$",
+  "",
+  "$1 chars"
+ ],
+ [
+  "^显示\\ ([\\d.]+)\\ 张$",
+  "",
+  "Showing $1"
+ ],
+ [
+  "^落盘项目\\ ([\\d.]+)$",
+  "",
+  "Landed project $1"
+ ],
+ [
+  "^([\\d.]+)\\ 个活跃会话$",
+  "",
+  "$1 live sessions"
+ ],
+ [
+  "^超过\\ ([\\d.]+)\\ MB$",
+  "",
+  "over $1 MB"
+ ],
+ [
+  "^模拟\\ ([\\d.]+):([\\d.]+)$",
+  "",
+  "Simulate $1:$2"
+ ],
+ [
+  "^([\\d.]+)\\ 个会话，都已归档$",
+  "",
+  "$1 sessions, all archived"
+ ],
+ [
+  "^任务\\ ([\\d.]+)\\ \\/\\ ([\\d.]+)$",
+  "",
+  "Tasks $1 / $2"
+ ],
+ [
+  "^([\\d.]+)\\ 张卡片（不含已归档）$",
+  "",
+  "$1 cards (excluding archived)"
+ ],
+ [
+  "^共\\ ([\\d.]+)\\ 组\\ ·\\ ([\\d.]+)\\ 项$",
+  "",
+  "$1 groups · $2 items"
+ ],
+ [
+  "^([\\d.]+)\\ 个仓库\\ ·\\ ([\\d.]+)\\ 个阶段$",
+  "",
+  "$1 repos · $2 stages"
+ ],
+ [
+  "^已选\\ ([\\d.]+)\\ 条\\ ·\\ 点一条开始选$",
+  "",
+  "$1 selected · click one to start"
+ ],
+ [
+  "^任务\\ ([\\d.]+)\\/([\\d.]+)（已完成\\ \\/\\ 全部）$",
+  "",
+  "Tasks $1/$2 (done / all)"
+ ],
+ [
+  "^自动读取\\ ([\\d.]+)\\ 个落盘项目\\ \\+\\ 卡片资料$",
+  "",
+  "Auto-loads $1 landed projects + card profile"
+ ],
+ [
+  "^会占用\\ ([\\d.]+)\\ MB；合并\\ \\/\\ 备份会变慢$",
+  "",
+  "Uses $1 MB; merges and backups get slower"
+ ],
+ [
+  "^还有\\ ([\\d.]+)\\ 张活跃卡片，全部归档后才能归档$",
+  "",
+  "$1 active cards left — archive them first"
+ ],
+ [
+  "^组状态同步\\ ·\\ ([\\d.]+)\\ 展开\\ \\/\\ ([\\d.]+)\\ 收起$",
+  "",
+  "Synced · $1 expanded / $2 collapsed"
+ ],
+ [
+  "^这个文件\\ ([\\d.]+)\\ MB，超过落盘项目的默认上限$",
+  "",
+  "This file is $1 MB, over the landed-project default limit"
+ ],
+ [
+  "^：host\\ 与\\ client\\ 都要\\ ([\\d.]+)\\ 报错$",
+  "",
+  ": host and client must both be $1 errors"
+ ],
+ [
+  "^项目组展开\\ \\/\\ 收起与项目看板同源：([\\d.]+)\\ 组展开，([\\d.]+)\\ 组收起$",
+  "",
+  "Same state as Project Board: $1 expanded, $2 collapsed"
+ ],
+ [
+  "^(\\d+) 个活跃$",
+  "",
+  "$1 active"
+ ],
+ [
+  "^(\\d+) 项$",
+  "",
+  "$1 items"
+ ],
+ [
+  "^(\\d+) 个项目$",
+  "",
+  "$1 projects"
+ ],
+ [
+  "^推荐 (\\d+)$",
+  "",
+  "$1 recommended"
+ ],
+ [
+  "^跨天 (\\d+)$",
+  "",
+  "$1 carried over"
+ ],
+ [
+  "^(\\d+) 张 · (\\d+) 类型$",
+  "",
+  "$1 cards · $2 types"
+ ],
+ [
+  "^个任务已完成，共 (\\d+) 个$",
+  "",
+  " of $1 done"
+ ],
+ [
+  "^，([\\d.]+) 个活跃会话$",
+  "",
+  ", $1 live sessions"
+ ],
+ [
+  "^，([\\d.]+) 个活跃会话，([\\d.]+) 个已归档$",
+  "",
+  ", $1 live sessions, $2 archived"
+ ],
+ [
+  "^，([\\d.]+) 个会话，都已归档$",
+  "",
+  ", $1 sessions, all archived"
+ ],
+ [
+  "^还有 (\\d+) 张卡片没归档，全部归档后才能归档卡片组$",
+  "",
+  "$1 cards still active — archive them before archiving the group"
+ ],
+ [
+  "^还有 (\\d+) 张卡片没归档（含 (\\d+) 张 pending），全部归档后才能归档卡片组$",
+  "",
+  "$1 cards still active ($2 pending) — archive them before archiving the group"
+ ],
+ [
+  "^还有 (\\d+) 个任务未完成，完成后才能归档$",
+  "",
+  "$1 tasks unfinished — complete them before archiving"
+ ],
+ [
+  "^归档卡片组「(.+)」：还有 (\\d+) 张卡片没归档，全部归档后才能归档卡片组$",
+  "",
+  "Archive group “$1”: $2 cards still active — archive them before archiving the group"
+ ],
+ [
+  "^归档卡片组「(.+)」：还有 (\\d+) 张卡片没归档（含 (\\d+) 张 pending），全部归档后才能归档卡片组$",
+  "",
+  "Archive group “$1”: $2 cards still active ($3 pending) — archive them before archiving the group"
+ ],
+ [
+  "^「(.+)」还有 (\\d+) 个任务未完成，完成后才能归档$",
+  "",
+  "“$1” has $2 tasks unfinished — complete them before archiving"
+ ],
+ [
+  "^(\\d+) 项 · 点它打开任务面板$",
+  "",
+  "$1 items · click to open today's task panel"
+ ],
+ [
+  "^个活跃$",
+  "",
+  " active"
+ ],
+ [
+  "^个已归档$",
+  "",
+  " archived"
+ ],
+ [
+  "^张$",
+  "",
+  " cards"
+ ],
+ [
+  "^项$",
+  "",
+  " items"
+ ],
+ [
+  "^个项目$",
+  "",
+  " projects"
+ ],
+ [
+  "^已保存关联 · (\\d+) 个落盘项目$",
+  "",
+  "Links saved · $1 landed projects"
+ ],
+ [
+  "^ · 已完成 (\\d+) 项不显示$",
+  "",
+  " · $1 done items hidden"
+ ],
+ [
+  "^(\\d+) 个落盘项目$",
+  "",
+  "$1 landed projects"
+ ],
+ [
+  "^(.+) 类：插正文$",
+  "",
+  "$1 type: inserts the body"
+ ],
+ [
+  "^已归档 ([\\d-]+)$",
+  "",
+  "Archived $1"
+ ],
+ [
+  "^(\\d+) 个文件 · (\\d+) 个无用$",
+  "",
+  "$1 files · $2 unused"
+ ],
+ [
+  "^项目$",
+  "",
+  "projects"
+ ],
+ [
+  "^打开「(.+)」（还没有对话）$",
+  "",
+  "Open “$1” (no conversation yet)"
+ ],
+ [
+  "^删除「(.+)」$",
+  "",
+  "Delete “$1”"
+ ],
+ [
+  "^归档卡片「(.+)」$",
+  "",
+  "Archive card “$1”"
+ ],
+ [
+  "^取消星标「(.+)」$",
+  "",
+  "Remove star — $1"
+ ],
+ [
+  "^归档卡片组「(.+)」：还有 (\\d+) 张卡片没归档，全部归档后才能归档$",
+  "",
+  "Archive group “$1”: $2 cards still active — archive them first"
+ ],
+ [
+  "^归档卡片组「(.+)」：还有 (\\d+) 张卡片没归档（含 (\\d+) 张 pending），全部归档后才能归档$",
+  "",
+  "Archive group “$1”: $2 cards still active ($3 pending) — archive them first"
+ ],
+ [
+  "^调整「(.+)」的顺序：按住拖动，或 Alt\\+上下方向键$",
+  "",
+  "Reorder “$1”: drag, or Alt+↑/↓"
+ ],
+ [
+  "^(.+)，打开详情；Alt\\+上下方向键调整顺序$",
+  "",
+  "$1 — open details; Alt+↑/↓ reorders"
+ ],
+ [
+  "^本组里没归档的会话有 (\\d+) 个（实时）$",
+  "",
+  "$1 live sessions in this group (live)"
+ ],
+ [
+  "^(\\d+) 张卡片进行中。进行中 = 没归档、且至少有 1 个没归档会话的卡片（.+）$",
+  "",
+  "$1 cards in progress. In progress = not archived, with at least one live session (refreshes as soon as a session or card is archived or restored)"
+ ],
+ [
+  "^(\\d+) 个项目 · 与任务日程看板页头「共 N 组 · M 项」同一个数（.+）$",
+  "",
+  "$1 projects · the same count as the Task Schedule header (“N groups · M items”; pending and archived excluded, collapsed groups counted)"
+ ],
+ [
+  "^(\\d+) 个活跃会话，(\\d+) 个已归档$",
+  "",
+  "$1 live sessions, $2 archived"
+ ],
+ [
+  "^(\\d+) 个活跃会话$",
+  "",
+  "$1 live sessions"
+ ],
+ [
+  "^(\\d+) 个会话，都已归档$",
+  "",
+  "$1 sessions, all archived"
+ ],
+ [
+  "^在「(.+)」添加卡片$",
+  "",
+  "Add a card in “$1”"
+ ],
+ [
+  "^删除卡片「(.+)」？$",
+  "",
+  "Delete card “$1”?"
+ ],
+ [
+  "^删除卡片组「(.+)」？组里必须已经没有卡片。$",
+  "",
+  "Delete card group “$1”? The group must have no cards left."
+ ],
+ [
+  "^相关说明 · (\\d+)$",
+  "",
+  "Notes · $1"
+ ],
+ [
+  "^知识卡 · (\\d+)$",
+  "",
+  "Knowledge cards · $1"
+ ],
+ [
+  "^相关链接 · (\\d+)$",
+  "",
+  "Links · $1"
+ ],
+ [
+  "^相关文件 · (\\d+)$",
+  "",
+  "Files · $1"
+ ],
+ [
+  "^仓库 · (\\d+)$",
+  "",
+  "Repos · $1"
+ ],
+ [
+  "^关联卡片 · (\\d+)$",
+  "",
+  "Related cards · $1"
+ ],
+ [
+  "^已归档会话 · (\\d+)$",
+  "",
+  "Archived sessions · $1"
+ ],
+ [
+  "^已归档 (\\d+) 个$",
+  "",
+  "$1 archived"
+ ],
+ [
+  "^(\\d+) 项目$",
+  "",
+  "$1 projects"
+ ],
+ [
+  "^卡片详情 · 独立区域 · (\\d+)px$",
+  "",
+  "Card details · standalone area · $1px"
+ ],
+ [
+  "^编辑「(.+)」· 只刷新 updated，created \\/ 挂载关系不动$",
+  "",
+  "Editing “$1” · only updated is refreshed; created and mounts stay unchanged"
+ ],
+ [
+  "^(\\d+) 字$",
+  "",
+  "$1 characters"
+ ],
+ [
+  "^关联的落盘项目 · (\\d+)$",
+  "",
+  "Landed projects · $1"
+ ],
+ [
+  "^昨日 (\\d+)$",
+  "",
+  "Yest. $1"
+ ],
+ [
+  "^昨日自动 (\\d+)$",
+  "",
+  "Auto yest. $1"
+ ],
+ [
+  "^自动 (\\d+)$",
+  "",
+  "Auto $1"
+ ],
+ [
+  "^这 (\\d+) 项已过 00:00$",
+  "",
+  "$1 item(s) past 00:00 "
+ ],
+ [
+  "^过 00:00 · (\\d{4}-\\d{2}-\\d{2}) 自动记录执行 (\\d+) 项（.+） · 只记执行，不勾完成$",
+  "",
+  "Past 00:00 · $1 auto-recorded $2 item(s) · execution only, not completion"
+ ],
+ [
+  "^过 00:00 · (\\d{4}-\\d{2}-\\d{2}) 自动记录执行 (\\d+) 项 · 只记执行，不勾完成$",
+  "",
+  "Past 00:00 · $1 auto-recorded $2 item(s) · execution only, not completion"
+ ],
+ [
+  "^过 00:00 自动记录执行：(.+?)（.*）$",
+  "",
+  "Auto-recorded at 00:00: $1 (click to undo)"
+ ],
+ [
+  "^已勾选完成「(.+)」：今天的执行记录已锁定（先把勾选去掉才能撤销）$",
+  "",
+  "“$1” is completed: today's execution record is locked (uncheck it to undo)"
+ ],
+ [
+  "^(\\d{4}-\\d{2}-\\d{2}) 过了 00:00：(.+) 自动记录为当日执行（只记执行，不勾完成）· 点一下看昨天$",
+  "",
+  "$1 past 00:00: auto-recorded as executed (execution only, not completion) · click to view yesterday"
+ ],
+ [
+  "^这 (\\d+) 项是过 00:00 自动记录执行（(.+)；不是勾选完成）$",
+  "",
+  "$1 item(s) auto-recorded past 00:00 (not completion)"
+ ],
+ [
+  "^这 (\\d+) 项已过 00:00 自动记录执行（只记执行，不勾完成）—— 点一下看「本日已执行」$",
+  "",
+  "$1 item(s) auto-recorded past 00:00 (execution only, not completion) - click to view Executed today"
+ ],
+ [
+  "^(\\d{1,2}-\\d{1,2}) 截止$",
+  "",
+  "Due $1"
+ ]
+]

@@ -13,18 +13,21 @@
  * 是文本节点渲染槽（/goal 的 chip 走它）。整块替换 conversation.chat.node 要复刻宿主 hash 类名，
  * 风险高。所以按钮注入到 actions 条末尾，MutationObserver 在宿主重画后补回（幂等，只认自己的标记）。
  */
-import { ApiError, Card, FileRef, goalTitle, getSession, getSessionMessages, getState, HistoryMsg, openFileSmart, post, SessionInfo, Snapshot, Task, WebLink } from './api.js'
+import { ApiError, Card, FileRef, goalTitle, getKb, getKbCard, getSession, getSessionMessages, getState, HistoryMsg, KbRef, openFileSmart, post, SessionInfo, Snapshot, Task, WebLink } from './api.js'
 import { esc, ic } from './icons.js'
 import { appendNotes, autoTaskTitle, cleanTitle, deriveTaskTitle, detectSlash, showAddTaskButton } from '../goaltext.js'
-import { detectQuote, fileText as quoteFileText, findRefFile, linkText as quoteLinkText, noteText as quoteNoteText, refTitle, repoText as quoteRepoText } from '../quote.js'
-import type { ActiveGroup, Group as QGroup, QuoteSource } from './qmenu.js'
-import { buildQuoteGroups } from './qmenu.js'
+import { detectKbQuote, detectQuote, fileText as quoteFileText, findRefFile, kbText as quoteKbText, leftOf, linkText as quoteLinkText, mutedBy, noteText as quoteNoteText, refTitle, repoText as quoteRepoText } from '../quote.js'
+import { buildQuoteRows, type ActiveGroup, type QuoteSource } from './qmenu.js'
+import { closeQuotePanel, isQuotePanelOpen, openQuotePanel, quotePanelHit, quotePanelKind, type QpGroup, type QpHit } from './quotepanel.js'
 import { mountNoteDoc, type NoteDoc } from './notedoc.js'
 import { injCard, fileName, linkBuckets, newTaskId } from './board.js'
 import { chipIconSvg } from './chipicon.js'
+import { KB_STATUS_LABEL, KB_TYPE_LABEL } from './kb.js'
+import { ensureKbCards, kbCardsNow, kbQuoteGroups, warmKbBodies } from './kbdlg.js'
 import { NoteAssist } from './noteassist.js'
 import { IC as SIC, LB as SLB, openPicker, pickClose, sessDeps } from './sess.js'
 import { mountDue, mountModelCfg, stHtml, swHtml, swOn, swToggle, taskKeys, tipOff, tipOn, tmLoad, tmTip, zoneOfKeys } from './gtextra.js'
+import { openChip as openChipDetail, bubbleIsOpen, closeBubble, type BubbleCtx } from './detailbubble.js'
 
 /** 宿主 / 菜单的一个数据源（dsh-client-ui-input-trigger 的注册项；命令 + 技能各一个）。 */
 export interface SlashSource {
@@ -103,7 +106,7 @@ const ICO_REPO = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h6v
 
 type Msg = HistoryMsg
 type Mi = { g: string; t: string; d?: string; sub?: string; idx?: string; ins: string }
-interface Menu { kind: 'quote' | 'cmd'; hit: { len: number; query: string; ch?: string }; items: Mi[]; hi: number; el: HTMLElement; /** v97：只有键盘换高亮时才滚进视野 */ kbd?: boolean }
+interface Menu { kind: 'cmd'; hit: { len: number; query: string; ch?: string }; items: Mi[]; hi: number; el: HTMLElement; /** v97：只有键盘换高亮时才滚进视野 */ kbd?: boolean }
 
 /** v94：一个会话的历史消息分页状态（从新到旧；msgs 会把翻过的页都拼起来）。 */
 interface HistState { msgs: Msg[]; total: number; hasMore: boolean; before: number | null; loading: boolean; error: string }
@@ -138,7 +141,8 @@ interface Open {
   menu: Menu | null
   /** v140（2 位置 1）：关联卡片会话（编辑 = 即时；新增 = 随添加保存） */
   sess: string
-  muted: string | null
+  /** v171：收起后「别重开」= 触发位置 + 触发字符左边那段原文（继续打字不复活，换位置 / 改写左边才解除） */
+  muted: { at: number; left: string; len: number } | null
   /** v93：最近一次「自动标题」（说明第一行去掉 /goal；说明空 = ''）。标题未被手动改过就跟随它。 */
   titleAuto: string
   /** v93：用户在标题框里打过字 → 不再自动跟随；编辑态从一开始就不跟随。 */
@@ -314,6 +318,8 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       gen: false, addBusy: false, due: mode === 'edit' ? (found?.t.due ?? '') : '', sess: mode === 'edit' ? (found?.t.sess ?? '') : '',
     }
     const raw = mode === 'edit' ? '' : req.text.trim()
+    kbExtra.length = 0
+    void ensureKbRefs().then(() => { if (isQuotePanelOpen()) { if (quotePanelKind() === 'kb') showKbPanel(quotePanelHit()); else showQuotePanel(quotePanelHit()) } })
     if (req.note) {
       /* v144（1）：说明模式 —— 标题 = 说明标题（key，留空取内容前 20 字），说明框 = 说明内容（同一个块编辑器 + 识别器） */
       cur.titleTouched = true
@@ -370,6 +376,33 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
    * v98 ②：引用菜单的卡片数据 = 此刻快照里的「这张卡片」。
    * 不再走 getSession(sid).cardInfo —— 从详情打开时可能没有本卡片的会话，取到的是别的卡片的链接（实测 20 条 vs 2 条）。
    */
+  /** v165：任务弹窗的八类里也要有「知识卡」—— 看板只存挂载 id，名字 / 类型 / 摘要 / 正文从这里补（一次载入，进程内复用）。 */
+  let kbRefs: KbRef[] | null = null
+  let kbBusy = false
+  async function ensureKbRefs(): Promise<void> {
+    if (kbRefs || kbBusy) return
+    kbBusy = true
+    try {
+      const r = await getKb()
+      const items = r.cards ?? []
+      const refs: KbRef[] = items.map((k) => ({ id: k.id, title: k.title, type: k.type, status: k.status, summary: k.summary, path: k.path }))
+      /* 提示词类插正文：并发取正文（最多 20 张，取不到就退化成引用原文） */
+      const prompts = items.filter((k) => k.type === 'prompt').slice(0, 20)
+      await Promise.all(prompts.map(async (k) => {
+        try {
+          const r2 = await getKbCard(k.id)
+          const body = r2?.card?.body
+          if (body != null) { const ref = refs.find((x) => x.id === k.id); if (ref) ref.body = body }
+        } catch { /* 单张取不到不影响其它 */ }
+      }))
+      kbRefs = refs
+    } catch {
+      kbRefs = []
+    } finally {
+      kbBusy = false
+    }
+  }
+
   function cardInfoNow(): NonNullable<SessionInfo['cardInfo']> | null {
     const c = cur
     if (!c) return null
@@ -393,6 +426,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
         return { id: r.id, title: r.t, group: rg?.name ?? '', stage: rg?.statuses.find((x) => x.id === r.col)?.name ?? '', archived: !!r.archivedAt, dirs: [] }
       }),
       lfDirs: base?.lfDirs ?? [],
+      kb: (card.kb ?? []).map((a) => (kbRefs ?? []).find((k) => k.id === a.id)).filter((k): k is KbRef => !!k),
     }
   }
   /**
@@ -412,14 +446,15 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       if (!c2) return
       cur.snap = fresh
       cur.card = c2
-      if (cur.menu?.kind === 'quote') showMenu('quote', cur.menu.hit, quoteItems())
+      /* v171：刷新只换数据，不换身份 —— 开着的是知识卡面板就还按知识卡重开 */
+      if (isQuotePanelOpen()) { if (quotePanelKind() === 'kb') showKbPanel(quotePanelHit()); else showQuotePanel(quotePanelHit()) }
     } catch { /* 读不到就沿用现有快照，不假装有 */ } finally { refreshBusy = false }
   }
   function stopLive(): void { if (liveTimer) { clearInterval(liveTimer); liveTimer = 0 } }
   function startLive(): void {
     stopLive()
     liveTimer = window.setInterval(() => {
-      if (!dlg?.open || !cur || cur.menu?.kind !== 'quote') { stopLive(); return }
+      if (!dlg?.open || !cur || !isQuotePanelOpen()) { stopLive(); return }
       void refreshInfo()
     }, 2000)
   }
@@ -465,8 +500,11 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     const D = sessDeps()
     const st = c.sess && D ? D.st(c.sess) : null
     const nm = c.sess && D ? D.title(c.sess) : ''
-    f.innerHTML = '<span class="dpm-gff"><button type="button" class="dpm-gfb' + (st ? ' on s-' + st : '') + '" data-gt-sess aria-haspopup="listbox" aria-expanded="false" title="' + esc(st ? '已关联会话「' + nm + '」（' + SLB[st] + '）· 点一下更换' : '从这张卡片的会话里选一个，关联到这个任务') + '">'
-      /* v151（1.2）：状态图标 = 执行安排卡片「会话执行中」同一套（.dpm-sst .ic：绿底白圈转圈 + 光带扫过，同一个全局相位） */
+    /* v183（6）：底栏这一行不再自造大按钮 —— 和执行安排 / 卡片详情里的「会话状态」用同一个 .dpm-sst 胶囊；
+       一行 = 关联会话 + [胶囊][会话名][⌄] + × + 说明，单行不折行。 */
+    f.innerHTML = '<span class="dpm-gff">'
+      + '<span class="dpm-gfl">关联会话</span>'
+      + '<button type="button" class="dpm-gfs' + (st ? ' on s-' + st : '') + '" data-gt-sess aria-haspopup="listbox" aria-expanded="false" title="' + esc(st ? '已关联会话「' + nm + '」（' + SLB[st] + '）· 点一下更换' : '从这张卡片的会话里选一个，关联到这个任务') + '">'
       + (st ? '<span class="dpm-sst dpm-gfst s-' + st + '"' + (st === 'run' || st === 'done' ? ' style="--dpm-ph:-' + (performance.now() % 2400).toFixed(0) + 'ms"' : '') + '><span class="ic">' + SIC[st] + '</span><span class="lb">' + SLB[st] + '</span></span><b>' + esc(nm) + '</b>' : SIC.link + '<span>关联卡片会话</span>') + SIC.up + '</button>'
       + (st ? '<button type="button" class="dpm-gfx" data-gt-sessx title="取消关联" aria-label="取消关联的会话">' + SIC.x + '</button>' : '')
       + '<span class="dpm-gfh">' + (st ? (c.mode === 'edit' ? '即时生效' : '随「添加」一起保存') : '一个任务只关联一个会话') + '</span></span>'
@@ -961,28 +999,105 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     const nl = v.lastIndexOf('\n')
     return { para: v.slice(nl + 1), first: nl < 0 }
   }
-  /** v97：引用菜单的条目口径（与会话输入框同一份 buildQuoteGroups，只补展示需要的序号 / 副行 / 右侧标签）。 */
-  function quoteItems(): Mi[] {
+  /** v165：引用面板的八类数据（与会话输入框同一份 buildQuoteRows）。 */
+  function quoteRowsForPanel(): QpGroup[] {
     const ci = cardInfoNow()
     if (!ci) return []
     const info = { card: null, cardInfo: ci } as unknown as SessionInfo
     const src: QuoteSource = { info: () => info, active: () => opts.active?.() ?? [], sid: cur?.sid ?? '' }
-    const groups: QGroup[] = buildQuoteGroups(src)
-    const out: Mi[] = []
-    for (const g of groups) for (const it of g.items) {
-      const ins = it.text
-      if (!ins) continue
-      const mt = /^(\d+(?:\.\d+)?)[\u3000\s]+/.exec(it.name)
-      const idx = mt ? mt[1] : undefined
-      const t = mt ? it.name.slice(mt[0].length) : it.name
-      const desc = plain(it.desc ?? '') || it.alias || ''
-      if (g.t === '任务') out.push({ g: g.t, t, d: desc.replace(/^子任务 \d+\/\d+\s*/, '').trim(), ins, idx })
-      else if (g.t === '相关说明') {
-        const off = desc.includes('不注入')
-        out.push({ g: g.t, t, d: off ? '不注入' : '', sub: desc.replace(/不注入/g, '').trim(), ins })
-      } else out.push({ g: g.t, t, d: desc, ins })
+    return buildQuoteRows(src)
+  }
+  /** v171：收起面板后「别重开」—— 记触发字符左边那段原文（继续打字不复活，改写左边才解除）。 */
+  function rememberMute(): void {
+    const c = cur
+    if (!c) return
+    const p = paraBefore()
+    const q = detectQuote(p.para, p.first)
+    const h = q ?? detectKbQuote(p.para)
+    if (h) c.muted = { at: note().selectionStart - h.len, left: leftOf(p.para, h.len), len: note().value.length }
+  }
+  /** 任务说明 / 相关说明里的引用 = 同一个引用伴手弹窗（挂在任务弹窗里，top layer 不被盖住）。 */
+  function panelOpts(hit: QpHit): Parameters<typeof openQuotePanel>[0] | null {
+    const c = cur
+    if (!c) return null
+    const noteMode = c.nm !== null
+    const el = q<HTMLElement>('#dpmGtNote')
+    const anchor = (el?.closest('.gt-box') as HTMLElement | null) ?? el
+    if (!anchor) return null
+    return {
+      where: noteMode ? 'note' : 'task',
+      label: noteMode ? '相关说明' : '任务说明',
+      card: c.card.t,
+      cardId: c.card.id,
+      anchor,
+      host: dlg ?? undefined,
+      hit,
+      build: () => quoteRowsForPanel(),
+      add: (kind, h) => { void startQuoteAdd(kind, h) },
+      insert: (text, h, item) => insertQuoteAt(text, h.len || 0, item),
+      toast: (m, k) => opts.toast(m, k),
+      onClose: (how) => { if ((how === 'esc' || how === 'outside') && cur) rememberMute() },
     }
-    return out
+  }
+  function showQuotePanel(hit: QpHit): void {
+    const o = panelOpts(hit)
+    if (!o) return
+    if (!isQuotePanelOpen()) { void refreshInfo(); startLive() }
+    openQuotePanel(o)
+  }
+  /* ── v171：任务说明 / 相关说明里打「）」= 同一块面板的知识卡身份（六类 + 标签筛选） ── */
+  function kbRowsForPanel(): QpGroup[] {
+    return kbQuoteGroups(kbCardsNow() ?? [])
+  }
+  function kbPanelOpts(hit: QpHit): Parameters<typeof openQuotePanel>[0] | null {
+    const c = cur
+    if (!c) return null
+    const noteMode = c.nm !== null
+    const el = q<HTMLElement>('#dpmGtNote')
+    const anchor = (el?.closest('.gt-box') as HTMLElement | null) ?? el
+    if (!anchor) return null
+    return {
+      kind: 'kb',
+      where: noteMode ? 'note' : 'task',
+      label: noteMode ? '相关说明' : '任务说明',
+      card: c.card.t,
+      cardId: c.card.id,
+      anchor,
+      host: dlg ?? undefined,
+      hit,
+      build: () => kbRowsForPanel(),
+      insert: (text, h, item) => insertQuoteAt(text, h.len || 0, item),
+      toast: (m, k) => opts.toast(m, k),
+      onClose: (how) => { if ((how === 'esc' || how === 'outside') && cur) rememberMute() },
+    }
+  }
+  /** 先开面板（有缓存就立刻有内容），知识卡 / 提示词正文到齐后再画一次。 */
+  function showKbPanel(hit: QpHit): void {
+    const o = kbPanelOpts(hit)
+    if (!o) return
+    if (!isQuotePanelOpen()) { void refreshInfo(); startLive() }
+    openQuotePanel(o)
+    const again = (): void => {
+      if (!isQuotePanelOpen()) return
+      const o2 = kbPanelOpts(quotePanelHit())
+      if (o2) openQuotePanel(o2)
+    }
+    void ensureKbCards().then((cards) => { warmKbBodies(cards, again); again() }).catch(() => undefined)
+  }
+  /** 面板插入：把「>筛选词」换成引用原文（光标偏移口径与旧菜单一致）。 */
+  function insertQuoteAt(text: string, hitLen: number, item?: { id: string; title: string; icon?: string }): void {
+    const n = note()
+    /* v171：知识卡引用原文（面板列全库）→ 记进本次弹窗的胶囊目录，插完立刻画成绿色开卷书胶囊 */
+    const km = /^「“([^”「」]+)”知识卡（((?:\/|~\/)[^）「」]+\.md)）」$/.exec(text)
+    if (km && item && !kbExtra.some((x) => x.canon === text)) kbExtra.push({ kind: 'kb', id: item.id, title: km[1], body: km[2], canon: text })
+    const caret = qaddCaret >= 0 ? qaddCaret : n.selectionStart
+    const start = Math.max(0, caret - hitLen)
+    n.value = n.value.slice(0, start) + text + n.value.slice(caret)
+    n.setSelectionRange(start + text.length, start + text.length)
+    qaddLen = 0; qaddCaret = -1
+    decorateChips()
+    syncAutoTitle()
+    n.focus()
   }
 
   /* ── v111：任务说明里的引用胶囊（相关说明 / 链接 / 文件 / 仓库） ─────────── */
@@ -990,8 +1105,10 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
      说明里存下的是当时的写法，文件后来被删 / 改名后 canon 变了，只按当前 canon 找就会漏掉（用户报的「有时候不显示」）。 */
   /* v154：moved = 说明里写的是旧路径、但按 prev / 名字归一认到了卡片里的文件 —— 胶囊右上角挂个「已挪」小标
      （说明 / 气泡不走懒同步，原文要等「修复存量引用」或下次搬家才会变成新路径）。 */
-  interface RefChip { kind: 'note' | 'link' | 'file' | 'repo'; id: string; title: string; body: string; canon: string; alts?: string[]; moved?: string; gone?: boolean }
+  interface RefChip { kind: 'note' | 'link' | 'file' | 'repo' | 'kb'; id: string; title: string; body: string; canon: string; alts?: string[]; moved?: string; gone?: boolean }
   const baseName = (p: string): string => p.replace(/\/+$/, '').split('/').pop() ?? p
+  /** v171：本弹窗里刚插入的知识卡引用（面板列的是全库，卡片只挂了其中一部分） */
+  const kbExtra: RefChip[] = []
   function refChips(): RefChip[] {
     const c = cur
     if (!c) return []
@@ -1004,12 +1121,19 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       out.push({ kind: 'file', id: f.id, title: fileName(f), body: f.path, canon: mk(ex), alts: [mk(!ex)] })
     }
     for (const r of c.card.repos ?? []) out.push({ kind: 'repo', id: r.path, title: r.name, body: r.path, canon: quoteRepoText(r.name, r.path) })
+    /* v165：卡片挂着的知识卡 —— 名字 / 路径从 kbRefs（打开弹窗时载入）取 */
+    for (const a of c.card.kb ?? []) {
+      const k = (kbRefs ?? []).find((x) => x.id === a.id)
+      if (k) out.push({ kind: 'kb', id: k.id, title: k.title, body: k.path, canon: quoteKbText(k.title, k.path) })
+    }
+    /* v171：这张说明里刚插进来的知识卡 —— 没挂在卡片上的卡也认（插进来就要画成胶囊，不能露成原文） */
+    for (const it of kbExtra) if (!out.some((x) => x.canon === it.canon)) out.push(it)
     return out
   }
   /* v153：胶囊图标和 DSH 对话框 / 详情气泡同一套（chipicon.ts 一处定义）；文件仍按扩展名细分 */
   const chipIcon = (k: string): string => chipIconSvg(k)
   const chipIconOf = (it: { kind: string; body?: string }): string => chipIconSvg(it.kind, it.body)
-  const chipTip = (k: string): string => k === 'note' ? '相关说明 · 点一下看 key-value 全文' : k === 'link' ? '相关链接 · 点一下用浏览器打开' : k === 'file' ? '相关文件 · 点一下用默认应用打开' : '仓库 · 点一下在访达里打开'
+  const chipTip = (k: string): string => k === 'note' ? '相关说明 · 点一下看 key-value 全文' : k === 'link' ? '相关链接 · 点一下用浏览器打开' : k === 'file' ? '相关文件 · 点一下用默认应用打开' : k === 'kb' ? '知识卡 · 点一下看类型 / 状态 / 摘要' : '仓库 · 点一下在访达里打开'
   function mkChip(it: RefChip, canonText?: string): HTMLElement {
     const span = document.createElement('span')
     span.className = 'nref'
@@ -1123,44 +1247,21 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     opts.toast('说明里引用了' + got.map((x) => '「' + x.t + '」').join('、') + '：已关联到这个任务的相关' + (got.every((x) => x.k === 'link') ? '链接' : got.every((x) => x.k === 'file') ? '文件' : '链接 / 文件') + (c.mode === 'edit' ? '' : '（随「添加」一起保存）'))
   }
   const ZW = '\u200b'
-  let noteTip: HTMLElement | null = null
-  function hideNoteTip(): void {
-    if (!noteTip) return
-    const on = dlg?.querySelector('.nref.on') as HTMLElement | null
-    if (on) on.classList.remove('on')
-    noteTip.remove()
-    noteTip = null
-  }
-  function showNoteTip(chip: HTMLElement, title: string): void {
-    hideNoteTip()
-    const d = dlg
-    const n = (cur?.card.noteItems ?? []).find((x) => x.t === title)
-    if (!d || !n) { opts.toast('这条相关说明已经不在了', 'err'); return }
-    const el = document.createElement('div')
-    el.className = 'nref-pop'
-    el.setAttribute('role', 'dialog')
-    el.setAttribute('aria-label', '相关说明：' + n.t)
-    el.innerHTML = '<div class="nph"><span class="npi">' + ICO_NOTE + '</span><b>' + esc(n.t) + '</b><span class="npt">相关说明</span></div>'
-      + '<p class="npb">' + esc(n.v) + '</p><div class="npf"><kbd>Esc</kbd> 关闭 · 复制这个胶囊 = 引用项原文</div>'
-    d.append(el)
-    const hr = d.getBoundingClientRect(), cr = chip.getBoundingClientRect()
-    const left = Math.round(Math.max(8, Math.min(cr.left - hr.left + (d.clientLeft || 0), hr.width - el.offsetWidth - 8)))
-    el.style.left = left + 'px'
-    /* v111：小箭头指向胶囊（原型 .nref-pop::before + --ax） */
-    el.style.setProperty('--ax', Math.round(Math.max(10, Math.min(cr.left + cr.width / 2 - hr.left - left, el.offsetWidth - 20))) + 'px')
-    let top = cr.bottom - hr.top + (d.clientTop || 0) + 8
-    if (top + el.offsetHeight + 12 > hr.height) top = Math.max(8, cr.top - hr.top - el.offsetHeight - 8)
-    el.style.top = Math.round(top) + 'px'
-    el.classList.toggle('up', cr.bottom - hr.top + el.offsetHeight + 20 > hr.height)
-    noteTip = el
-    chip.classList.add('on')
-  }
+  /* v177：说明 / 知识卡的详情气泡统一由 detailbubble 渲染（同一个组件、同一个 DOM）；
+     这里只剩「文件打不开」的 miss 小卡（它不是详情，是错误处理 + 两个补救动作）。 */
+  let missTip: HTMLElement | null = null
+  function hideNoteTip(): void { if (missTip) { missTip.remove(); missTip = null } }
+  const bubbleCtx = (): BubbleCtx => ({
+    snap: () => cur?.snap ?? null,
+    toast: (m, k) => opts.toast(m, k),
+    quote: (t) => void navigator.clipboard.writeText(t).then(() => opts.toast('引用原文已复制'), () => opts.toast('复制失败，可手动选中复制', 'err')),
+  })
   function openChip(chip: HTMLElement): void {
     const kind = chip.dataset.rk ?? ''
     const rid = chip.dataset.rid ?? ''
     const card = cur?.card
     if (!card) return
-    if (kind === 'note') { showNoteTip(chip, rid); return }
+    if (kind === 'note' || kind === 'kb') { openChipDetail(bubbleCtx(), chip, card); return }
     hideNoteTip()
     if (kind === 'link') {
       const l = (card.webLinks ?? []).find((x) => (x.id ?? x.url) === rid)
@@ -1200,7 +1301,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     el.style.left = left + 'px'
     el.style.setProperty('--ax', Math.round(Math.max(10, Math.min(cr.left + cr.width / 2 - hr.left - left, el.offsetWidth - 20))) + 'px')
     el.style.top = Math.round(cr.bottom - hr.top + 8) + 'px'
-    noteTip = el
+    missTip = el
     chip.classList.add('on')
     el.addEventListener('click', (e) => {
       const t = e.target as HTMLElement
@@ -1268,13 +1369,6 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     showCopyPreview(txt)
     opts.toast((e.type === 'cut' ? '已剪切 ' : '已复制 ') + txt.length + ' 字 · 胶囊位置已展开成引用项原文')
   }
-  /* 引用弹窗里的「新增并引用」一行 */
-  function qAddRow(): string {
-    const b = (k: string, text: string): string => '<button type="button" class="qadd" data-gt-qadd="' + k + '" title="新增并引用：' + text + '">' + chipIcon(k) + '<span>' + text + '</span></button>'
-    return '<div class="gt-qadd" role="toolbar" aria-label="在引用弹窗里直接新增并插入引用胶囊"><span class="qgl">新增并引用</span>'
-      + b('note', '+说明') + b('link', '+链接') + b('file', '+文件') + b('repo', '+仓库')
-      + '<span class="qgh">插入光标处 · 链接 / 文件自动关联这个任务</span></div>'
-  }
   let qaddLen = 0
   /* v117 修（开工 5.2）：点「新增并引用」会先开一个模态弹窗 / 文件选择器，焦点离开说明框后
      selectionStart 归零，insertRefText 就变成「插到最末尾」、而且那个「>」还留在正文里。
@@ -1291,12 +1385,10 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     syncAutoTitle()
     n.focus()
   }
-  async function startQuoteAdd(kind: 'note' | 'link' | 'file' | 'repo'): Promise<void> {
-    const m = cur?.menu
-    if (!m) return
-    qaddLen = m.hit.len
+  async function startQuoteAdd(kind: 'note' | 'link' | 'file' | 'repo', h: QpHit): Promise<void> {
+    qaddLen = h.len || 0
     qaddCaret = note().selectionStart
-    hideMenu()
+    closeQuotePanel()
     if (kind === 'link' || kind === 'file') {
       const added = await addNew(kind)
       if (!added?.length) return
@@ -1421,6 +1513,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     const m = cur?.menu
     if (m) { m.el.remove(); if (cur) cur.menu = null }
     stopLive()
+    closeQuotePanel()
   }
   function menuPlace(m: Menu): void {
     const n = note()
@@ -1442,17 +1535,13 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     if (!frame) return
     const counts = new Map<string, number>()
     for (const it of m.items) counts.set(it.g, (counts.get(it.g) ?? 0) + 1)
-    const HINT: Record<string, string> = { 任务: '说明全文', 相关说明: '标题：内容', 相关链接: '标题（URL）', 相关文件: '标题（路径）', 仓库: '名字（路径）', 关联卡片: '名字（卡片组）', 活跃会话: '名字（活跃）' }
     const qy = m.hit.query.trim()
-    const head = m.kind === 'quote'
-      ? '<div class="qm-h"><b>引用卡片内容</b>' + (qy ? '<span class="q">筛选「' + esc(qy) + '」</span>' : '') + '<span class="qm-k"><kbd class="' + (m.hit.ch === '>' ? 'on' : '') + '">&gt;</kbd><kbd class="' + (m.hit.ch === '》' ? 'on' : '') + '">》</kbd></span></div>' + qAddRow()
-      : '<div class="qm-h"><b>插入工具命令</b><span>与宿主的 / 菜单同一份数据</span><span class="qm-k"><kbd class="on">/</kbd></span></div>'
+    const head = '<div class="qm-h"><b>插入工具命令</b><span>与宿主的 / 菜单同一份数据</span><span class="qm-k"><kbd class="on">/</kbd></span></div>'
     let last = ''
     const body = m.items.length
       ? m.items.map((it, i) => {
         const g = it.g !== last
-          ? '<div class="qm-g" role="presentation"><span class="gt2">' + esc(it.g) + '</span><span class="gc">' + (counts.get(it.g) ?? 1) + '</span>'
-            + (m.kind === 'quote' && HINT[it.g] ? '<span class="gx">' + HINT[it.g] + '</span>' : '') + '</div>'
+          ? '<div class="qm-g" role="presentation"><span class="gt2">' + esc(it.g) + '</span><span class="gc">' + (counts.get(it.g) ?? 1) + '</span></div>'
           : ''
         last = it.g
         return g + '<button type="button" tabindex="-1" role="option" class="qm-i' + (it.sub ? ' two' : '') + (i === m.hi ? ' on' : '') + '" aria-selected="' + (i === m.hi) + '" data-gt-mi="' + i + '">'
@@ -1463,9 +1552,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
           + (it.d ? '<span class="qd">' + esc(it.d) + '</span>' : '') + '</button>'
       }).join('')
       : '<div class="qm-e">没有和「' + esc(qy) + '」匹配的内容</div>'
-    const foot = '<div class="qm-f">' + (m.kind === 'quote'
-      ? '单击插入 · <b>↑↓</b> 选择 · <b>esc</b> 关闭 · 任务是引用它的任务说明全文'
-      : '触发：首个 / / 空格 + / · <b>↑↓</b> 选择 · <b>↵</b> 插入 · <b>esc</b> 关闭') + '</div>'
+    const foot = '<div class="qm-f">触发：首个 / / 空格 + / · <b>↑↓</b> 选择 · <b>↵</b> 插入 · <b>esc</b> 关闭</div>'
     const prevTop = (frame.querySelector('.qm-v') as HTMLElement | null)?.scrollTop ?? 0
     frame.innerHTML = head + '<div class="qm-v">' + body + '</div>' + foot
     menuPlace(m)
@@ -1482,7 +1569,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       else if (b > box.scrollTop + box.clientHeight) box.scrollTop = b - box.clientHeight + 6
     }
   }
-  function showMenu(kind: 'quote' | 'cmd', hit: { len: number; query: string; ch?: string }, items: Mi[]): void {
+  function showMenu(kind: 'cmd', hit: { len: number; query: string; ch?: string }, items: Mi[]): void {
     const c = cur
     if (!c || !dlg) return
     const k = hit.query.trim().toLowerCase()
@@ -1496,7 +1583,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       const el = document.createElement('div')
       el.className = 'dpm-qm gt-qm'
       el.setAttribute('role', 'listbox')
-      el.setAttribute('aria-label', kind === 'quote' ? '引用卡片内容' : '插入工具命令')
+      el.setAttribute('aria-label', '插入工具命令')
       el.innerHTML = '<div class="qm" role="document"></div>'
       // 弹层必须挂进 dialog：modal dialog 在 top layer，挂 body 上会被它整块盖住
       dlg.append(el)
@@ -1513,8 +1600,6 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       el.addEventListener('mousedown', (e) => e.preventDefault())
       m = { kind, hit, items: rows, hi: 0, el }
       c.menu = m
-      // v98 ②：每次新开引用菜单都重拉一次卡片数据（弹窗打开后卡片又被改过也不怕）；回来后就地重画
-      if (kind === 'quote') { void refreshInfo(); startLive() }
     } else {
       // v98 ②：数据刷新（同一筛选词）时按「同一行」保住高亮 —— 上面插进来新条目也不会让高亮跳到别的行
       const keep = same ? m.items[m.hi] : null
@@ -1530,17 +1615,30 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
   function menuCheck(): void {
     const c = cur
     if (!c || !dlg?.open || c.hist) { hideMenu(); return }
-    if (c.muted !== null && c.muted === note().value) return
-    c.muted = null
+    /* 输入变短 / 被清空 = 上一次的「别重开」作废 */
+    if (c.muted && note().value.length < c.muted.len) c.muted = null
+    if (c.muted !== null) {
+      const pc = paraBefore()
+      const at = note().selectionStart
+      const hh = detectQuote(pc.para, pc.first) ?? detectKbQuote(pc.para)
+      /* 变短 / 被清空也算「改写」：清空说明后再在同一个位置打触发字符，要能重新弹 */
+      if (hh && note().value.length >= c.muted.len && c.muted.at === at - hh.len && mutedBy(c.muted.left, pc.para)) return
+      c.muted = null
+    }
     const p = paraBefore()
     const qh = detectQuote(p.para, p.first)
     if (qh) {
       // 触发符是哪个（> 还是 》）：菜单元信息里高亮对应的键位提示
       const at = note().selectionStart - qh.len
       const ch = note().value[Math.max(0, at)] === '》' ? '》' : '>'
-      showMenu('quote', { len: qh.len, query: qh.query, ch }, quoteItems())
+      showQuotePanel({ len: qh.len, q: qh.query, ch })
       return
     }
+    /* v171：「）」/「)」= 知识卡引用（同一块面板的另一种身份；两者互不影响） */
+    const kh = detectKbQuote(p.para)
+    if (kh) { showKbPanel({ len: kh.len, q: kh.query, ch: '）' }); return }
+    /* 触发词已经不在了（被删掉 / 清空）→ 「别重开」作废 */
+    c.muted = null
     const sh = detectSlash(p.para, p.first)
     if (sh) { void cmdItems(sh.query, sh, c.menu); return }
     hideMenu()
@@ -1558,7 +1656,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
     n.setSelectionRange(c2, c2)
     hideMenu()
     n.focus()
-    opts.toast('已插入' + (m.kind === 'quote' ? '引用' : '命令') + '：' + it.t)
+    opts.toast('已插入命令：' + it.t)
   }
 
   /* ── 添加 / 保存 ── */
@@ -1752,8 +1850,6 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
         return
       }
       { const sw = by('[data-gt-ninj]'); if (sw) { sw.setAttribute('aria-checked', String(sw.getAttribute('aria-checked') !== 'true')); return } }
-      const qadd = by('[data-gt-qadd]')
-      if (qadd) { e.preventDefault(); e.stopPropagation(); void startQuoteAdd(qadd.dataset.gtQadd as 'note' | 'link' | 'file' | 'repo'); return }
       const chip = t.closest?.('.nref') as HTMLElement | null
       if (chip) { e.preventDefault(); e.stopPropagation(); openChip(chip); return }
       if (by('[data-gt-add]')) { void save(); return }
@@ -1769,7 +1865,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       const row = by('[data-gt-hm]')
       if (row && cur) { const k = row.dataset.gtHm as string; const i = cur.picked.indexOf(k); if (i >= 0) cur.picked.splice(i, 1); else cur.picked.push(k); paintHist(); return }
       if (by('[data-gt-gen]')) { void genTitle(); return }
-      if (by('[data-dpm-sw]')) { e.preventDefault(); const on = swToggleLocal(); opts.toast(on ? '排今天：开 —— 保存后直接进今天的「未安排」和本日计划清单（记住，下次还是开）' : '排今天：关'); return }
+      if (by('[data-dpm-sw]')) { e.preventDefault(); const on = swToggleLocal(); opts.toast(on ? '排今天：开 —— 保存后直接进今天的「已安排」最后一行（记住，下次还是开）' : '排今天：关'); return }
       const st = by('[data-gt-st]')
       if (st && cur) { e.preventDefault(); const c = cur; const f = c.taskId ? findTask(c.card, c.taskId) : null; close(); opts.seek?.(c.card.id, f ? taskKeys(c.card.id, f.parent ?? f.t, false) : ['p|' + c.card.id]); return }
       const newBtn = by('[data-gt-new]')
@@ -1863,7 +1959,7 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
           const n = m.items.length
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (n) { m.hi = (m.hi + (e.key === 'ArrowDown' ? 1 : -1) + n) % n; m.kbd = true; paintMenu() } return }
           if ((e.key === 'Enter' || e.key === 'Tab') && !e.metaKey && !e.ctrlKey && n) { e.preventDefault(); pick(m.hi); return }
-          if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); if (cur) cur.muted = note().value; hideMenu(); return }
+          if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); if (cur) rememberMute(); hideMenu(); return }
         }
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); void save(); return }
       }
@@ -1923,10 +2019,11 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       if (ae && ae.classList.contains('nd-in')) { e.preventDefault() }
     }, true)
     d.addEventListener('cancel', (e) => {
-      if (noteTip) { e.preventDefault(); hideNoteTip(); return }
+      if (missTip) { e.preventDefault(); hideNoteTip(); return }
+      if (bubbleIsOpen()) { e.preventDefault(); e.stopPropagation(); closeBubble(); return }
       if (nd?.editingTitle) { e.preventDefault(); return }
       // Esc：菜单 → 历史消息 → 链接/文件弹层 → 关弹窗（逐层收）
-      if (cur?.menu) { e.preventDefault(); if (cur) cur.muted = note().value; hideMenu(); return }
+      if (cur?.menu) { e.preventDefault(); if (cur) rememberMute(); hideMenu(); return }
       if (cur?.hist) { e.preventDefault(); closeHist(); note().focus(); return }
       if (cur?.pop) { e.preventDefault(); closePops(); return }
       /* v137：Esc 只退多选，不关弹窗 */
@@ -1936,13 +2033,14 @@ export function mountGoalTask(opts: GoalTaskOpts): GoalTaskHandle {
       e.preventDefault()
       close()
     })
-    d.addEventListener('close', () => { cur = null; nd = null; na?.dispose(); na = null; d.remove(); dlg = null })
+    d.addEventListener('close', () => { closeQuotePanel(); cur = null; nd = null; na?.dispose(); na = null; d.remove(); dlg = null })
     document.addEventListener('pointerdown', (e) => {
       const t = e.target as HTMLElement
       const m = cur?.menu
       if (m && !m.el.contains(t) && t !== note()) hideMenu()
       if (cur?.pop && !(t.closest?.('.gt-popv') || t.closest?.('[data-gt-pick]'))) closePops()
-      if (noteTip && !(t.closest?.('.nref') || noteTip.contains(t))) hideNoteTip()
+      if (missTip && !(t.closest?.('.nref') || missTip.contains(t))) hideNoteTip()
+      /* v177：详情气泡的「点外面收起」由 detailbubble 自己处理 */
     })
     window.addEventListener('resize', () => { if (cur?.menu) menuPlace(cur.menu) })
   }

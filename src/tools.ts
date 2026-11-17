@@ -8,12 +8,14 @@ import type { BoardStore } from './store.js'
 import type { StateCatalog } from './states.js'
 import { Landfill, LandfillError } from './landfill.js'
 import type { MergeEngine } from './merge.js'
+import type { KbCard, KbStore, KbType } from './kb.js'
+import { buildKbIndex, searchKb } from './kbsearch.js'
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue }
 type JsonObj = Record<string, JsonValue>
 type ToolCtx = { agent?: { id?: string; session?: { id?: string } } }
 
-export const TOOL_NAMES = ['card_manage', 'repo_manage', 'phase_move', 'task_manage', 'landfill'] as const
+export const TOOL_NAMES = ['card_manage', 'repo_manage', 'phase_move', 'task_manage', 'kb_manage', 'landfill'] as const
 
 const toJson = (x: unknown): JsonObj => JSON.parse(JSON.stringify(x ?? null)) as JsonObj
 const err = (e: unknown): JsonObj => e instanceof M.BoardError ? { ok: false, code: e.code, error: e.message } : { ok: false, code: 'TOOL_FAILED', error: e instanceof Error ? e.message : String(e) }
@@ -42,7 +44,7 @@ function summary(b: M.Board, states: StateCatalog): string {
   return lines.join('\n') || '(看板为空)'
 }
 
-export function registerTools(host: { register(t: unknown): void }, store: BoardStore, states: StateCatalog): void {
+export function registerTools(host: { register(t: unknown): void }, store: BoardStore, states: StateCatalog, kb: KbStore): void {
   host.register(defineTool({
     name: 'card_manage',
     description: 'Project board (dsh-project-manager). op: list | create_group{name} | create{group,title,links?} | update{card?,title?,links?} | remove{card}. links are landfill-project keys "<project>/<slug>". card defaults to the card bound to this session. 要给卡片关联落盘项目，用 update{card,links}（整份替换）；卡片组的共用记忆（整组所有卡片都会读取）只能在看板的「卡片组设置」里改，本工具不提供。',
@@ -152,6 +154,75 @@ export function registerTools(host: { register(t: unknown): void }, store: Board
           return M.card(b, cd.id).tasks
         }, () => [{ at: new Date().toISOString(), actor: actor(c), kind: 'task_manage:' + String(a.op) }])
         return toJson({ ok: true, tasks })
+      } catch (e) { return err(e) }
+    },
+    timeoutMs: 10_000,
+  }))
+
+  /** v163 / S5：知识卡工具。创建一律草稿；不提供 remove（删除 = UI 的 7 秒撤销走 restore）。 */
+  host.register(defineTool({
+    name: 'kb_manage',
+    description: 'Knowledge cards (dsh-project-manager): reusable knowledge, one card = one md file. 知识卡 = 可复用知识；新建一律草稿。op: search{q,type?,tag?} | read{id} (returns full body + path) | list | create{title,type,body,summary?,tags?} (status forced draft) | update{id,title?,body?,summary?,tags?,type?} (no status param — promoting to verified is user-only) | attach{id,card?,mode?} | detach{id,card?}. No remove. card defaults to the card bound to this session; mode full|sum|off, omit = by type (prompt/howto/snippet full, others sum).',
+    parameters: {
+      op: { type: 'string', required: true, description: 'search|read|list|create|update|attach|detach' },
+      q: { type: 'string', description: 'search: query (empty = browse by updated desc)' },
+      id: { type: 'string', description: 'knowledge card id (read/update/attach/detach)' },
+      card: { type: 'string', description: 'attach/detach: card id (default = session card)' },
+      type: { type: 'string', description: 'search/create/update: prompt|howto|snippet|domain|business|moc' },
+      tag: { type: 'string', description: 'search: tag filter' },
+      title: { type: 'string', description: 'create/update: title' },
+      body: { type: 'string', description: 'create/update: markdown body' },
+      summary: { type: 'string', description: 'create/update: summary (empty = first 80 chars of body)' },
+      tags: { type: 'array', description: 'create/update: tags (string[])' },
+      mode: { type: 'string', description: 'attach: full|sum|off (omit = type default)' },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v) }] },
+    execute: async (args, exec) => {
+      const a = args as Record<string, unknown>
+      const c = exec as unknown as ToolCtx
+      const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+      const item = (x: KbCard) => ({ id: x.id, title: x.title, type: x.type, status: x.status, tags: x.tags, summary: kb.summaryOf(x), updated: x.updated, path: x.path })
+      try {
+        switch (a.op) {
+          case 'search': {
+            const cards = kb.list()
+            const hits = searchKb(buildKbIndex(cards), a.q, { type: (str(a.type) || undefined) as KbType | undefined, tag: str(a.tag) || undefined, limit: 10 })
+            const byId = new Map(cards.map((x) => [x.id, x]))
+            return toJson({ ok: true, results: hits.map((h) => { const x = byId.get(h.id); return x ? { ...item(x), score: Math.round(h.score * 100) / 100, hit: h.hit } : null }).filter((x) => x !== null) })
+          }
+          case 'read': {
+            const x = kb.get(str(a.id))
+            if (!x) throw new M.BoardError('NO_KB', '找不到知识卡 ' + str(a.id))
+            return toJson({ ok: true, card: x })
+          }
+          case 'list': return toJson({ ok: true, cards: kb.list().map(item), errors: kb.errors })
+          case 'create': return toJson({ ok: true, card: item(kb.create({ title: str(a.title), type: str(a.type) as KbType, body: str(a.body), summary: str(a.summary), tags: Array.isArray(a.tags) ? a.tags.map(String) : [], status: 'draft' })) })
+          case 'update': {
+            if (a.status !== undefined) throw new M.BoardError('KB_FORBIDDEN', 'kb_manage 不能改 status：verified 转正只能由用户操作')
+            const patch: Partial<KbCard> = {}
+            if (a.title !== undefined) patch.title = str(a.title)
+            if (a.body !== undefined) patch.body = str(a.body)
+            if (a.summary !== undefined) patch.summary = str(a.summary)
+            if (a.type !== undefined) patch.type = str(a.type) as KbType
+            if (Array.isArray(a.tags)) patch.tags = a.tags.map(String)
+            return toJson({ ok: true, card: item(kb.update(str(a.id), patch)) })
+          }
+          case 'attach':
+          case 'detach': {
+            const kid = str(a.id)
+            if (!kb.get(kid)) throw new M.BoardError('NO_KB', '找不到知识卡 ' + kid)
+            const card = await store.mutate((b) => {
+              const cd = resolveCard(b, a.card, c)
+              const cur = (cd.kb ?? []).slice()
+              const next = a.op === 'attach'
+                ? [...cur.filter((x) => x.id !== kid), { id: kid, ...(a.mode !== undefined ? { mode: a.mode as 'full' | 'sum' | 'off' } : {}) }]
+                : cur.filter((x) => x.id !== kid)
+              return M.setCardKb(b, cd.id, next)
+            }, () => [{ at: new Date().toISOString(), actor: actor(c), kind: 'kb_manage:' + String(a.op) }])
+            return toJson({ ok: true, card: { id: card.id, title: card.t, kb: card.kb ?? [] } })
+          }
+          default: throw new M.BoardError('BAD_OP', '未知 op ' + String(a.op))
+        }
       } catch (e) { return err(e) }
     },
     timeoutMs: 10_000,

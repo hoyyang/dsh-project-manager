@@ -43,9 +43,10 @@ function PanelEntry(p: PanelEntryProps): ReactElement {
     row.setAttribute('data-dpm-eb', '')
     row.toggleAttribute('data-dpm-on', p.active)
     row.toggleAttribute('data-dpm-sched', p.variant === 'sched')
+    row.toggleAttribute('data-dpm-kb', p.variant === 'kb')
     row.toggleAttribute('data-dpm-rail', p.compact)
     for (const n of chain) n.setAttribute('data-dpm-ea', '')
-    return () => { for (const k of ['data-dpm-eb', 'data-dpm-on', 'data-dpm-sched', 'data-dpm-rail']) row.removeAttribute(k); for (const n of chain) n.removeAttribute('data-dpm-ea') }
+    return () => { for (const k of ['data-dpm-eb', 'data-dpm-on', 'data-dpm-sched', 'data-dpm-kb', 'data-dpm-rail']) row.removeAttribute(k); for (const n of chain) n.removeAttribute('data-dpm-ea') }
   }, [p.active, p.compact, p.variant])
   // 进入页面那一下播一次「波纹 + 落卡片 + 高光 + 徽标弹」（重新挂 fx 类以重播）
   useEffect(() => {
@@ -74,4 +75,10 @@ export function BoardEntry(p: { active: boolean; compact: boolean; count: number
 const SCHED_GLYPH = '<svg class="pgi" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 9.5h17M8 3.5v3M16 3.5v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect class="sb" x="7" y="12" width="8.5" height="2.8" rx="1.4"/><path d="M17.8 11.6v6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
 export function SchedEntry(p: { active: boolean; compact: boolean; count: number }): ReactElement {
   return h(PanelEntry, { active: p.active, compact: p.compact, count: p.count, suffix: '项目', glyph: SCHED_GLYPH, variant: 'sched' })
+}
+
+/** v162「知识库」：与项目看板 / 任务日程看板同一套结构、光效层与动效，只换绿色 + 开卷书图标；没有计数徽标。 */
+export const KB_GLYPH = '<svg class="pgi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C9.9 5.2 7.4 4.9 4.6 5.5v12.6c2.8-.6 5.3-.3 7.4 1 2.1-1.3 4.6-1.6 7.4-1V5.5c-2.8-.6-5.3-.3-7.4 1Z"/><path d="M12 6.5v12.6"/><path class="kl" d="M7 8.7h2.6M7 11.5h2.6"/><path class="kr" d="M14.4 8.7h2.6M14.4 11.5h2.6"/></svg>'
+export function KbEntry(p: { active: boolean; compact: boolean }): ReactElement {
+  return h(PanelEntry, { active: p.active, compact: p.compact, count: 0, suffix: '', glyph: KB_GLYPH, variant: 'kb' })
 }

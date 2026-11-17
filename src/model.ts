@@ -4,6 +4,7 @@
  * 数据键名沿用 statuses / col（board.json 兼容），界面与文档统一叫「阶段」。
  */
 import { syncFileRefs } from './refsync.js'
+import { KB_ID_RX } from './kb.js'
 
 export interface Status { id: string; name: string }
 /** v136：off = 不自动注入 Agent 会话（卡片档案 / STATE 卡片档案块不出现）；缺省 = 注入（老数据不迁移）。 */
@@ -16,7 +17,7 @@ export interface Group { id: string; name: string; collapsed: boolean; repos: Re
  * links = 绑定的本卡片相关链接 id；subs = 子任务（只一层）；created / updated = 添加 / 最后修改时间（ISO，由服务端盖）。
  * 有子任务时 done 由子任务决定（全部完成 = 完成）。旧数据只有 text / done，读入时补 id。
  */
-export interface Task { id?: string; text: string; done: boolean; note?: string; type?: string; links?: string[]; files?: string[]; subs?: Task[]; created?: string; updated?: string; /** v127：截止日期 YYYY-MM-DD（可空）。 */ due?: string; /** v140：关联的会话 id（一个任务一个会话；一个会话可被多个任务关联）。 */ sess?: string }
+export interface Task { id?: string; text: string; done: boolean; note?: string; type?: string; links?: string[]; files?: string[]; subs?: Task[]; created?: string; updated?: string; /** v127：截止日期 YYYY-MM-DD（可空）。 */ due?: string; /** v140：关联的会话 id（一个会话可被多个任务关联）。v175：sess = 代表会话（显示状态的就是它），其余关联在 sessArch。 */ sess?: string; /** v175：其余关联的会话 id（一般是归档会话；[sess, ...sessArch] 里未归档的最多 1 个）。 */ sessArch?: string[] }
 /** 相关文件（0.26）：id 稳定标识（子任务按 id 绑定）；path = 绝对路径；title = 可选标题（空 = 显示文件名）。 */
 export interface FileRef { id: string; path: string; title?: string; /** v136 */ off?: boolean; /** v151（1.2）：以前用过的路径（放到落盘项目 / 迁移 / 改用新位置时记下，最多 8 条）——会话里旧路径的引用照样认得出是这个文件 */ prev?: string[] }
 /** 相关说明的一条（0.24）：t = 小标题，v = 内容；pin = 固定在最前（「卡片项目说明」）。 */
@@ -29,7 +30,7 @@ export interface NoteItem { t: string; v: string; pin?: boolean; off?: boolean }
 export interface WebLink { id?: string; text: string; type: string; url: string; /** v136 */ off?: boolean; /** v140：星标（类型分组内置顶 + 金色卡 / 金色引用胶囊）。 */ star?: boolean; /** v141：类型标签（显示「类型名-标签」，标签全局按类型登记在 Board.linkTypeTags）。 */ tag?: string }
 /** repos（0.14）= 这张卡片自己的仓库清单：新建时复制所在组的「卡片共用仓库」，之后与组互不影响。 */
 /** noteItems（0.24）= 相关说明（小标题 + 内容，按顺序）；旧版 notes 字符串读入时转成一条「卡片项目说明」。related（0.24）= 关联卡片 id（单向，顺序 = 展示顺序）。 */
-export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; repos: Repo[]; notes?: string; noteItems?: NoteItem[]; webLinks?: WebLink[]; files?: FileRef[]; archivedAt?: string; pending?: boolean; related?: string[]; updatedAt?: string | null; /** v136：关联卡片里「不注入」的 id（related 仍是纯 id 数组，兼容旧数据；新关联默认不注入）。 */ relOff?: string[] }
+export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; repos: Repo[]; notes?: string; noteItems?: NoteItem[]; webLinks?: WebLink[]; files?: FileRef[]; archivedAt?: string; pending?: boolean; related?: string[]; updatedAt?: string | null; /** v136：关联卡片里「不注入」的 id（related 仍是纯 id 数组，兼容旧数据；新关联默认不注入）。 */ relOff?: string[]; /** v163：挂载的知识卡（保序去重；mode 缺省 = 按类型默认，见 kbMode）。 */ kb?: Array<{ id: string; mode?: 'full' | 'sum' | 'off' }>; /** v172：项目星标（一个布尔；缺省 = 未加星，旧数据自动兼容）。 */ star?: boolean }
 /** readKeys = 关联时该会话已读过的落盘项目（不再注入）；只在关联时计算一次，保证注入文本稳定。 */
 export interface SessionRef { sessionId: string; cardId: string; createdAt: string; title?: string; readKeys?: string[] }
 export interface BoardEvent { at: string; actor: string; kind: string; card?: string; group?: string; from?: string; to?: string }
@@ -43,7 +44,9 @@ export interface RepoSeen extends Repo { at: string }
 export interface TypeGroup { id: string; name: string; types: string[] }
 /** taskTypes（0.24）= 子任务类型（全局共用，顺序 = 展示顺序；不分组）；缺省 = DEFAULT_TASK_TYPES。 */
 /** prefs（0.26）= 全局开关（所有卡片共用）：lf = 添加文件时放到落盘项目；delAdd / delTolf = 添加文件 / 一键放到落盘项目时删除原文件。缺省都开。 */
-export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean }
+/** v182：界面语言三档 —— auto = 跟随 DSH；zh / en = 固定（只影响这个插件的界面文案）。 */
+export type LangMode = 'auto' | 'zh' | 'en'
+export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean; lang?: LangMode }
 /** v140/v141：linkTypeDomains = 类型 → 网址（只留 origin，带结尾 /；同一网址只能属于一个类型）；linkTypeTags = 类型 → 类型标签（全局，≤20 字，同类型不重名）。 */
 export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[]; linkTypeGroups?: TypeGroup[]; repoHistory?: RepoSeen[]; taskTypes?: string[]; prefs?: Partial<Prefs>; linkTypeDomains?: Record<string, string[]>; linkTypeTags?: Record<string, string[]> }
 
@@ -114,6 +117,15 @@ export function archiveCard(b: Board, id: string, at = new Date().toISOString())
 }
 
 /** v86：pending = 不活跃也不归档；只改展示区，阶段（col）保持不变。 */
+/** v172：项目星标 —— 只认 true；关掉就把字段删掉（未加星不落盘，旧数据保持干净）；已归档的只读。 */
+export function setCardStar(b: Board, id: string, on: boolean): Card {
+  const c = card(b, id)
+  if (c.archivedAt) throw new BoardError('CARD_ARCHIVED', '卡片「' + c.t + '」已归档，只能查看；先恢复活跃再改星标')
+  if (on === true) c.star = true
+  else delete c.star
+  return c
+}
+
 export function setPending(b: Board, id: string, on: boolean, col?: string): Card {
   const c = card(b, id)
   if (c.archivedAt) throw new BoardError('CARD_ARCHIVED', '卡片「' + c.t + '」已归档，先恢复活跃再设 pending')
@@ -348,7 +360,7 @@ const longText = (v: unknown, field: string, max = 20000): string => {
   if (s.length > max) throw new BoardError('BAD_ARG', field + '超过 ' + max + ' 字')
   return s
 }
-const sameTask = (a: Task, x: Task): boolean => a.text === x.text && a.done === x.done && (a.note ?? '') === (x.note ?? '') && (a.type ?? '') === (x.type ?? '') && (a.links ?? []).join() === (x.links ?? []).join() && (a.files ?? []).join() === (x.files ?? []).join() && (a.due ?? '') === (x.due ?? '') && (a.sess ?? '') === (x.sess ?? '')
+const sameTask = (a: Task, x: Task): boolean => a.text === x.text && a.done === x.done && (a.note ?? '') === (x.note ?? '') && (a.type ?? '') === (x.type ?? '') && (a.links ?? []).join() === (x.links ?? []).join() && (a.files ?? []).join() === (x.files ?? []).join() && (a.due ?? '') === (x.due ?? '') && (a.sess ?? '') === (x.sess ?? '') && (a.sessArch ?? []).join() === (x.sessArch ?? []).join()
 export const flatTasks = (l: Task[]): Task[] => l.flatMap((t) => [t, ...(t.subs ?? [])])
 /** 有子任务的父任务：done = 子任务全部完成。 */
 export function rollupDone(list: Task[]): Task[] { for (const t of list) if (t.subs?.length) t.done = t.subs.every((s) => s.done); return list }
@@ -382,8 +394,13 @@ export function setTasks(b: Board, id: string, tasks: unknown, at = new Date().t
       if (typeof o.due !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.due) || Number.isNaN(Date.parse(o.due))) throw new BoardError('BAD_ARG', where + '截止日期必须是 YYYY-MM-DD')
       t.due = o.due
     }
-    /* v140：关联会话（只收合法会话 id；空 = 不关联） */
+    /* v140：关联会话（只收合法会话 id；空 = 不关联）；v175：sessArch = 其余关联（去重、去掉与 sess 重复的） */
     if (o.sess !== undefined && o.sess !== null && o.sess !== '') t.sess = sessId(o.sess, where)
+    if (o.sessArch !== undefined && o.sessArch !== null) {
+      if (!Array.isArray(o.sessArch)) throw new BoardError('BAD_ARG', where + 'sessArch 必须是数组')
+      const xs = [...new Set(o.sessArch.map((v) => sessId(v, where)))].filter((v) => v !== t.sess)
+      if (xs.length) t.sessArch = xs
+    }
     if (o.links !== undefined) {
       if (!Array.isArray(o.links)) throw new BoardError('BAD_ARG', where + 'links 必须是数组')
       const ls = [...new Set(o.links.map(String))]
@@ -503,6 +520,34 @@ export function setRelated(b: Board, id: string, ids: unknown): Card {
   if (out.length) c.related = out
   else delete c.related
   if (off.size) c.relOff = out.filter((x) => off.has(x)); else delete c.relOff
+  return c
+}
+
+/** v163：知识卡注入档位。prompt/howto/snippet 默认全文，domain/business/moc 默认摘要；显式 mode（full / sum / off）优先，非法值回落默认。 */
+export function kbMode(type: string, mode?: string): 'full' | 'sum' | 'off' {
+  if (mode === 'full' || mode === 'sum' || mode === 'off') return mode
+  return type === 'prompt' || type === 'howto' || type === 'snippet' ? 'full' : 'sum'
+}
+/** v163：项目卡挂载知识卡（Card.kb）。每项 = 知识卡 id 或 {id, mode}；去重保序、首见优先；mode 只认 full / sum / off；最多 50 条；空数组 = 删字段；归档卡拒绝（走 liveCard）。挂载只存 id 与档位，知识卡本体是否存在由 KbStore（S4 接线）负责，这里不做存在性校验。 */
+export function setCardKb(b: Board, id: string, list: unknown): Card {
+  const c = liveCard(b, id)
+  if (!Array.isArray(list)) throw new BoardError('BAD_ARG', '知识卡清单必须是数组')
+  if (list.length > 50) throw new BoardError('BAD_ARG', '知识卡最多挂 50 张')
+  const out: Array<{ id: string; mode?: 'full' | 'sum' | 'off' }> = []
+  const seen = new Set<string>()
+  for (const raw of list) {
+    const o = raw && typeof raw === 'object' ? raw as { id?: unknown; mode?: unknown } : null
+    const kid = o ? o.id : raw
+    if (typeof kid !== 'string' || !KB_ID_RX.test(kid)) throw new BoardError('BAD_ARG', '无效的知识卡 id：' + String(kid))
+    if (o && o.mode !== undefined && o.mode !== 'full' && o.mode !== 'sum' && o.mode !== 'off') throw new BoardError('BAD_ARG', '知识卡档位只认 full / sum / off：' + String(o.mode))
+    if (seen.has(kid)) continue
+    seen.add(kid)
+    const e: { id: string; mode?: 'full' | 'sum' | 'off' } = { id: kid }
+    if (o && o.mode !== undefined) e.mode = o.mode as 'full' | 'sum' | 'off'
+    out.push(e)
+  }
+  if (out.length) c.kb = out
+  else delete c.kb
   return c
 }
 
@@ -655,9 +700,12 @@ export function backfillForks(b: Board, pairs: Array<{ child: string; parent: st
   return out
 }
 
-/** 解除关联：只从列表移除，不碰文件本身；绑定它的子任务一并解绑。返回撤销所需的信息。 */
-export function removeFile(b: Board, id: string, fileId: unknown): { file: FileRef; index: number; tasks: string[] } {
-  const c = liveCard(b, id)
+/**
+ * 解除关联（v180 抽出的「不判归档」内核）：只从列表移除，不碰文件本身；绑定它的子任务一并解绑。
+ * 清理关联文件（0.75.0）允许改已归档卡片的**文件登记**（标题 / 说明 / 任务 / 阶段仍只读），所以
+ * 它走 removeFileIn(card(...))；普通入口 removeFile 仍然只认活跃卡片（liveCard）。
+ */
+export function removeFileIn(c: Card, fileId: unknown): { file: FileRef; index: number; tasks: string[] } {
   const f = fileOf(c, fileId)
   const index = (c.files as FileRef[]).indexOf(f)
   c.files = (c.files as FileRef[]).filter((x) => x !== f)
@@ -666,9 +714,12 @@ export function removeFile(b: Board, id: string, fileId: unknown): { file: FileR
   for (const t of flatTasks(c.tasks)) if (t.files?.includes(f.id)) { t.files = t.files.filter((x) => x !== f.id); if (!t.files.length) delete t.files; tasks.push(t.id as string) }
   return { file: f, index, tasks }
 }
-/** 撤销解除关联：放回原位置，重新绑到原来的子任务（子任务已删的跳过）。 */
-export function restoreFile(b: Board, id: string, raw: unknown, index: unknown, tasks: unknown): FileRef {
-  const c = liveCard(b, id)
+/** 解除关联（普通入口）：已归档卡片只读，先恢复活跃。 */
+export function removeFile(b: Board, id: string, fileId: unknown): { file: FileRef; index: number; tasks: string[] } {
+  return removeFileIn(liveCard(b, id), fileId)
+}
+/** 撤销解除关联（v180 内核，不判归档）：放回原位置，重新绑到原来的子任务（子任务已删的跳过）。 */
+export function restoreFileIn(c: Card, raw: unknown, index: unknown, tasks: unknown): FileRef {
   const o = (raw ?? {}) as Record<string, unknown>
   if (typeof o.id !== 'string' || !/^[\w-]{1,40}$/.test(o.id)) throw new BoardError('BAD_ARG', '文件 id 无效')
   const path = filePath(o.path)
@@ -680,6 +731,10 @@ export function restoreFile(b: Board, id: string, raw: unknown, index: unknown, 
   const ids = new Set(Array.isArray(tasks) ? tasks.map(String) : [])
   for (const t of flatTasks(c.tasks)) if (ids.has(t.id as string)) t.files = [...(t.files ?? []), f.id]
   return f
+}
+/** 撤销解除关联（普通入口）：已归档卡片只读，先恢复活跃。 */
+export function restoreFile(b: Board, id: string, raw: unknown, index: unknown, tasks: unknown): FileRef {
+  return restoreFileIn(liveCard(b, id), raw, index, tasks)
 }
 
 // ── 0.26 复制卡片 / 卡片组归档 / 批量展开折叠 / 全局开关 / 最后更新时间 ──
@@ -693,7 +748,7 @@ export function dupName(b: Board, c: Card): string {
 }
 /**
  * 复制卡片：同组同阶段，排在「原卡片 + 已有副本」最后一张后面（原卡片已归档 → 放到阶段末尾，阶段没了放第一个）。
- * 复制：子任务（含子集；新 id、全部未勾选、时间重盖）、相关说明 / 链接 / 文件、仓库、关联卡片。不复制：会话、关联的落盘项目、归档状态。
+ * 复制：子任务（含子集；新 id、全部未勾选、时间重盖）、相关说明 / 链接 / 文件、仓库、关联卡片。不复制：会话、关联的落盘项目、归档状态、知识卡挂载（v163：知识卡是挂给这张卡的注入配置，副本不继承）。
  */
 export function copyCard(b: Board, id: string, at = new Date().toISOString()): Card {
   const c = card(b, id)
@@ -759,11 +814,13 @@ export function bulkCollapse(b: Board, mode: unknown, liveGroups?: string[]): { 
   }
   return { opened, folded }
 }
-export const prefsOf = (b: Board): Prefs => ({ lf: b.prefs?.lf !== false, delAdd: b.prefs?.delAdd !== false, delTolf: b.prefs?.delTolf !== false })
+export const prefsOf = (b: Board): Prefs => ({ lf: b.prefs?.lf !== false, delAdd: b.prefs?.delAdd !== false, delTolf: b.prefs?.delTolf !== false, ...(b.prefs?.lang === 'auto' || b.prefs?.lang === 'zh' || b.prefs?.lang === 'en' ? { lang: b.prefs.lang } : {}) })
 export function setPrefs(b: Board, patch: unknown): Prefs {
   const o = (patch ?? {}) as Record<string, unknown>
   const next = prefsOf(b)
   for (const k of ['lf', 'delAdd', 'delTolf'] as const) if (o[k] !== undefined) { if (typeof o[k] !== 'boolean') throw new BoardError('BAD_ARG', k + ' 必须是 true / false'); next[k] = o[k] as boolean }
+  // v182：界面语言存 host 侧看板文档（多个浏览器共享）；客户端 localStorage 只是首屏镜像
+  if (o.lang !== undefined) { if (o.lang !== 'auto' && o.lang !== 'zh' && o.lang !== 'en') throw new BoardError('BAD_ARG', 'lang 必须是 auto / zh / en'); next.lang = o.lang }
   b.prefs = next
   return next
 }
@@ -997,31 +1054,73 @@ const sessId = (v: unknown, where = ''): string => {
   if (typeof v !== 'string' || !/^[\w.:-]{1,128}$/.test(v)) throw new BoardError('BAD_ARG', where + '会话 id 不对：' + String(v))
   return v
 }
-/** 设 / 清一个任务或子任务关联的会话（只改 sess，不整表替换）。sess 空 = 取消关联。 */
-export function setTaskSession(b: Board, id: string, taskId: unknown, sess: unknown, at = new Date().toISOString()): Task {
+/* v175：一个任务 / 子任务可以关联多个会话 —— 读关联一律走 taskSessIds()（sess 在前），不要自己拼 sess + sessArch。 */
+/** 一个任务关联的全部会话 id（顺序 = 代表会话在前；去重、去空）。 */
+export const taskSessIds = (t: Task): string[] => {
+  const out: string[] = []
+  for (const s of [t.sess, ...(t.sessArch ?? [])]) if (typeof s === 'string' && s && !out.includes(s)) out.push(s)
+  return out
+}
+/**
+ * 写一组关联（v175 唯一的多关联写入口）：list 顺序 = 代表会话在前；空数组 = 取消全部关联。
+ * isArchived 由路由层注入（宿主只有 workspaceRegistry.archivedSessionIds 知道归档状态）—— 传了才校验「活跃关联最多一个」。
+ */
+export function setTaskSessList(b: Board, id: string, taskId: unknown, list: unknown, at = new Date().toISOString(), isArchived?: (sid: string) => boolean): Task {
   const c = liveCard(b, id)
   const t = flatTasks(c.tasks).find((x) => x.id === taskId)
   if (!t) throw new BoardError('NOT_FOUND', '这张卡片没有任务 ' + String(taskId))
-  if (sess === undefined || sess === null || sess === '') delete t.sess
+  if (list !== undefined && list !== null && !Array.isArray(list)) throw new BoardError('BAD_ARG', '关联会话列表要是数组')
+  const ids: string[] = []
+  for (const v of (list as unknown[] | undefined) ?? []) { const sid = sessId(v, '关联会话 '); if (!ids.includes(sid)) ids.push(sid) }
+  if (isArchived) {
+    const live = ids.filter((x) => !isArchived(x))
+    if (live.length > 1) throw new BoardError('BAD_ARG', '一个任务只能关联一个活跃会话：这次要写的关联里有 ' + live.length + ' 个会话还是活跃的；先归档或取消关联其中 ' + (live.length - 1) + ' 个，再来关联新的')
+  }
+  if (!ids.length) { delete t.sess; delete t.sessArch }
   else {
-    const sid = sessId(sess)
-    t.sess = sid
+    t.sess = ids[0]
+    if (ids.length > 1) t.sessArch = ids.slice(1); else delete t.sessArch
     /* v151（2.2）：一个会话一次只属于一张卡片 —— 任务 / 子任务关联它 = 它关联到这个任务所在的卡片（原来在别的卡片 = 挪过来），
        别的卡片里关联它的任务 / 子任务一并解除（会话不能跨卡片关联任务）。 */
-    const ref = sessionRef(b, sid)
-    if (!ref || ref.cardId !== c.id) bindSession(b, sid, c.id, ref?.title)
+    for (const sid of ids) { const ref = sessionRef(b, sid); if (!ref || ref.cardId !== c.id) bindSession(b, sid, c.id, ref?.title) }
   }
   t.updated = at
   return t
 }
+/** 设 / 清一个任务或子任务关联的会话（单个；v175 起任务级多关联走 setTaskSessList）。sess 空 = 取消关联。 */
+export function setTaskSession(b: Board, id: string, taskId: unknown, sess: unknown, at = new Date().toISOString(), isArchived?: (sid: string) => boolean): Task {
+  const list = sess === undefined || sess === null || sess === '' ? [] : [sess]
+  return setTaskSessList(b, id, taskId, list, at, isArchived)
+}
 /** v151（2.2）：会话换了卡片 → 其它卡片里关联它的任务 / 子任务解除关联（返回解除了几个）。 */
 export function dropForeignTaskSess(b: Board, sid: string, keepCard: string): number {
   let n = 0
-  for (const c of b.cards) if (c.id !== keepCard) for (const t of flatTasks(c.tasks)) if (t.sess === sid) { delete t.sess; n++ }
+  for (const c of b.cards) if (c.id !== keepCard) for (const t of flatTasks(c.tasks)) {
+    const ids = taskSessIds(t)
+    if (!ids.includes(sid)) continue
+    const rest = ids.filter((x) => x !== sid)
+    if (rest.length) { t.sess = rest[0]; if (rest.length > 1) t.sessArch = rest.slice(1); else delete t.sessArch } else { delete t.sess; delete t.sessArch }
+    n++
+  }
   return n
 }
+
+/** v175（R5）：把某个会话恢复成活跃，会不会让某个任务出现两个活跃会话（会 = 返回那个任务 + 它现在那个活跃会话）。 */
+export function liveConflictForSession(b: Board, sid: string, isArchived: (sid: string) => boolean): { text: string; sub: boolean; other: string } | null {
+  for (const c of b.cards) {
+    const flat = flatTasks(c.tasks)
+    const subs = new Set(flat.filter((t) => t !== c.tasks.find((x) => x.id === t.id)).map((t) => t.id))
+    for (const t of flat) {
+      const ids = taskSessIds(t)
+      if (!ids.includes(sid)) continue
+      const other = ids.find((x) => x !== sid && !isArchived(x))
+      if (other) return { text: t.text, sub: subs.has(t.id), other }
+    }
+  }
+  return null
+}
 /** 一个会话被这张卡片里几个任务 / 子任务关联。 */
-export const sessionTaskCount = (c: Card, sid: string): number => flatTasks(c.tasks).filter((t) => t.sess === sid).length
+export const sessionTaskCount = (c: Card, sid: string): number => flatTasks(c.tasks).filter((t) => taskSessIds(t).includes(sid)).length
 
 /** 判断两条链接是否同一个：协议 + 域名（小写）+ 路径（去掉末尾 /）+ 查询 + 锚点。 */
 export function urlKey(url: string): string {
@@ -1236,6 +1335,8 @@ export function parseBoard(raw: unknown): Board {
     g.statuses = g.statuses.map((s) => ({ id: s.id, name: s.name }))
   }
   for (const c of b.cards) delete (c as Card & { ev?: unknown }).ev
+  // v172：星标只认 true（旧数据没有这个字段；手改出来的 false / 空值一律清掉，不写回盘）
+  for (const c of b.cards) if (c.star !== true) delete c.star
   // 0.24 升级：链接补 id（按网址确定性生成，没写盘前每次读都一样）；子任务补 id；整段说明 → 一条「卡片项目说明」
   for (const c of b.cards) {
     for (const l of c.webLinks ?? []) if (!l.id) l.id = 'l' + fnv(urlKey(l.url))

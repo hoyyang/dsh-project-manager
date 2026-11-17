@@ -114,15 +114,21 @@ export declare function mentioned(text: string, states: ReadonlyArray<{
     slug: string;
     aliases?: readonly string[];
 }>): string[];
-/**
- * 用户原话 → 要落盘 / 要回忆。0.18：「落盘项目」只在三种写法下算指令——某行以它开头（后面不是「的 / 功能 …」）、
- * 后面跟着已知 slug / 单号、或在整条消息末尾；引号（「」“”""）里的不算。「回忆」优先；「继续」只在点名了已知项目时算回忆。
- */
+/** Actions name adjacent targets, not projects mentioned elsewhere in a report. */
 export declare function detectIntent(text: string, states: ReadonlyArray<{
     key: string;
     slug: string;
     aliases?: readonly string[];
 }>): Intent | null;
+/** Shared ingress; the host source is producer-declared, not authenticated. */
+export declare function detectMemoryRequests(messages: readonly unknown[], states: ReadonlyArray<{
+    key: string;
+    slug: string;
+    aliases?: readonly string[];
+}>): {
+    intent: Intent | null;
+    merges: string[];
+};
 export declare function intentHint(i: Intent, project: string | null): string;
 /** 回合要结束时：要求的事没做、没在等用户回答、拉回次数没用完、不在规划模式、没被连续忽略 → 返回拉回提示；否则 null。 */
 export declare function stopNudge(s: TurnState, maxPulls?: number, plan?: boolean): string | null;

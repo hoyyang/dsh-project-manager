@@ -53,6 +53,23 @@ export interface PanelDay {
     doneAt?: Record<string, number>;
     /** v123：记录执行那一刻卡片在哪个分区（点「已执行」撤销时回到这里）。 */
     from?: Record<string, PanelZone>;
+    /** v161：跨天推荐来源（key → 前一天在哪个分区）。只存今天；标记在离开「被带进的分区」后自动不显示。 */
+    rec?: Record<string, {
+        d: string;
+        z: PanelZone;
+    }>;
+    /** v184：过 00:00 自动记录执行的 key（只保留还在 done 里的；宿主 autoCloseDay 写，客户端只读）。 */
+    auto?: string[];
+    /** v184：这一天的自动结算凭证（一天只跑一次；撤销后不补）。z = 当时三个分区各有几张卡。 */
+    autoRec?: {
+        at: number;
+        n: number;
+        z?: {
+            wait?: number;
+            pause?: number;
+            run?: number;
+        };
+    };
 }
 export interface CardGantt {
     /**
@@ -115,6 +132,18 @@ export declare function taskKeySet(c: Card): Set<string>;
 export declare function taskKeySetAll(cards: Card[]): Set<string>;
 /** 写一天的面板状态（done / sel / lanes 都可单独传；空 = 删掉那一项）。非法 key 丢弃，不报错。 */
 export declare function setPanelDay(st: GanttState, key: string, patch: Record<string, unknown>, valid: Set<string>): PanelDay | null;
+export interface AutoCloseResult {
+    n: number;
+    z: {
+        wait: number;
+        pause: number;
+        run: number;
+    };
+}
+/** 过 00:00 收口：把 dayKey（只认昨天及更早）任务执行安排里「等外部进展 / 个人暂停 / 执行中」的卡片，
+ *  按手点「记录执行」同一条路径写 done / doneAt / from / auto / autoRec。
+ *  不动 sel / lanes / pst / zl / carry / rec；归档卡跳过；已有 autoRec = 一天只跑一次，返回 null。 */
+export declare function autoCloseDay(st: GanttState, cards: Card[], dayKey: string, now?: number): AutoCloseResult | null;
 export declare const ddlIdOf: (d: GanttDDL) => string;
 export declare const ddlKindOf: (d: GanttDDL) => "hard" | "soft";
 /** 加一条截止时间（同一天可以加多个）；返回新条目。 */
@@ -168,6 +197,8 @@ export interface GanttCardOut {
     seq: number;
     /** v86：pending 卡片不进日程（行、计数、组统计都不算）。 */
     pending?: boolean;
+    /** v172：项目星标（甘特目录格 / 执行安排只读显示）。 */
+    star?: boolean;
     plan: string[];
     actual: Array<{
         day: string;

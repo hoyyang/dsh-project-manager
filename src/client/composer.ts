@@ -13,25 +13,29 @@ import { cardText, fileText, linkText, noteText, refNameKey, repoText } from '..
 import { openedHow, openFileSmart, post, type SessionInfo } from './api.js'
 import { esc, iconMask } from './icons.js'
 import { chipIconId } from './chipicon.js'
+import { openKbEditor, SEL_SEGS_HTML } from './kbdlg.js'
 
 /* ── v153：胶囊类型 + 类型图标（和说明框 / 气泡窗同一套；对话框里只能用 mask 画） ───────── */
 const RX_CARD = /^「“[^”「」]+”（卡片组：“[^”「」]+”）卡片」$|^「[^「」“”（）]+（卡片组：[^「」（）]+）卡片」$/
 const RX_SESS = /^「“[^”「」]+”会话(?:（[^「」]*）)?」$/
 const RX_REPO = /^「“[^”「」]+”（路径：(?:\/|~\/)[^）「」]+）」$|^「[^「」“”（）]+（路径：(?:\/|~\/)[^）「」]+）」$/
 const RX_LINK = /^「“[^”「」]+”（https?:\/\/[^）「」]+）」$|^「[^「」“”（）]+（https?:\/\/[^）「」]+）」$/
+/** v163 S10：知识卡引用原文「“标题”知识卡（/abs/path/<id>.md）」—— 必须在 RX_FILE 之前认（它的「”（」被「知识卡」隔开，理论上不吃，但顺序写死更稳）。 */
+const RX_KB = /^「“[^”「」]+”知识卡（(?:\/|~\/)[^）「」]+\.md）」$/
 const RX_FILE = /^「“[^”「」]+”（(?:已删除：)?(?:\/|~\/)[^）「」]+）」$|^「[^「」“”（）]+（(?:已删除：)?(?:\/|~\/)[^）「」]+）」$/
 /** 引用原文 → 胶囊类型（结构识别；认不出 = 说明）。 */
-export function refKind(ref: string): 'note' | 'link' | 'file' | 'repo' | 'card' | 'sess' {
+export function refKind(ref: string): 'note' | 'link' | 'file' | 'repo' | 'card' | 'sess' | 'kb' {
   if (RX_CARD.test(ref)) return 'card'
   if (RX_SESS.test(ref)) return 'sess'
   if (RX_REPO.test(ref)) return 'repo'
   if (RX_LINK.test(ref)) return 'link'
+  if (RX_KB.test(ref)) return 'kb'
   if (RX_FILE.test(ref)) return 'file'
   return 'note'
 }
 /** 文件引用里的路径（给 ftype 按扩展名选图标）。 */
 const refFilePath = (ref: string): string => { const m = /（(?:已删除：)?((?:\/|~\/)[^）「」]+)）」$/.exec(ref); return m ? m[1] : '' }
-const CHIP_IC_IDS = ['note', 'link', 'file', 'img', 'video', 'audio', 'code', 'data', 'doc', 'sheet', 'slides', 'archive2', 'log', 'pkg', 'font', 'design', 'folder', 'cards', 'chat']
+const CHIP_IC_IDS = ['note', 'link', 'file', 'img', 'video', 'audio', 'code', 'data', 'doc', 'sheet', 'slides', 'archive2', 'log', 'pkg', 'font', 'design', 'folder', 'cards', 'chat', 'kb']
 let chipCssEl: HTMLStyleElement | null = null
 let chipCssRefs = 0
 /** v153：把图标 id → CSS mask 变量注入一次（图标 path 来自 icons.ts，和插件自己画的图标同源）。 */
@@ -53,12 +57,14 @@ type InputState = { draft: string; draftRev: number; occurrences: Occ[]; phase: 
 export const SOURCE = 'dsh-project-manager'
 
 /* ── 引用原文 → 胶囊（结构识别；v137 3(1)）──────────────────────────────── */
-export interface RefHit { i: number; len: number; kind: 'note' | 'link' | 'file' | 'repo' | 'card' | 'sess'; title: string; body?: string; canon: string }
+export interface RefHit { i: number; len: number; kind: 'note' | 'link' | 'file' | 'repo' | 'card' | 'sess' | 'kb'; title: string; body?: string; canon: string }
 const RX: Array<{ kind: RefHit['kind']; rx: RegExp }> = [
   { kind: 'card', rx: /「“([^”「」]+)”（卡片组：“([^”「」]+)”）卡片」/g },
   { kind: 'sess', rx: /「“([^”「」]+)”会话(?:（[^「」]*）)?」/g },
   { kind: 'repo', rx: /「“([^”「」]+)”（路径：((?:\/|~\/)[^）「」]+)）」/g },
   { kind: 'link', rx: /「“([^”「」]+)”（(https?:\/\/[^）「」]+)）」/g },
+  /* v163 S10：知识卡（body = .md 路径）；放在 file 之前，引用原文里的「知识卡」让它和文件引用天然不撞 */
+  { kind: 'kb', rx: /「“([^”「」]+)”知识卡（((?:\/|~\/)[^）「」]+\.md)）」/g },
   { kind: 'file', rx: /「“([^”「」]+)”（(?:已删除：)?((?:\/|~\/)[^）「」]+)）」/g },
 ]
 /** 文字里第一个引用原文（说明按卡片里现有的原文匹配；其余按结构）。notes = 卡片说明的引用原文。 */
@@ -238,14 +244,14 @@ const IC: Record<string, string> = {
 const LAB: Record<string, string> = { link: '添加为相关链接', file: '添加为相关文件', dir: '添加为仓库', note: '添加为相关说明' }
 const HAVE: Record<string, string> = { link: '已是相关链接', file: '已是相关文件', dir: '已是仓库' }
 const OPEN_HINT: Record<string, string> = { link: '⌘ 点击 = 浏览器打开', file: '⌘ 点击 = 默认应用打开', dir: '⌘ 点击 = 访达打开' }
-const APPEAR: Record<string, string> = { note: 'dpm-note', link: 'dpm-link', file: 'file', repo: 'folder', card: 'dpm-card', sess: 'session' }
+const APPEAR: Record<string, string> = { note: 'dpm-note', link: 'dpm-link', file: 'file', repo: 'folder', card: 'dpm-card', sess: 'session', kb: 'dpm-kb' }
 
 /** 每个会话一份（挂在 dock 上，卸载即净）。 */
 export class ComposerAssist {
   private dead = false
   private marks: Array<Mark & { r: Range }> = []
   private hov: (Mark & { r: Range }) | null = null
-  private bub: HTMLButtonElement | null = null
+  private bub: HTMLElement | null = null
   private bubFor: (Mark & { r: Range }) | 'sel' | null = null
   private anchor: { left: number; right: number; top: number; bottom: number } | null = null
   private hideT = 0
@@ -517,23 +523,40 @@ export class ComposerAssist {
   }
 
   /* ── 气泡（v137 安全区 + v138 不挡选区 / ⌘ 提示 / 使用引用内容 + v139 添加后变胶囊）── */
-  private ensureBub(): HTMLButtonElement {
+  private ensureBub(): HTMLElement {
     if (this.bub) return this.bub
-    const b = document.createElement('button')
-    b.type = 'button'; b.className = 'dpm-cbub'; b.hidden = true
+    /* v168：容器从 <button> 换成 <div> —— 框选时它装左右两个按钮（左说明 / 右知识卡） */
+    const b = document.createElement('div')
+    b.className = 'dpm-cbub'; b.hidden = true
     b.addEventListener('pointerdown', (e) => e.preventDefault())
-    b.addEventListener('click', () => { void this.bubClick() })
+    b.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement | null
+      if (t && typeof t.closest === 'function' && t.closest('[data-kbseg]')) { e.preventDefault(); e.stopPropagation(); this.kbFromSel(); return }
+      void this.bubClick()
+    })
     document.body.append(b)
     this.bub = b
     return b
+  }
+  /** v168：右半「添加为知识卡」—— 打开同一个新建弹窗，正文 = 框选原文（不自动挂当前项目卡） */
+  private kbFromSel(): void {
+    const t = this.selTxt
+    this.bubHide()
+    if (!String(t).trim()) { this.h.toast('先在输入框里框选一段内容', 'err'); return }
+    openKbEditor({ mode: 'new', prefill: t, source: 'sel', toast: (m, k) => this.h.toast(m, k) })
   }
   private bubShow(kind: string, rect: { left: number; width: number; top: number; bottom: number; preferUp?: boolean }, target: (Mark & { r: Range }) | 'sel', done: boolean): void {
     const b = this.ensureBub()
     clearTimeout(this.hideT); this.hideT = 0
     const use = done && kind !== 'note'
-    b.classList.toggle('use', use)
+    /* v168：框选（说明）= 左右两半；其它（链接 / 文件 / 仓库 / 使用引用内容）保持单颗 */
+    const split = kind === 'note' && target === 'sel'
+    b.classList.toggle('split', split)
+    b.classList.toggle('use', use && !split)
     const lab = use ? '使用引用内容' : LAB[kind]
-    b.innerHTML = (use ? IC.use : IC[kind]) + '<span>' + lab + '</span>' + (kind === 'note' ? '<small>' + Math.min(999, this.selTxt.length) + ' 字</small>' : '<small class="cmdh">' + OPEN_HINT[kind] + '</small>')
+    b.innerHTML = split
+      ? SEL_SEGS_HTML
+      : (use ? IC.use : IC[kind]) + '<span>' + lab + '</span>' + (kind === 'note' ? '<small>' + Math.min(999, this.selTxt.length) + ' 字</small>' : '<small class="cmdh">' + OPEN_HINT[kind] + '</small>')
     b.dataset.kind = kind; b.dataset.use = use ? '1' : ''
     b.setAttribute('aria-label', lab + (use ? '（' + HAVE[kind] + '）' : '') + (target !== 'sel' ? '：' + target.text : ''))
     this.bubFor = target
@@ -543,7 +566,10 @@ export class ComposerAssist {
     const up = rect.bottom + 6 + bh > innerHeight - 6 || !!rect.preferUp
     const y = up ? rect.top - 6 - bh : rect.bottom + 6
     b.style.left = Math.round(x) + 'px'; b.style.top = Math.round(y) + 'px'
-    b.style.setProperty('--ax', Math.round(cx - x - 4) + 'px'); b.classList.toggle('up', up)
+    /* v168：框选时尖尖钉在两半中间的分隔线下方（--ax = 左半宽度）；单颗时仍跟选区中心 */
+    const seg = split ? (b.querySelector('.nseg') as HTMLElement | null) : null
+    b.style.setProperty('--ax', (seg ? seg.offsetWidth : Math.max(4, Math.round(cx - x - 4))) + 'px')
+    b.classList.toggle('up', up)
     this.anchor = { left: rect.left, right: rect.left + rect.width, top: rect.top, bottom: rect.bottom }
   }
   private bubHide(): void { clearTimeout(this.hideT); this.hideT = 0; if (this.bub) this.bub.hidden = true; this.bubFor = null; this.anchor = null; if (this.hov) { this.hov = null; this.paint() } }

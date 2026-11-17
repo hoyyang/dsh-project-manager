@@ -69,7 +69,9 @@ test('v90 · peek 只读缓存：新鲜版本命中、版本变了就点名「�
   assert.deepEqual(cache.peek(['a'], verOf).days.a, ['2026-10-20'])
   ver = 'live:2'
   const p = cache.peek(['a'], verOf)
-  assert.deepEqual(p.days.a, [])
+  /* v176：版本变了不再把天数清空（活跃会话每轮版本都变 → 自动执行日在「空 ↔ 有」之间跳 → 每 5s 整页重画）；
+     先拿上次算出来的天数顶上，等后台 warm 刷新，但「正在统计」这句仍要如实说 */
+  assert.deepEqual(p.days.a, ['2026-10-20'])
   assert.ok(p.degraded.some((x) => x.includes('正在统计')), JSON.stringify(p.degraded))
 })
 

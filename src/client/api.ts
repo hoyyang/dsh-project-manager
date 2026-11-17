@@ -40,15 +40,17 @@ export interface Repo { name: string; role: string; path: string; off?: boolean 
 export interface Group { id: string; name: string; collapsed: boolean; repos: Repo[]; links: string[]; statuses: Status[]; lfProject?: string; updatedAt?: string | null; archivedAt?: string }
 export interface WebLink { id?: string; text: string; type: string; url: string; off?: boolean; /** v140 */ star?: boolean; /** v141 */ tag?: string }
 /** 0.24 子任务：两级；note 里的 [n] = links 第 n 条；created / updated 由服务端盖（ISO）。 */
-export interface Task { id?: string; text: string; done: boolean; note?: string; type?: string; links?: string[]; files?: string[]; subs?: Task[]; created?: string; updated?: string; /** v127：截止日期 YYYY-MM-DD */ due?: string; /** v140：关联的会话 id */ sess?: string }
+export interface Task { id?: string; text: string; done: boolean; note?: string; type?: string; links?: string[]; files?: string[]; subs?: Task[]; created?: string; updated?: string; /** v127：截止日期 YYYY-MM-DD */ due?: string; /** v140：关联的会话 id（v175 起 = 代表会话） */ sess?: string; /** v175：其余关联的会话 id（[sess, ...sessArch] 里未归档的最多 1 个） */ sessArch?: string[] }
 /** 0.26 相关文件：id 稳定（子任务按 id 绑定）；title 空 = 显示文件名。 */
 export interface FileRef { id: string; path: string; title?: string; off?: boolean; prev?: string[] }
-export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean }
+/** v182：界面语言三档（auto = 跟随 DSH）；存 host 侧看板文档 prefs.lang。 */
+export type LangMode = 'auto' | 'zh' | 'en'
+export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean; lang?: LangMode }
 export interface NoteItem { t: string; v: string; pin?: boolean; off?: boolean }
 export interface TypeGroup { id: string; name: string; types: string[] }
-export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; repos?: Repo[]; noteItems?: NoteItem[]; webLinks?: WebLink[]; files?: FileRef[]; archivedAt?: string; pending?: boolean; related?: string[]; /** v136：关联卡片里不注入的 id */ relOff?: string[]; updatedAt?: string | null }
+export interface Card { id: string; g: string; col: string; order: number; t: string; links: string[]; tasks: Task[]; repos?: Repo[]; noteItems?: NoteItem[]; webLinks?: WebLink[]; files?: FileRef[]; archivedAt?: string; pending?: boolean; related?: string[]; /** v136：关联卡片里不注入的 id */ relOff?: string[]; updatedAt?: string | null; /** v163 S3：挂载的知识卡（去重保序；mode 缺省 = 按类型默认，见 host kbMode）。 */ kb?: Array<{ id: string; mode?: 'full' | 'sum' | 'off' }>; /** v172：项目星标（缺省 = 未加星）。 */ star?: boolean }
 export interface SessionRef { sessionId: string; cardId: string; createdAt: string; title?: string; readKeys?: string[] }
-export interface StateInfo { key: string; project: string; slug: string; status: string; next: string; updated: string; path: string; error?: string }
+export interface StateInfo { key: string; project: string; slug: string; status: string; next: string; updated: string; path: string; error?: string; /** v158：STATE 的 aliases 行（搜索按别名也能找到落盘项目） */ aliases?: string[] }
 export interface RepoSeen extends Repo { at: string }
 export interface Snapshot { rev: number; board: { groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[]; linkTypeGroups?: TypeGroup[]; repoHistory?: RepoSeen[]; taskTypes?: string[]; prefs?: Partial<Prefs>; linkTypeDomains?: Record<string, string[]>; linkTypeTags?: Record<string, string[]> }; states: StateInfo[]; hub: { workspaceId: string | null; path: string; title: string; groups?: Record<string, string> }; caps?: { unarchive: boolean }; repoOk?: Record<string, boolean>; files?: Record<string, boolean>; landfill?: LandfillStatus }
 /** 0.16 落盘项目环境：skill = ~/.agents 下 landfill-project 链接状态（file = 本机单独一份，可接管）。 */
@@ -57,7 +59,7 @@ export interface LandfillStatus { enabled: boolean; ok: boolean; reason: string;
 export interface SessionInfo {
   card: { id: string; title: string; group: string } | null; suggest?: { key: string; slug: string } | null; materials?: { notes: number; links: number; files: number; repos?: number; tasks?: number }; memory?: { key: string; from: 'group' | 'card' | 'both'; slug: string; next: string; found: boolean; read?: boolean }[]
   /** 0.19 会话信息卡 */
-  cardInfo?: { id: string; stage: string; archived: boolean; repos: Repo[]; tasks: Task[]; notes: NoteItem[]; links: WebLink[]; files: Array<{ id?: string; path: string; title?: string; exists: boolean; prev?: string[] }>; related?: Array<{ id: string; title: string; group: string; stage?: string; archived: boolean; dirs: string[] }>; sessions?: Array<{ id: string; title: string }>; lfDirs?: string[] }
+  cardInfo?: { id: string; stage: string; archived: boolean; repos: Repo[]; tasks: Task[]; notes: NoteItem[]; links: WebLink[]; files: Array<{ id?: string; path: string; title?: string; exists: boolean; prev?: string[] }>; related?: Array<{ id: string; title: string; group: string; stage?: string; archived: boolean; dirs: string[] }>; sessions?: Array<{ id: string; title: string }>; lfDirs?: string[]; kb?: KbRef[] }
   /** 0.27 没关联卡片、但在项目区某个卡片组子工作区里的会话 →「创建会话卡片」 */
   free?: { group: { id: string; name: string; statuses: Status[] } } | null
   memDetail?: MemDetail[]
@@ -95,6 +97,8 @@ export const getSession = (id: string, cwd = ''): Promise<SessionInfo> => call<S
   return s
 })
 export const getRaw = (id: string): Promise<RawInfo> => call('/session/raw?id=' + encodeURIComponent(id))
+/** v182：界面语言词典（host 的 lib/i18n/en.json；v = 词典版本，客户端按它缓存）。 */
+export const getI18n = (): Promise<{ v: string; dict: Record<string, string> }> => call('/i18n')
 /** v93/v94：某个会话里用户自己发过的消息（从新到旧；host 读 sessionQuery，不受界面虚拟列表影响）。 */
 export interface HistoryMsg { seq: number; at: string; text: string }
 /** v94：一页历史 + 总数 + 还有没有更早的（before = 下一页游标）。 */
@@ -121,6 +125,8 @@ export interface GanttCard {
   /** v86：与项目看板一致的展示顺序；pending 卡片不进日程 */
   seq: number
   pending?: boolean
+  /** v172：项目星标（跨天 / 跨页面显示同一份状态） */
+  star?: boolean
   plan: string[]
   actual: Array<{ day: string; src: 'auto' | 'manual' }>
   ddl: GanttDDL[]
@@ -134,7 +140,7 @@ export interface GanttCard {
 /** v105：每日任务面板按天状态（勾选 = 当天完成 / 选中 = 排今天 / 排布）。 */
 export type GanttPst = 'run' | 'pause' | 'wait'
 export type GanttZone = 'done' | 'wait' | 'pause' | 'run' | 'arr' | 'un'
-export interface GanttPanelDay { done?: string[]; sel?: string[]; lanes?: string[][]; /** v110：执行中 / 已暂停（落盘的运行态）；v121 加 wait = 等外部进展 */ pst?: Record<string, GanttPst>; /** v111：这一天已经跑过自动续排 */ carry?: boolean; /** v122/v123：个人暂停 / 等外部 / 执行中 / 未安排的行 */ zl?: Partial<Record<'pause' | 'wait' | 'run' | 'un', string[][]>>; /** v122：记录执行的时间 */ doneAt?: Record<string, number>; /** v123：记录执行时的来源分区 */ from?: Record<string, GanttZone> }
+export interface GanttPanelDay { done?: string[]; sel?: string[]; lanes?: string[][]; /** v110：执行中 / 已暂停（落盘的运行态）；v121 加 wait = 等外部进展 */ pst?: Record<string, GanttPst>; /** v111：这一天已经跑过自动续排 */ carry?: boolean; /** v122/v123：个人暂停 / 等外部 / 执行中 / 未安排的行 */ zl?: Partial<Record<'pause' | 'wait' | 'run' | 'un', string[][]>>; /** v122：记录执行的时间 */ doneAt?: Record<string, number>; /** v123：记录执行时的来源分区 */ from?: Record<string, GanttZone>; /** v161：跨天推荐来源（key → 前一天在哪个分区） */ rec?: Record<string, { d: string; z: GanttZone }>; /** v184：过 00:00 自动记录执行的 key（宿主写） */ auto?: string[]; /** v184：这一天已自动结算过的凭证（一天只跑一次） */ autoRec?: { at: number; n: number; z: { wait?: number; pause?: number; run?: number } } }
 export interface GanttGroup { id: string; name: string; upd: number; archivedAt?: string; stages: Status[]; collapsed?: boolean }
 export interface GanttUI { lw?: number; tpw?: number; dw?: number; gtime?: boolean; /** v105：面板两块卡片高度比（上面那块百分比，20–80） */ tpr?: number; /** v110：甘特图是否显示 pending 项目（默认 true） */ pend?: boolean; /** v118：本日计划清单收起（默认收起） */ pfold?: boolean; /** v118：只显示可安排（默认开） */ plonly?: boolean; /** v121：只显示本日完成 */ pldone?: boolean; /** v121：计划清单收起的行 */ plclosed?: string[]; /** v124：已完成任务里点开过的 */ plopen?: string[]; /** v124：执行安排收起的分区 */ exz?: string[]; /** v130：两张卡开合 ex / pl / split */ tpm?: 'ex' | 'pl' | 'split' }
 export interface GanttData { rev: string; today: string; groups: GanttGroup[]; cards: GanttCard[]; panels?: Record<string, GanttPanelDay>; ui: GanttUI; degraded: string[]; same?: boolean }
@@ -201,3 +207,30 @@ export function normCard(c: Card & { notes?: unknown }): Card {
   return c
 }
 export function normSnap<T extends Snapshot>(s: T): T { for (const c of s.board?.cards ?? []) normCard(c as Card & { notes?: unknown }); return s }
+
+/** v163 S10：会话输入框「>」引用的知识卡（host cardInfo.kb；prompt 类带正文） */
+export interface KbRef { id: string; title: string; type: KbType; status: KbStatus; summary: string; path: string; body?: string }
+/* ── v163 S4：知识库（host /kb 路由；S7 起界面才调用）── */
+export type KbType = 'prompt' | 'howto' | 'snippet' | 'domain' | 'business' | 'moc'
+export type KbStatus = 'draft' | 'verified' | 'stale'
+/** 列表项：不含 body / extra；summary 空时 host 已按正文兜底。score / hit 只在 /kb/search 结果里带。 */
+export interface KbItem { id: string; title: string; type: KbType; status: KbStatus; tags: string[]; summary: string; contains: string[]; relates: string[]; created: string; updated: string; path: string; score?: number; hit?: string }
+export interface KbCardFull extends KbItem { body: string; extra?: Record<string, string> }
+export interface KbErrors { errors: Array<{ path: string; error: string }> }
+export interface KbList extends KbErrors { cards: KbItem[] }
+export interface KbCardInfo extends KbErrors { card: KbCardFull; attachedBy: Array<{ cardId: string; title: string; group: string }> }
+export interface KbSearchResult extends KbErrors { cards: Array<KbItem & { score: number }> }
+export const getKb = (): Promise<KbList> => call<KbList>('/kb')
+export const getKbCard = (id: string): Promise<KbCardInfo> => call<KbCardInfo>('/kb/card?id=' + encodeURIComponent(id))
+export interface KbSearchOpts { q?: string; type?: string; tag?: string; status?: string; limit?: number }
+export const searchKb = (q: string, o: KbSearchOpts = {}): Promise<KbSearchResult> => {
+  const qs: string[] = ['q=' + encodeURIComponent(q)]
+  if (o.type) qs.push('type=' + encodeURIComponent(o.type))
+  if (o.tag) qs.push('tag=' + encodeURIComponent(o.tag))
+  if (o.status) qs.push('status=' + encodeURIComponent(o.status))
+  if (o.limit) qs.push('limit=' + String(o.limit))
+  return call<KbSearchResult>('/kb/search?' + qs.join('&'))
+}
+/** op = create / update / remove / restore；body 原样给 host（create 收 {title,type,body,summary?,tags?…}，update 收 {id,…patch}）。 */
+export const postKb = (op: 'create' | 'update' | 'remove' | 'restore', body: Record<string, unknown>): Promise<{ card?: KbItem } & KbErrors> =>
+  post<{ card?: KbItem } & KbErrors>('kb/' + op, body)

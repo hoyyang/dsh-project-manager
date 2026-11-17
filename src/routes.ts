@@ -11,6 +11,8 @@ import type { Board } from './model.js'
 import { refNameKey } from './quote.js'
 import type { BoardStore } from './store.js'
 import type { StateCatalog } from './states.js'
+import type { KbCard, KbStatus, KbStore, KbType } from './kb.js'
+import { buildKbIndex, searchKb, type KbSearchOpts } from './kbsearch.js'
 
 export const ROUTE_PREFIX = '/_dsh/dsh-project-manager'
 // 相关说明不限字数：体上限放到 2MB（仅本机同源请求）
@@ -20,6 +22,10 @@ const MAX_BODY = 32 * 1024 * 1024
 export interface Services {
   store: BoardStore
   states: StateCatalog
+  /** v163 S4：知识卡目录（知识库 v1，<dataDir>/kb/）。 */
+  kb: KbStore
+  /** v182：英文词典（lib/i18n/en.json）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
+  i18n?(): { v: string; dict: Record<string, string> } | null
   /** groups = 卡片组 id → 它的子工作区 id（侧栏按 data-row-key 找组行用）。 */
   hub(): { workspaceId: string | null; path: string; title: string; groups: Record<string, string> }
   prepareSession(cardId: string): Promise<{ workspaceId: string; workspaceTitle: string }>
@@ -31,6 +37,8 @@ export interface Services {
   unlinkSession(sessionId: string): Promise<{ cardId: string }>
   unarchiveSession(sessionId: string): Promise<{ restored: boolean }>
   canUnarchive(): boolean
+  /** v175：这个会话现在是不是归档状态（宿主侧唯一来源 = workspaceRegistry.archivedSessionIds；多关联守卫用）。 */
+  isSessionArchived(sessionId: string): boolean
   /** 0.16 落盘项目环境（看板顶部提示 / 接管按钮用）。 */
   landfill(): import('./landfill.js').LandfillStatus & { toolOutdated?: boolean }
   /** 0.16：把 ~/.agents 下已有的 SKILL.md 备份后换成指向插件的链接。 */
@@ -39,6 +47,8 @@ export interface Services {
   upgradeTool(): { backup: string; version: number }
   /** 弹系统选文件框（可多选）；取消返回 null；不支持的平台抛 BoardError('PICK_UNAVAILABLE')。 */
   pickFiles(): Promise<string[] | null>
+  /** v183（2.1）：列文件夹（应用内「选择文件夹」用；只读，只返回直接子文件夹，隐藏目录不列）。 */
+  listDirs?(path?: string): Promise<{ path: string; parent: string | null; home: string; dirs: Array<{ name: string; path: string }>; areas?: { hub: string; data: string; dsh: string } }>
   /** 0.15：慢请求日志（超过阈值时记每一步耗时）。 */
   warn?(msg: string): void
   /** 0.19 会话信息卡：卡片资料明细 + 落盘项目明细 + 合并卡片。 */
@@ -88,6 +98,10 @@ export interface Services {
   /** v138：会话输入框里 ⌘ 点击识别出的路径（不要求登记在卡片上）：文件夹 = 访达；文件 = 默认应用（可执行文件只在访达里选中，不运行）。 */
   openLocal?(path: string, dry?: boolean): Promise<Json>
   fileUntrash?(cardId: string, file: unknown, index: unknown, tasks: unknown, trashed: string): Promise<Json>
+  /** v180（0.75.0）清理关联文件：扫描（判定 + 体积）/ 删除并解除关联 / 仅解除关联 / 撤销。 */
+  cleanupScan?(): Promise<Json>
+  cleanupApply?(mode: string, keys: unknown): Promise<Json>
+  cleanupUndo?(items: unknown): Promise<Json>
   /** 0.31 任务日程看板：派生快照（计划 / 实际 / 截止 / 三条边的宽度）与变更。 */
   gantt?: {
     /** warm = 起一轮后台会话统计（只有日程页传 true）。 */
@@ -175,6 +189,9 @@ export function repoStatus(b: Board): Record<string, boolean> {
 const fileSig = (m: Record<string, boolean>): string => { let n = 0; for (const k in m) if (!m[k]) n = (n * 31 + k.length + 1) >>> 0; return n.toString(36) }
 const expandHome = (p: unknown): unknown => (typeof p === 'string' && /^~(\/|$)/.test(p.trim()) ? homedir() + p.trim().slice(1) : p)
 
+/** v163 S4：/kb 的列表项（不含 body / extra；summary 留空时按正文兜底）。 */
+const kbItem = (c: KbCard, kb: KbStore): Json => ({ id: c.id, title: c.title, type: c.type, status: c.status, tags: c.tags, summary: kb.summaryOf(c), contains: c.contains, relates: c.relates, created: c.created, updated: c.updated, path: c.path })
+
 /** 给前端的完整快照：看板 + 落盘项目目录 + 枢纽工作区 + 文件状态 + 最近事件。 */
 export function snapshot(s: Services, rev: string): Json {
   const b = s.store.get()
@@ -184,7 +201,7 @@ export function snapshot(s: Services, rev: string): Json {
     ok: true,
     rev,
     board: b,
-    states: s.states.list().map((x) => ({ key: x.key, project: x.project, slug: x.slug, status: x.status, next: x.next, updated: x.updated, path: x.path, error: x.error })),
+    states: s.states.list().map((x) => ({ key: x.key, project: x.project, slug: x.slug, status: x.status, next: x.next, updated: x.updated, path: x.path, error: x.error, aliases: x.aliases ?? [] })),
     hub: s.hub(),
     caps: { unarchive: s.canUnarchive() },
     landfill: s.landfill(),
@@ -274,7 +291,7 @@ export function findSameName(name: string, roots: string[], o: { depth?: number;
   return [...exact, ...near].slice(0, max)
 }
 
-type Handler = (body: Json, b: Board) => unknown
+type Handler = (body: Json, b: Board, s: Services) => unknown
 
 /** 所有变更动作：名称 → 纯变更（在 store 串行链上执行）。 */
 const MUTATIONS: Record<string, Handler> = {
@@ -301,6 +318,7 @@ const MUTATIONS: Record<string, Handler> = {
   'card/notes': (x, b) => M.setNotes(b, str(x.id, 'id'), x.notes),
   'card/noteitems': (x, b) => M.setNoteItems(b, str(x.id, 'id'), x.items),
   'card/related': (x, b) => M.setRelated(b, str(x.id, 'id'), x.cards),
+  'card/kb': (x, b) => M.setCardKb(b, str(x.id, 'id'), x.kb),
   'tasktype/add': (x, b) => M.addTaskType(b, x.name),
   'tasktype/rename': (x, b) => M.renameTaskType(b, x.from, x.to),
   'tasktype/delete': (x, b) => M.deleteTaskType(b, x.name),
@@ -320,7 +338,9 @@ const MUTATIONS: Record<string, Handler> = {
   'linktype/tag-add': (x, b) => M.addTypeTag(b, x.type, x.tag),
   'linktype/tag-remove': (x, b) => M.removeTypeTag(b, x.type, x.tag),
   'card/link-star': (x, b) => M.setLinkStar(b, str(x.id, 'id'), x.link, x.on),
-  'card/task-sess': (x, b) => M.setTaskSession(b, str(x.id, 'id'), x.task, x.sess),
+  /* v175：一个任务 / 子任务关联多个会话 —— 单个（新建会话 / 旧选择器）走 task-sess，多关联走 task-sess-list（顺序 = 代表会话在前）。 */
+  'card/task-sess': (x, b, s) => M.setTaskSession(b, str(x.id, 'id'), x.task, x.sess, undefined, (sid) => s.isSessionArchived(sid)),
+  'card/task-sess-list': (x, b, s) => M.setTaskSessList(b, str(x.id, 'id'), x.task, x.list, undefined, (sid) => s.isSessionArchived(sid)),
   'card/repos-add': (x, b) => M.addCardRepos(b, str(x.id, 'id'), x.repos, (p) => { try { return realpathSync(p) } catch { return p } }),
   'card/repos': (x, b) => M.setCardRepos(b, str(x.id, 'id'), x.repos),
   'card/files-add': (x, b) => { const it = x.items ?? x.paths; return M.addFiles(b, str(x.id, 'id'), Array.isArray(it) ? it.map((v) => (typeof v === 'string' ? expandHome(v) : v && typeof v === 'object' ? { ...(v as Json), path: expandHome((v as Json).path) } : v)) : it) },
@@ -337,6 +357,8 @@ const MUTATIONS: Record<string, Handler> = {
   'card/unarchive': (x, b) => M.unarchiveCard(b, str(x.id, 'id')),
   // v86：pending 卡片拖回活跃区时可以直接改阶段（col 必须透传，否则拖到别的列仍留在原阶段）
   'card/pending': (x, b) => M.setPending(b, str(x.id, 'id'), x.on !== false, x.col === undefined ? undefined : str(x.col, 'col')),
+  // v172：项目星标（一个布尔，看板卡 / 详情 / 甘特目录格 / 执行安排四处显示）
+  'card/star': (x, b) => M.setCardStar(b, str(x.id, 'id'), x.on === true),
   'card/move': (x, b) => M.moveCard(b, str(x.id, 'id'), { g: x.group as string | undefined, col: str(x.col, 'col'), beforeId: (x.beforeId as string | null | undefined) ?? null }, 'user'),
 }
 
@@ -348,8 +370,8 @@ export function mountRoutes(
   // 版本号 = 启动标识 + 看板变更计数 + STATE 目录签名：插件重载或 STATE 改动都会让前端拉到新快照
   const boot = Date.now().toString(36)
   let forkBackup = ''
-  // 文件被删/恢复也要让前端拉新快照 → 版本号带上「缺失文件」签名
-  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature() + '.' + fileSig(fileStatus(s.store.get())) + fileSig(repoStatus(s.store.get())) + '.' + s.landfill().skill + (s.landfill().toolOutdated ? 'o' : '')
+  // 文件被删/恢复也要让前端拉新快照 → 版本号带上「缺失文件」签名；v163 S4 知识卡目录变了也要拉新
+  const getRev = (): string => boot + '.' + boardRev() + '.' + s.states.signature() + '.' + fileSig(fileStatus(s.store.get())) + fileSig(repoStatus(s.store.get())) + '.' + s.landfill().skill + (s.landfill().toolOutdated ? 'o' : '') + '.' + s.kb.signature()
   return webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -414,6 +436,31 @@ export function mountRoutes(
             if (!s.merge) return fail(res, 400, 'MERGE_OFF', '落盘项目功能没开启，不能合并')
             const keys = (u.searchParams.get('keys') ?? '').split(',').filter(Boolean)
             return send(res, 200, { ok: true, ...s.merge.preview(u.searchParams.get('session') ?? '', keys, u.searchParams.get('name') ?? '') })
+          }
+          // v163 S4：知识库（host 面；界面 S7 起调用）
+          if (sub === '/kb') {
+            return send(res, 200, { ok: true, cards: s.kb.list().map((c) => kbItem(c, s.kb)), errors: s.kb.errors })
+          }
+          if (sub === '/kb/card') {
+            const id = u.searchParams.get('id') ?? ''
+            const c = s.kb.get(id)
+            if (!c) return fail(res, 404, 'NO_KB', '找不到知识卡 ' + id)
+            const b = s.store.get()
+            const attachedBy = b.cards.filter((x) => (x.kb ?? []).some((k) => k.id === c.id)).map((x) => ({ cardId: x.id, title: x.t, group: M.group(b, x.g).name }))
+            return send(res, 200, { ok: true, card: { ...c, summary: s.kb.summaryOf(c) }, attachedBy, errors: s.kb.errors })
+          }
+          if (sub === '/i18n') {
+            // v182：界面语言词典（4,454 条）。GET + rev，客户端按 v 缓存在 localStorage；不内联进 client.js。
+            const d = s.i18n?.() ?? null
+            if (!d) return fail(res, 404, 'NOT_FOUND', '当前宿主还没有英文词典：宿主在跑旧代码（重启 DSH 后可用），或包内缺 lib/i18n/en.json')
+            return send(res, 200, { ok: true, ...d })
+          }
+          if (sub === '/kb/search') {
+            const lim = Number(u.searchParams.get('limit')) || undefined
+            const o: KbSearchOpts = { type: u.searchParams.get('type') as KbType | undefined, tag: u.searchParams.get('tag') ?? undefined, status: u.searchParams.get('status') as KbStatus | undefined, limit: lim }
+            const hits = searchKb(buildKbIndex(s.kb.list()), u.searchParams.get('q') ?? '', o)
+            const cards = hits.flatMap((h) => { const c = s.kb.get(h.id); return c ? [{ ...kbItem(c, s.kb), score: h.score, hit: h.hit }] : [] })
+            return send(res, 200, { ok: true, cards, errors: s.kb.errors })
           }
           return fail(res, 404, 'NOT_FOUND', '未知路径 ' + sub)
         }
@@ -493,10 +540,26 @@ export function mountRoutes(
           const r = key === 'card/files-trash' ? await s.fileTrash(id, str(body.file, 'file')) : await s.fileUntrash(id, body.file, body.index, body.tasks, str(body.trashed, 'trashed'))
           return send(res, 200, { ok: true, result: r, ...snapshot(s, getRev()) })
         }
+        if (key === 'card/files-cleanup') {
+          if (!s.cleanupScan) return fail(res, 404, 'NOT_FOUND', '当前版本不支持清理关联文件')
+          return send(res, 200, { ok: true, scan: await s.cleanupScan() })
+        }
+        if (key === 'card/files-cleanup-apply') {
+          if (!s.cleanupApply) return fail(res, 404, 'NOT_FOUND', '当前版本不支持清理关联文件')
+          return send(res, 200, { ok: true, result: await s.cleanupApply(str(body.mode, 'mode'), body.keys), ...snapshot(s, getRev()) })
+        }
+        if (key === 'card/files-cleanup-undo') {
+          if (!s.cleanupUndo) return fail(res, 404, 'NOT_FOUND', '当前版本不支持清理关联文件')
+          return send(res, 200, { ok: true, result: await s.cleanupUndo(body.items), ...snapshot(s, getRev()) })
+        }
         if (key === 'repos/check') {
           // 0.24 新增仓库的「粘贴路径」：逐行检测文件夹（ok = 是文件夹；dir 状态在这里表示「是文件」）
           const linked = typeof body.id === 'string' && body.id ? (body.mode === 'group' ? M.group(s.store.get(), body.id).repos : M.card(s.store.get(), body.id).repos ?? []).map((r) => r.path.replace(/\/+$/, '')) : []
           return send(res, 200, { ok: true, results: checkPaths(body.paths, linked, homedir(), (p) => { const k = statKind(p); return k === 'dir' ? 'file' : k === 'file' ? 'dir' : null }) })
+        }
+        if (key === 'fs/dirs') {
+          if (!s.listDirs) return fail(res, 404, 'NOT_FOUND', '当前版本不支持列文件夹')
+          return send(res, 200, { ok: true, result: await s.listDirs(typeof body.path === 'string' ? body.path : undefined) })
         }
         if (key === 'paths/stat') return send(res, 200, { ok: true, kinds: statBatch(body.paths, homedir(), statKind) })
         if (key === 'paths/same-name') {
@@ -552,9 +615,20 @@ export function mountRoutes(
           if (!s.gantt) return fail(res, 404, 'NOT_FOUND', '当前版本没有任务日程看板')
           return send(res, 200, { ok: true, ...(await s.gantt.run(key.slice('gantt/'.length), body)) })
         }
+        // v163 S4：知识卡增删改（返回最新列表项；BoardError 由外层统一转 400）
+        if (key.startsWith('kb/')) {
+          const op = key.slice(3)
+          try {
+            if (op === 'create') { const c = s.kb.create(body as unknown as Partial<KbCard>); return send(res, 200, { ok: true, card: kbItem(c, s.kb), errors: s.kb.errors }) }
+            if (op === 'update') { const c = s.kb.update(str(body.id, 'id'), body as unknown as Partial<KbCard>); return send(res, 200, { ok: true, card: kbItem(c, s.kb), errors: s.kb.errors }) }
+            if (op === 'remove') { s.kb.remove(str(body.id, 'id')); return send(res, 200, { ok: true, errors: s.kb.errors }) }
+            if (op === 'restore') { const c = s.kb.restore(str(body.id, 'id')); return send(res, 200, { ok: true, card: kbItem(c, s.kb), errors: s.kb.errors }) }
+          } catch (e) { const x = e as { code?: string; message?: string }; if (e instanceof M.BoardError) throw e; return fail(res, 400, x.code ?? 'KB_FAILED', x.message ?? String(e)) }
+          return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)
+        }
         const fn = MUTATIONS[key]
         if (!fn) return fail(res, 404, 'NOT_FOUND', '未知动作 ' + key)
-        const result = await s.store.mutate((b) => fn(body, b), (r) => (key === 'card/move' ? [r as M.BoardEvent] : key === 'card/copy' ? [{ at: new Date().toISOString(), actor: 'user', kind: key, card: (r as M.Card).id, from: body.id as string }] : key.startsWith('group') ? [{ at: new Date().toISOString(), actor: 'user', kind: key, group: typeof body.id === 'string' ? body.id : undefined }] : [{ at: new Date().toISOString(), actor: 'user', kind: key, card: typeof body.id === 'string' ? body.id : undefined }]))
+        const result = await s.store.mutate((b) => fn(body, b, s), (r) => (key === 'card/move' ? [r as M.BoardEvent] : key === 'card/copy' ? [{ at: new Date().toISOString(), actor: 'user', kind: key, card: (r as M.Card).id, from: body.id as string }] : key.startsWith('group') ? [{ at: new Date().toISOString(), actor: 'user', kind: key, group: typeof body.id === 'string' ? body.id : undefined }] : [{ at: new Date().toISOString(), actor: 'user', kind: key, card: typeof body.id === 'string' ? body.id : undefined }]))
         return send(res, 200, { ok: true, result: result ?? null, ...snapshot(s, getRev()) })
       } catch (e) {
         if (e instanceof M.BoardError) return fail(res, 400, e.code, e.message)

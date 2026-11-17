@@ -7,6 +7,8 @@ export interface Config {
     hubTitle: string;
     projectSessionMode: 'danger-full-access' | 'inherit';
     memoryMaxBytes: number;
+    kbIndexMaxBytes: number;
+    kbFullMaxBytes: number;
     landfill: boolean;
     agentsHome: string;
 }

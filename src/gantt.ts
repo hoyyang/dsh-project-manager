@@ -40,6 +40,12 @@ export interface PanelDay {
   doneAt?: Record<string, number>
   /** v123：记录执行那一刻卡片在哪个分区（点「已执行」撤销时回到这里）。 */
   from?: Record<string, PanelZone>
+  /** v161：跨天推荐来源（key → 前一天在哪个分区）。只存今天；标记在离开「被带进的分区」后自动不显示。 */
+  rec?: Record<string, { d: string; z: PanelZone }>
+  /** v184：过 00:00 自动记录执行的 key（只保留还在 done 里的；宿主 autoCloseDay 写，客户端只读）。 */
+  auto?: string[]
+  /** v184：这一天的自动结算凭证（一天只跑一次；撤销后不补）。z = 当时三个分区各有几张卡。 */
+  autoRec?: { at: number; n: number; z?: { wait?: number; pause?: number; run?: number } }
 }
 export interface CardGantt {
   /**
@@ -266,6 +272,30 @@ export function setPanelDay(st: GanttState, key: string, patch: Record<string, u
   }
   /* v122：记录执行的时间；v123：记录执行那一刻的来源分区 —— 都只跟着 done 走 */
   const doneSet = new Set(cur.done ?? [])
+  /* v184：自动记录执行的 key —— 只认「合法 + 还在 done 里」；done 被撤销后自动跟着掉 */
+  if ('auto' in patch) {
+    const list = panelKeys(patch.auto, valid).filter((k) => doneSet.has(k))
+    if (list.length) cur.auto = list.sort()
+    else delete cur.auto
+  } else if (cur.auto) {
+    const keep = cur.auto.filter((k) => doneSet.has(k) && valid.has(k))
+    if (keep.length) cur.auto = keep
+    else delete cur.auto
+  }
+  /* v184：这一天的自动结算凭证（一天只跑一次；撤销后不补）。at > 0、n >= 0，z 只认三个分区。 */
+  if ('autoRec' in patch) {
+    const r = patch.autoRec
+    let ok = false
+    if (r && typeof r === 'object' && !Array.isArray(r)) {
+      const o = r as { at?: unknown; n?: unknown; z?: unknown }
+      const at = Number(o.at), n = Number(o.n)
+      const zsrc = o.z && typeof o.z === 'object' && !Array.isArray(o.z) ? o.z as Record<string, unknown> : {}
+      const z: { wait?: number; pause?: number; run?: number } = {}
+      for (const k of ['wait', 'pause', 'run'] as const) { const v = Number(zsrc[k]); if (Number.isFinite(v) && v > 0) z[k] = Math.floor(v) }
+      if (Number.isFinite(at) && at > 0 && Number.isFinite(n) && n >= 0) { cur.autoRec = { at: Math.round(at), n: Math.floor(n), ...(Object.keys(z).length ? { z } : {}) }; ok = true }
+    }
+    if (!ok) delete cur.autoRec
+  }
   if ('doneAt' in patch) {
     const src = patch.doneAt && typeof patch.doneAt === 'object' && !Array.isArray(patch.doneAt) ? patch.doneAt as Record<string, unknown> : {}
     const out: Record<string, number> = {}
@@ -290,8 +320,104 @@ export function setPanelDay(st: GanttState, key: string, patch: Record<string, u
     if (Object.keys(out).length) cur.from = out
     else delete cur.from
   }
-  if (!cur.done && !cur.sel && !cur.lanes && !cur.pst && !cur.carry && !cur.zl) { delete panels[key]; if (!Object.keys(panels).length) delete st.panels; return null }
+  /* v161：跨天推荐来源 —— 只认「合法 + 还排在今天」的 key；来源分区只认五个非 done 区。 */
+  if ('rec' in patch) {
+    const src = patch.rec && typeof patch.rec === 'object' && !Array.isArray(patch.rec) ? patch.rec as Record<string, unknown> : {}
+    const out: Record<string, { d: string; z: PanelZone }> = {}
+    const sel = new Set(cur.sel ?? [])
+    for (const [k, v] of Object.entries(src)) {
+      if (!valid.has(k) || !sel.has(k)) continue
+      const r = v && typeof v === 'object' && !Array.isArray(v) ? v as { d?: unknown; z?: unknown } : null
+      if (!r || typeof r.d !== 'string' || !isDay(r.d)) continue
+      if (typeof r.z !== 'string' || !ZONES.has(r.z as PanelZone) || r.z === 'done') continue
+      out[k] = { d: r.d, z: r.z as PanelZone }
+    }
+    if (Object.keys(out).length) cur.rec = out
+    else delete cur.rec
+  } else if (cur.rec) {
+    const sel = new Set(cur.sel ?? [])
+    const keep: Record<string, { d: string; z: PanelZone }> = {}
+    for (const [k, v] of Object.entries(cur.rec)) if (sel.has(k) && valid.has(k)) keep[k] = v
+    if (Object.keys(keep).length) cur.rec = keep
+    else delete cur.rec
+  }
+  if (!cur.done && !cur.sel && !cur.lanes && !cur.pst && !cur.carry && !cur.zl && !cur.rec && !cur.auto && !cur.autoRec) { delete panels[key]; if (!Object.keys(panels).length) delete st.panels; return null }
   return cur
+}
+
+/* ── v184 跨天自动记录执行：过 00:00 把「刚结束的一天」三个分区里的卡片按「记录执行」同一条路径补记 ── */
+export interface AutoCloseResult { n: number; z: { wait: number; pause: number; run: number } }
+const AUTO_ZONES: PanelSt[] = ['wait', 'pause', 'run']
+
+/** 过 00:00 收口：把 dayKey（只认昨天及更早）任务执行安排里「等外部进展 / 个人暂停 / 执行中」的卡片，
+ *  按手点「记录执行」同一条路径写 done / doneAt / from / auto / autoRec。
+ *  不动 sel / lanes / pst / zl / carry / rec；归档卡跳过；已有 autoRec = 一天只跑一次，返回 null。 */
+export function autoCloseDay(st: GanttState, cards: Card[], dayKey: string, now = Date.now()): AutoCloseResult | null {
+  if (!isDay(dayKey) || dayKey >= todayKey(now)) return null
+  const u = st.panels?.[dayKey]
+  if (!u) return null
+  if (u.autoRec && u.autoRec.at > 0) return null
+  const valid = taskKeySetAll(cards)
+  const done = new Set(u.done ?? []), sel = new Set(u.sel ?? [])
+  const pst = u.pst ?? {}
+  const zoneOf = (k: string): PanelSt | '' => {
+    if (done.has(k)) return ''
+    const z = pst[k]
+    return z === 'wait' || z === 'pause' || z === 'run' ? z : ''
+  }
+  /* 可见卡 = 有任务的卡片取每个顶层任务；没任务的卡片取项目本身（与客户端 pBuild 的 leaves 同口径） */
+  interface Item { key: string; scope: string[] }
+  const items: Item[] = []
+  const itemOf = new Map<string, Item>()
+  for (const c of cards) {
+    if (c.archivedAt) continue
+    const tasks = (c.tasks ?? []).filter((t) => !!t.id) as Task[]
+    if (!tasks.length) { const k = 'p|' + c.id; const it: Item = { key: k, scope: [k] }; items.push(it); itemOf.set(k, it); continue }
+    for (const t of tasks) {
+      const k = 't|' + c.id + '|' + t.id
+      const it: Item = { key: k, scope: [k, ...(t.subs ?? []).filter((x) => !!x.id).map((x) => 's|' + c.id + '|' + x.id)] }
+      items.push(it); itemOf.set(k, it)
+    }
+  }
+  /* 顺序 = 面板分区顺序（等外部 → 个人暂停 → 执行中），组内先按行 / 位置，再补不在行里的卡片 */
+  const ordered: Array<{ key: string; zone: PanelSt }> = []
+  const seen = new Set<string>()
+  for (const z of AUTO_ZONES) {
+    for (const row of u.zl?.[z] ?? []) {
+      for (const k of row) {
+        if (seen.has(k) || !itemOf.has(k) || !sel.has(k) || done.has(k)) continue
+        if (zoneOf(k) !== z) continue
+        seen.add(k); ordered.push({ key: k, zone: z })
+      }
+    }
+  }
+  for (const it of items) {
+    if (seen.has(it.key) || !sel.has(it.key) || done.has(it.key)) continue
+    const z = zoneOf(it.key)
+    if (z !== 'wait' && z !== 'pause' && z !== 'run') continue
+    seen.add(it.key); ordered.push({ key: it.key, zone: z })
+  }
+  const zc: AutoCloseResult['z'] = { wait: 0, pause: 0, run: 0 }
+  const doneAt: Record<string, number> = { ...(u.doneAt ?? {}) }
+  const from: Record<string, PanelZone> = { ...(u.from ?? {}) }
+  const auto = [...(u.auto ?? [])]
+  let seq = 0
+  for (const t of ordered) {
+    const it = itemOf.get(t.key)
+    if (!it) continue
+    let any = false
+    for (const k of it.scope) {
+      if (done.has(k) || !valid.has(k)) continue
+      done.add(k); doneAt[k] = now + seq; from[k] = t.zone
+      if (!auto.includes(k)) auto.push(k)
+      seq++; any = true
+    }
+    if (any) zc[t.zone]++
+  }
+  const n = zc.wait + zc.pause + zc.run
+  if (!n) return null
+  setPanelDay(st, dayKey, { done: [...done], doneAt, from, auto, autoRec: { at: now, n, z: zc } }, valid)
+  return { n, z: zc }
 }
 
 /* ── v99 截止时间：同一天多个 + 硬性 / 软性 ── */
@@ -499,6 +625,8 @@ export interface GanttCardOut {
   seq: number
   /** v86：pending 卡片不进日程（行、计数、组统计都不算）。 */
   pending?: boolean
+  /** v172：项目星标（甘特目录格 / 执行安排只读显示）。 */
+  star?: boolean
   plan: string[]; actual: Array<{ day: string; src: 'auto' | 'manual' }>; ddl: GanttDDL[]
   /** 会话自动涂上的原始日子（任务面板「执行 · 会话」标签与提示用）。 */
   auto: string[]
@@ -554,6 +682,7 @@ export function payload(b: Board, g: GanttState, auto: Record<string, string[]>,
       created: ymd(cardCreated(c)), ...(c.archivedAt ? { archivedAt: c.archivedAt } : {}),
       seq: stIdx * 1000 + (c.order ?? 0),
       ...(c.pending ? { pending: true } : {}),
+      ...(c.star ? { star: true } : {}),
       plan: [...planDays(c, st, events, now)].sort(),
       actual: [...act.entries()].map(([day, src]) => ({ day, src })).sort((a, b) => a.day.localeCompare(b.day)),
       ddl: [...(st?.ddl ?? []).map((d): GanttDDL => ({ id: ddlIdOf(d), at: d.at, kind: ddlKindOf(d), ...(d.label ? { label: d.label } : {}), ...(d.sid ? { sid: d.sid } : {}), ...(d.rep ? { rep: d.rep } : {}) })), ...taskDdl(c)]

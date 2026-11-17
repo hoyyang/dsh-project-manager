@@ -9,7 +9,7 @@ import type { BoardHost } from './board.js'
 import { esc, ic } from './icons.js'
 import { blankRows, SidebarBridge } from './sidebar.js'
 import { CSS as STYLE } from './style.gen.js'
-import { BoardEntry, doingCount, SchedEntry } from './entry.js'
+import { BoardEntry, doingCount, KB_GLYPH, KbEntry, SchedEntry } from './entry.js'
 import { marquee, SessionCard } from './dock.js'
 import { mountGoalTask } from './goaltask.js'
 import { panelToday, runForSession, runKeysFor, scheduleKeys } from './gtextra.js'
@@ -18,10 +18,16 @@ import { ComposerAssist, SOURCE } from './composer.js'
 import { installSess, repaintChips, ringRow } from './sess.js'
 import type { SessSt } from './sess.js'
 import { noteText as quoteNoteText } from '../quote.js'
+import { kbOpen, kbPage } from './kb.js'
+import { adoptServerMode, installI18n, onLangChange, tr, wrapRoot } from './i18n.js'
+import { installSettings } from './settings.js'
+import { openNote as openDetailNote, openRef as openDetailRef, setKbOpener, type BubbleCtx } from './detailbubble.js'
 
 const PANEL = 'dsh-project-manager:board'
 /** 0.31 第二页：同一个面板，不同页（右侧卡片详情共用）。 */
 const SCHED = 'dsh-project-manager:sched'
+/** v162 第三块看板：知识库（空白看板）。三个 main key 同时只挂一个（宿主 activePanelId）。 */
+const KB = 'dsh-project-manager:kb'
 let HUB_TITLE = '项目区'
 
 type Theme = { getTheme(): { active: { colorScheme: string } }; setTheme(id: string): void }
@@ -56,6 +62,19 @@ export function apply(ctx: Ctx): void {
     document.head.append(s)
     return () => s.remove()
   }, 'dsh-project-manager: css')
+
+  /* v182：界面语言引擎（唯一出处 = client/i18n.ts）。宿主不给贡献插槽也照常装 —— 引擎只用 DOM 与 <html lang>。 */
+  installI18n(ctx)
+  /** 语言变了要重新注册的贡献（label 由宿主渲染，不重注册就还停在旧语言）。 */
+  const remountOnLang = (label: string, mount: () => () => void): void => {
+    ctx.effect(() => {
+      let off: (() => void) | null = null
+      const run = (): void => { off?.(); off = null; off = mount() }
+      run()
+      const stop = onLangChange(run)
+      return () => { stop(); off?.(); off = null }
+    }, label)
+  }
 
   // ── toast ──
   let toastBox: HTMLElement | null = null
@@ -363,6 +382,8 @@ export function apply(ctx: Ctx): void {
       const r = await getState(live.snap ? live.snap.rev : undefined)
       if (r.same) return
       live.snap = r
+      // v182：界面语言以 host 侧看板文档为准（localStorage 只是首屏镜像，多浏览器同步靠这条）
+      adoptServerMode(r.board.prefs?.lang)
       if (r.hub?.title) HUB_TITLE = r.hub.title
       for (const f of live.subs) f()
     } catch { /* 下一轮再试；看板里会点名报错 */ }
@@ -678,12 +699,15 @@ export function apply(ctx: Ctx): void {
           if (typeof ui.pickDirectory !== 'function') throw new Error('当前 dsh 版本没有 pickDirectory')
           return ui.pickDirectory()
         },
+        listDirs: async (p?: string) => (await post<{ result: { path: string; parent: string | null; home: string; dirs: Array<{ name: string; path: string }>; areas?: { hub: string; data: string; dsh: string } } }>('fs/dirs', { path: p ?? '' })).result,
         // v94：详情页任务 → 同一个弹窗（编辑 = 「编辑卡片任务」；加子任务 = 底栏点名父任务）
         taskDialog: (o) => { goalTaskOpen?.(o) },
         taskDialogOpen: () => !!document.querySelector('dialog.dpm-goaltask[open]'),
         /* v127：详情里的状态胶囊 = 打开今天的任务面板并定位那张卡 */
         /* v143（1.1）：面板是独立一列 —— 定位不跳页，就在当前页打开面板 */
         seek: (keys) => { if (colAway('tp')) colFront('tp'); ensureBoard().seekToday(keys) },
+        /* v163 S9：详情「知识卡」一节点标题 / 新建草稿并挂上 → 切到知识库页（先记下请求，面板挂载时自己取） */
+        openKb: (o) => { kbOpen(o); ctx.layout.selectPanel(KB) },
       
   })
   const detailHost = makeBoardHost(() => globalDetailView())
@@ -747,13 +771,42 @@ export function apply(ctx: Ctx): void {
     switchTo: (id) => { openSess(id); void revealRows([id]) },
     link: async (cid, tid, sid) => {
       try {
-        await post('card/task-sess', { id: cid, task: tid, sess: sid })
+        /* v175：任务弹窗里的选择器仍只管「这一次选哪个」，但不再整组替换（会把已有的归档关联冲掉）：
+           选中的排最前（= 代表会话），原来那些保留；真选出一个活跃冲突时由宿主拒绝并提示去详情管理。取消关联 = 清空这组。 */
+        const c0 = live.snap?.board.cards.find((x) => x.id === cid)
+        const tk = c0 ? c0.tasks.flatMap((t) => [t, ...(t.subs ?? [])]).find((t) => t.id === tid) ?? null : null
+        const cur = tk ? [tk.sess, ...(tk.sessArch ?? [])].filter((x): x is string => !!x) : []
+        const list = !sid ? [] : [sid, ...cur.filter((x) => x !== sid)]
+        await post('card/task-sess-list', { id: cid, task: tid, list })
         await live.refresh()
         for (const v of [boardView, globalDetailView()]) if (v) await v.refresh(true)
         const st = sid ? sessSt(sid) : null
         toast(sid ? '已关联会话「' + (sessLite(sid)?.title ?? sid) + '」' + (st === 'arch' ? ' · 已归档会话不在工作区里，不定位' : ' · 已在左侧工作区定位并高光') : '已取消关联的会话（会话本身不受影响）')
         if (sid && st !== 'arch') void revealRows([sid])
       } catch (e) { toast('关联会话没保存上：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
+    },
+    /* v175：一组关联（顺序 = 代表会话在前；空数组 = 取消全部）。活跃唯一由宿主再校验一次。 */
+    assoc: async (cid, tid, ids) => {
+      try {
+        await post('card/task-sess-list', { id: cid, task: tid, list: ids })
+        await live.refresh()
+        for (const v of [boardView, globalDetailView()]) if (v) await v.refresh(true)
+        const rep = ids[0]
+        if (!rep) { toast('已取消关联（会话本身不受影响）'); return }
+        const st = sessSt(rep)
+        toast('已关联会话「' + (sessLite(rep)?.title ?? rep) + '」' + (ids.length > 1 ? '：这个任务现在一共关联 ' + ids.length + ' 个会话' : '') + (st === 'arch' ? ' · 已归档会话不在工作区里，不定位' : ' · 已在左侧工作区定位并高光'))
+        if (st !== 'arch') void revealRows([rep])
+      } catch (e) { toast('关联会话没保存上：' + (e instanceof ApiError ? e.message : String(e)), 'err') }
+    },
+    /* v175：归档 / 恢复都走宿主同一个调用（= 侧栏「归档会话」），不是任务数据 —— 关联保留、代表会话自然重算 */
+    archive: async (sid) => {
+      const r = await detailHost.archiveSession(sid, false)
+      if (!r.ok) { toast('这个会话还有进行中的工作：先停掉它再归档', 'err'); return false }
+      toast('已归档会话「' + (sessLite(sid)?.title ?? sid) + '」：它变成归档会话，和这个任务的关联保留；现在可以关联新的活跃会话了', 'ok', { label: '撤销', run: () => { void detailHost.unarchiveSession(sid) } })
+      return true
+    },
+    restore: async (sid) => {
+      try { await detailHost.unarchiveSession(sid); toast('已恢复「' + (sessLite(sid)?.title ?? sid) + '」为活跃：它现在是这个任务的活跃会话'); return true } catch (e) { toast('恢复失败：' + (e instanceof Error ? e.message : String(e)), 'err'); return false }
     },
     newFor: async (cid, tid) => {
       if (creating) { toast('正在新建会话，稍等一下'); return }
@@ -765,7 +818,12 @@ export function apply(ctx: Ctx): void {
         const cc = live.snap?.board.cards.find((x) => x.id === cid)
         const tt = tid && cc ? (cc.tasks.flatMap((t) => [t, ...(t.subs ?? [])]).find((t) => t.id === tid)?.text ?? '') : ''
         await post('session/bind', { sessionId, cardId: cid, tree: treeMode(), ...(tt ? { title: tt } : cc ? { title: cc.t } : {}) })
-        if (tid) await post('card/task-sess', { id: cid, task: tid, sess: sessionId })
+        if (tid) {
+          /* v175：新会话直接成为这个任务的活跃代表会话，原来那些归档关联保留（不再整组替换） */
+          const tk = cc ? cc.tasks.flatMap((t) => [t, ...(t.subs ?? [])]).find((t) => t.id === tid) ?? null : null
+          const keep = tk ? [tk.sess, ...(tk.sessArch ?? [])].filter((x): x is string => !!x && x !== sessionId) : []
+          await post('card/task-sess-list', { id: cid, task: tid, list: [sessionId, ...keep] })
+        }
         await live.refresh()
         for (const v of [boardView, globalDetailView()]) if (v) await v.refresh(true)
         openSess(sessionId)
@@ -811,8 +869,9 @@ export function apply(ctx: Ctx): void {
       for (const id of ids) { const s = sessSt(id) ?? ''; if (s === 'run' && last.get(id) !== 'run') seg.set(id, (seg.get(id) ?? 0) + 1); last.set(id, s); if (s === 'run') hits.push(id) }
       if (!snap || !hits.length) return
       for (const sid of hits) {
-        if (Date.now() - (busyAt.get(sid) ?? 0) < 1500) continue
-        if (!snap.board.sessions.some((r) => r.sessionId === sid)) continue
+        /* v183（1.1）：700ms 节流（原来 1.5s）；**去掉 board.sessions 这道闸** —— 会话只挂在任务 / 子任务上（v140 之后）时
+           原来会被整轮跳过，这正是「会话执行中、卡片却不动」的第一根因。 */
+        if (Date.now() - (busyAt.get(sid) ?? 0) < 700) continue
         const sg = seg.get(sid) ?? 0
         const want = runKeysFor(snap.board.cards, sid, (cid) => snap.board.sessions.filter((r) => r.cardId === cid).map((r) => r.sessionId)).filter((h) => !moved.has(sid + '|' + sg + '|' + h.key))
         if (!want.length) continue
@@ -835,9 +894,12 @@ export function apply(ctx: Ctx): void {
     const onB = (): void => { void live.refresh().then(soon) }
     document.addEventListener('dpm:board-changed', onB)
     live.subs.add(soon)
-    const iv = window.setInterval(soon, 3000)
+    /* v183（1.1）：兜底 3s → 800ms；从后台切回前台补一次对账（会话可能在后台跑起来的） */
+    const iv = window.setInterval(soon, 800)
+    const onVis = (): void => { if (document.visibilityState === 'visible') soon() }
+    document.addEventListener('visibilitychange', onVis)
     soon()
-    return () => { a(); c(); live.subs.delete(soon); document.removeEventListener('dpm:board-changed', onB); clearInterval(iv); if (raf) cancelAnimationFrame(raf) }
+    return () => { a(); c(); live.subs.delete(soon); document.removeEventListener('dpm:board-changed', onB); document.removeEventListener('visibilitychange', onVis); clearInterval(iv); if (raf) cancelAnimationFrame(raf) }
   }, 'dsh-project-manager: session run → today running')
   /* v146：「执行中」标记 —— 计划清单任务行 / 项目行、甘特行名、项目看板卡片 = 绿底 + 呼吸点小标签（看板卡片再加绿框）；
      读今天面板缓存（pst = run），各自重画后 MutationObserver 下一帧补画（不靠渲染函数里写死），标记节点 data-dpm-run */
@@ -1050,7 +1112,7 @@ export function apply(ctx: Ctx): void {
       },
       seek: (_cardId, keys) => withSched((v) => v.seekToday(keys)),
       scheduleToday: (cardId, keys) => {
-        void scheduleKeys(cardId, keys).then((r) => { toast('已排今天：进了今天的「未安排」和本日计划清单' + (r.planAdded ? ' · 甘特图今天补上了计划条' : '')); boardView?.reloadSched(); void globalDetailView()?.refresh() })
+        void scheduleKeys(cardId, keys).then((r) => { toast('已排今天：直接进了今天的「已安排」' + (r.lane >= 0 ? '（第 ' + (r.lane + 1) + ' 行）' : '') + (r.planAdded ? ' · 甘特图今天补上了计划条' : '')); boardView?.reloadSched(); void globalDetailView()?.refresh() })
           .catch((e: unknown) => toast('没排进今天：' + (e instanceof Error ? e.message : String(e)), 'err'))
       },
       added: (cardId, taskId, parentId) => {
@@ -1142,7 +1204,7 @@ export function apply(ctx: Ctx): void {
     }, [])
     return h('div', { ref, style: { height: '100%', minHeight: 0 } })
   }
-  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL }, Board)), 'dsh-project-manager: panel')
+  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL }, wrapRoot(Board))), 'dsh-project-manager: panel')
 
   // ── 全局面板「项目看板」主按钮：与「插件」同一组（官方 sidebar.panellist），行由宿主画，插件给图标块 + 整行光效层 + 徽标 ──
   const liveSess = (id: string): boolean => { const s = sessRef().list.getSnapshot().byId[id]; return !!s && s.origin !== 'subagent' && !(ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []).includes(id) }
@@ -1153,7 +1215,7 @@ export function apply(ctx: Ctx): void {
     useEffect(() => { const f = (): void => setN(doing()); live.subs.add(f); const a = ctx.sessions.list.subscribe(f); const b = ctx.workspaces.list.subscribe(f); f(); return () => { live.subs.delete(f); a(); b() } }, [])
     return h(BoardEntry, { active: !!p.active, compact: (p.size ?? 16) > 16, count: n })
   }
-  ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL, order: 5, label: '项目看板' }, Entry)), 'dsh-project-manager: board entry')
+  remountOnLang('dsh-project-manager: board entry', () => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL, order: 5, label: tr('项目看板') }, wrapRoot(Entry))))
 
   // ── 0.32 「任务日程看板」：项目看板下面一行；紫色 + 日历图标，其余结构 / 动效与项目看板一致 ──
   /** v90：「N 项目」= 日程页页头「共 N 组 · M 项」里的 M —— 同一个数、同一个口径：
@@ -1180,8 +1242,18 @@ export function apply(ctx: Ctx): void {
     }, [])
     return h(SchedEntry, { active: !!p.active, compact: (p.size ?? 16) > 16, count: n })
   }
-  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: SCHED }, Board)), 'dsh-project-manager: sched panel')
-  ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: SCHED, order: 6, label: '任务日程看板' }, SchedRow)), 'dsh-project-manager: sched entry')
+  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: SCHED }, wrapRoot(Board))), 'dsh-project-manager: sched panel')
+  remountOnLang('dsh-project-manager: sched entry', () => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: SCHED, order: 6, label: tr('任务日程看板') }, wrapRoot(SchedRow))))
+
+  // ── v162「知识库」：第 4 个侧栏入口（order 7，绿色 + 开卷书）+ 第 3 块看板页 ──
+  //    三块看板 = 三个 main key；宿主同一时刻只挂一个（activePanelId），互斥是结构保证，不写 hide 补丁。
+  //    v163 S7：这一页从「空白看板」换成真正的知识库（列表 / 搜索 / 筛选 / 读详情，见 client/kb.ts）。
+  //    「挂在哪些项目卡」点一下 = openBoardAt：切到项目看板并对准那张卡、打开它的详情。
+  const KbPage = kbPage({ onOpenCard: openBoardAt, toast })
+  /** 入口组件只吃宿主的 active / size；结构与动效由 PanelEntry（.hfx：rim / spot / sheen / ripple）现成提供。 */
+  const KbRow = (p: { size?: number; active?: boolean }): unknown => h(KbEntry, { active: !!p.active, compact: (p.size ?? 16) > 16 })
+  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: KB }, wrapRoot(KbPage))), 'dsh-project-manager: kb panel')
+  remountOnLang('dsh-project-manager: kb entry', () => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: KB, order: 7, label: tr('知识库') }, wrapRoot(KbRow))))
 
   /* ── v121（3）/ v122（2）：侧栏「今天」按钮 ──
      宿主的 sidebar.panellist 一行只能放一个入口；「任务日程看板」整块大小不变：原按钮宽度缩成 3/4（CSS），
@@ -1409,12 +1481,34 @@ export function apply(ctx: Ctx): void {
       codec: { clipboardText: (ref: string) => ref, serialize: (ref: string) => Promise.resolve(ref) },
     })
   }, 'dsh-project-manager: composer chip source')
+  /* v177：DSH 输入框胶囊的三种「详情说明」都走同一个详情气泡（说明 / 项目产物 / 知识卡）。
+     知识卡默认气泡，⌘ / Ctrl 点击仍是老行为（去知识库看这张卡）；宿主 openReference 不带事件 → 自己记一下按下的修饰键。 */
+  setKbOpener((id) => { kbOpen({ cardId: id }); ctx.layout.selectPanel(KB) })
+  const chipCmdAt = { cmd: false, at: 0 }
+  document.addEventListener('click', (e) => {
+    const c = (e.target as HTMLElement | null)?.closest?.('[data-composer-chip]')
+    if (c) { chipCmdAt.cmd = e.metaKey || e.ctrlKey; chipCmdAt.at = Date.now() }
+  }, true)
+  const chipCmd = (): boolean => chipCmdAt.cmd && Date.now() - chipCmdAt.at < 1500
+  const bubbleCtx = (): BubbleCtx => ({
+    snap: () => live.snap,
+    toast: (m, k) => toast(m, k),
+    quote: (t) => { void navigator.clipboard.writeText(t).then(() => toast('引用原文已复制'), () => toast('复制失败，可手动选中复制', 'err')) },
+    openCard: (id) => openDetailOnly(id),
+    openSession: (id) => openAndReveal(id),
+  })
   const openRefChip = (sid: string, ref: string): void => {
     const info = assists.get(sid)?.infoNow() ?? null
     const ci = info?.cardInfo
     const hit = ComposerAssist.kindOfRef(ref, (ci?.notes ?? []).map((n) => ({ t: n.t, canon: quoteNoteText(n.t, n.v) })))
     if (!hit) { toast('引用内容：' + ref.slice(0, 80)); return }
-    if (hit.kind === 'note') { const n = ci?.notes.find((x) => quoteNoteText(x.t, x.v) === ref); toast('相关说明「' + hit.title + '」：' + (n?.v ?? '').slice(0, 160)); return }
+    if (hit.kind === 'note') {
+      /* v177：会话绑了卡片 → 用卡片里的那条说明（正文里的引用胶囊 / 注入开关都画得出来）；没绑就只有原文 */
+      const card = ci?.id ? (live.snap?.board.cards.find((c) => c.id === ci.id) ?? null) : null
+      const n = (ci?.notes ?? []).find((x) => quoteNoteText(x.t, x.v) === ref)
+      openDetailNote(bubbleCtx(), card, hit.title, card ? undefined : (n?.v ?? ''))
+      return
+    }
     if (hit.kind === 'link') { window.open(hit.body ?? '', '_blank', 'noopener'); return }
     if (hit.kind === 'file') {
       /* v142（4.2）：三种状态分开处理 —— 已在卡片 = 用默认应用打开；本机有未加入 = 添加为相关文件（路径预填）；原位置已不在 = 同名文件的新位置 */
@@ -1427,6 +1521,14 @@ export function apply(ctx: Ctx): void {
     }
     if (hit.kind === 'repo') { void post('fs/open-local', { path: hit.body ?? '' }).catch((e) => toast('打不开这个文件夹：' + (e instanceof Error ? e.message : String(e)), 'err')); return }
     if (hit.kind === 'card') { const c = live.snap?.board.cards.find((x) => x.t === hit.title); if (c) openDetailOnly(c.id); else toast('找不到这张卡片：' + hit.title, 'err'); return }
+    /* v177：知识卡胶囊默认 = 详情气泡；⌘ / Ctrl 点击或气泡底栏按钮 = 去知识库看这张卡 */
+    if (hit.kind === 'kb') {
+      const id = (/([^/]+)\.md$/.exec(hit.body ?? '') ?? [])[1] ?? ''
+      if (!id) { toast('知识卡「' + hit.title + '」：' + (hit.body ?? ''), 'err'); return }
+      if (chipCmd()) { kbOpen({ cardId: id }); ctx.layout.selectPanel(KB); return }
+      openDetailRef(bubbleCtx(), { kind: 'kb', title: hit.title, body: hit.body, kbRefs: ci?.kb })
+      return
+    }
     const sx = activeSessions().flatMap((g) => g.items).find((x) => x.title === hit.title)
     if (sx) openAndReveal(sx.id); else toast('找不到这个会话：' + hit.title, 'err')
   }
@@ -1539,6 +1641,9 @@ export function apply(ctx: Ctx): void {
   }
   // v91：排在宿主「待发送（排队）」条（order 20）之前。宿主的排队条带 margin-bottom: -(栈间距 6 + 3) = -9px 贴住输入框，
   // 排在它后面的 dock 会被这条负边距拉上去 3px（信息卡压住排队条 3px 的根因）。order 15 = 「目标条 10」之后、排队条 20 之前。
-  ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'dsh-project-manager:memory', order: 15 }, Dock)), 'dsh-project-manager: memory dock')
+  ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'dsh-project-manager:memory', order: 15 }, wrapRoot(Dock))), 'dsh-project-manager: memory dock')
+
+  /* v182：设置 → 项目看板（界面语言三档）。宿主没有 settings.section 时什么都不发生（旧宿主降级）。 */
+  installSettings(ctx)
   ctx.effect(() => marquee('.dpm-sic .mq, .dpm .detail .mq'), 'dsh-project-manager: marquee')
 }

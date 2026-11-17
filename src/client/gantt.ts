@@ -27,6 +27,10 @@ export interface SchedHost {
 const D = 86400000
 const DAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const MON = ['1 月', '2 月', '3 月', '4 月', '5 月', '6 月', '7 月', '8 月', '9 月', '10 月', '11 月', '12 月']
+/* v172：项目星标 —— 目录格按钮 / 扫光层（与看板、详情共用同一颗星与同一套 CSS）
+   v174：执行安排里的「勾选左边 15px 金星」换成卡片左上角的金角签（纯装饰；面板里仍然没有加星按钮） */
+const PSTAR_TAB = '<span class="pstar-tab" aria-hidden="true">' + ic('star') + '</span>'
+const PSTAR_SHEEN = '<span class="pstar-sheen" aria-hidden="true"></span>'
 const FLAG = '<svg viewBox="0 0 15 15" aria-hidden="true"><path d="M1.7 1.6v11.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/><path d="M2.1 2.1h9l-1.6 3.1 1.6 3.1h-9z" fill="currentColor"/></svg>'
 /** v105：每日任务面板图标（暂停 / 取消必须显式写 stroke，否则 SVG 默认按 fill 画 = 只剩色块）。 */
 const PV_ICON = {
@@ -79,10 +83,10 @@ interface TaskM { id: string; text: string; done: boolean; due?: string; sess?: 
 /** v121–v123：执行安排的行分区（已安排用 lanes，其余四个用 zl）。 */
 type ZlKey = 'pause' | 'wait' | 'run' | 'un'
 const ZL_KEYS: ZlKey[] = ['pause', 'wait', 'run', 'un']
-interface PanelDayM { done: Set<string>; sel: Set<string>; lanes: string[][] | null; /** v111：这一天已经跑过自动续排 */ carry?: boolean; zl: Record<ZlKey, string[][]>; doneAt: Map<string, number>; from: Map<string, GanttZone> }
+interface PanelDayM { done: Set<string>; sel: Set<string>; lanes: string[][] | null; /** v111：这一天已经跑过自动续排 */ carry?: boolean; zl: Record<ZlKey, string[][]>; doneAt: Map<string, number>; from: Map<string, GanttZone>; /** v161：跨天推荐来源（今天 + key → 昨天在哪个分区） */ rec: Map<string, { d: string; z: GanttZone }>; /** v184：过 00:00 自动记录执行的 key（宿主写；客户端只读） */ auto: Set<string>; /** v184：这一天已自动结算过的凭证（一天只跑一次） */ autoRec?: { at: number; n: number; z?: { wait?: number; pause?: number; run?: number } } }
 interface CardM {
   id: string; g: string; t: string; stage: string; done: number; total: number
-  createdMs: number; arch?: string; pending?: boolean; seq: number
+  createdMs: number; arch?: string; pending?: boolean; seq: number; /** v172：项目星标 */ star?: boolean
   planSet: Set<string>; actualSet: Set<string>
   actualAuto: Set<string>; actualManual: Set<string>; autoOff: Set<string>
   ddlList: DdlM[]
@@ -118,10 +122,10 @@ const SHELL = '<header class="sc-bar">'
   + '<div class="sc-stage"><i class="lw-resize" id="lwResize" role="separator" aria-orientation="vertical" tabindex="0" aria-label="拖动调整项目目录宽度" title="拖动调整「项目组 / 项目」目录宽度（双击复位）"></i>'
   + '<div class="sc-scroll" id="scroll"><div class="sc-grid" id="grid"><div class="sc-head"><div class="sc-head-l"><b>项目组 / 项目</b><span id="headCount"></span></div><div class="sc-head-t" id="headT"></div></div><div class="sc-bg" id="bg" aria-hidden="true"></div><div class="sc-rows" id="rows"></div><div class="sc-overlay" id="ov" aria-hidden="true"></div></div></div>'
   + '<aside class="tp" id="tp" aria-label="任务面板"><i class="tp-resize" id="tpResize" role="separator" aria-orientation="vertical" tabindex="0" aria-label="拖动调整任务面板宽度" title="拖动调整任务面板宽度（双击复位）"></i>'
-  + '<div class="tp-h"><div class="tp-d"><b id="tpDay">—</b><span id="tpSub"></span></div><button class="ib" id="tpPrev" type="button" aria-label="前一天">' + ic('chev') + '</button><button class="ib" id="tpNext" type="button" aria-label="后一天">' + ic('chev') + '</button><button class="ib" id="tpClose" type="button" aria-label="收起任务面板">' + ic('x') + '</button></div>'
+  + '<div class="tp-h"><div class="tp-d"><b id="tpDay">—</b><span id="tpSub"></span></div><button class="hdchip" type="button" id="exAutoChip" hidden title=""></button><button class="ib" id="tpPrev" type="button" aria-label="前一天">' + ic('chev') + '</button><button class="ib" id="tpNext" type="button" aria-label="后一天">' + ic('chev') + '</button><button class="ib" id="tpClose" type="button" aria-label="收起任务面板">' + ic('x') + '</button></div>'
   + '<div class="tp-stat" id="tpStat">—</div>'
   + '<div class="tp-pair" id="tpPair">'
-  + '<section class="tpc" id="tpExCard" aria-labelledby="tpExT"><header class="tpc-h"><span class="tic" aria-hidden="true">' + PV_ICON.playBig + '</span><h2 id="tpExT">任务执行安排</h2><span class="tpc-n" id="exN">—</span><span class="tpc-hint">任意区之间可拖 · 放下即改状态 · 同一行 = 并行</span><button class="plcard-fold excard-fold" type="button" id="exCardFold" aria-controls="exBody" aria-expanded="true" aria-label="收起任务执行安排（只留标题栏）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.5 9.4 5.5 5.2 5.5-5.2"/></svg></button></header><div class="tpc-b" id="exBody"></div></section>'
+  + '<section class="tpc" id="tpExCard" aria-labelledby="tpExT"><header class="tpc-h"><span class="tic" aria-hidden="true">' + PV_ICON.playBig + '</span><h2 id="tpExT">任务执行安排</h2><span class="tpc-n" id="exN">—</span><button class="hdchip" type="button" id="exCarryChip" hidden title="今天从昨天的「任务执行安排」带过来的推荐项：点一下跳到它们"></button><span class="tpc-hint">任意区之间可拖 · 放下即改状态 · 同一行 = 并行</span><button class="plcard-fold excard-fold" type="button" id="exCardFold" aria-controls="exBody" aria-expanded="true" aria-label="收起任务执行安排（只留标题栏）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.5 9.4 5.5 5.2 5.5-5.2"/></svg></button></header><div class="tpc-b" id="exBody"></div></section>'
   + '<i class="tp-split" id="tpSplit" role="separator" aria-orientation="horizontal" aria-label="拖动调整两张卡片的高度：拖到最上 = 执行安排收起，拖到最下 = 计划清单收起；双击 = 3 : 2" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" tabindex="0"><b aria-hidden="true"></b></i>'
   + '<section class="tpc" id="tpPlanCard" aria-labelledby="tpPlT"><header class="tpc-h"><span class="tic" aria-hidden="true">' + PV_ICON.list + '</span><h2 id="tpPlT">本日计划清单</h2><span class="tpc-n" id="plN">—</span><button class="hdchip" type="button" id="plRecChip" hidden title="本日计划清单里之前排过、还没完成的项：点一下跳过去"></button><span class="pltools"><span class="tpc-hint">点「排今天」选中</span><span class="plbtns"><button class="plbtn" type="button" id="plFoldAll" data-pl-foldall aria-pressed="false" title="一键展开 / 收起：展开 = 项目 / 任务 / 子任务全部打开；收起 = 只留项目">收起全部</button><button class="plbtn" type="button" id="plOnlyBtn" data-pl-only aria-pressed="false" title="只显示可安排：隐藏已完成或已排的任务项，其余全部展开">只显示可安排</button><button class="plbtn dn" type="button" id="plDoneBtn" data-pl-done aria-pressed="false" title="只显示本日执行完成项：今天记录过执行的项目 / 任务 / 子任务">只显示本日完成</button></span><button class="plcard-fold" type="button" id="plCardFold" data-pl-cardfold aria-pressed="false" aria-controls="tpList" aria-label="收起本日计划清单（只留标题栏）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.5 9.4 5.5 5.2 5.5-5.2"/></svg></button></span></header><div class="tpc-b pl-b" id="tpList"></div></section>'
   + '</div></aside>'
@@ -168,6 +172,12 @@ export class SchedView {
   /** v87：组折叠的在途写回——轮询快照到达时先用本地值覆盖；POST 完成且服务端快照一致后再交给服务端。 */
   private pendingClosed = new Map<string, { v: boolean; seq: number; done?: boolean }>()
   private gseq = 0
+  /** v176：星标也在途写回 —— 点星只重绘那一颗按钮；轮询带回来的旧快照不许把它翻回去（那就是用户看到的闪动）。 */
+  private pendStar = new Map<string, { on: boolean; seq: number; done?: boolean }>()
+  private sseq = 0
+  /** v176：上一份「渲染模型指纹」（不含星标 / 含星标两份）—— 模型没变就不整页重画，只补星标。 */
+  private lastModel = ''
+  private lastModelYes = ''
   /** v98：项目组时间显隐正在写回（期间忽略服务端旧快照里的值）。 */
   private gtimeBusy = 0
   /** v110：pending 显隐在途保存（期间不被 5s 快照覆盖）。 */
@@ -408,6 +418,15 @@ export class SchedView {
         c.seq = typeof gc.seq === 'number' ? gc.seq : 0
         if (gc.pending) c.pending = true; else delete c.pending
         if (gc.archivedAt) c.arch = gc.archivedAt; else delete c.arch
+        if (gc.star) c.star = true; else delete c.star
+        /* v176：在途星标盖住旧快照（POST 还没落地时轮询可能带回 star:false），服务端对上之后交给它 */
+        {
+          const ps = self.pendStar.get(c.id)
+          if (ps) {
+            if (ps.on) c.star = true; else delete c.star
+            if (ps.done && !!gc.star === ps.on) self.pendStar.delete(c.id)
+          }
+        }
         const planArr = Array.isArray(gc.plan) ? gc.plan : []
         const actArr = Array.isArray(gc.actual) ? gc.actual : []
         c.planSet = new Set(planArr)
@@ -477,17 +496,31 @@ export class SchedView {
       for (const [k, v] of Object.entries(d.panels ?? {})) {
         const zl = { pause: [], wait: [], run: [], un: [] } as Record<ZlKey, string[][]>
         for (const z of ZL_KEYS) zl[z] = (v.zl?.[z] ?? []).map((l) => [...l])
-        PDAY.set(k, { done: new Set(v.done ?? []), sel: new Set(v.sel ?? []), lanes: v.lanes ? v.lanes.map((l) => [...l]) : null, ...(v.carry ? { carry: true } : {}), zl, doneAt: new Map(Object.entries(v.doneAt ?? {})), from: new Map(Object.entries(v.from ?? {}) as Array<[string, GanttZone]>) })
+        PDAY.set(k, { done: new Set(v.done ?? []), sel: new Set(v.sel ?? []), lanes: v.lanes ? v.lanes.map((l) => [...l]) : null, ...(v.carry ? { carry: true } : {}), zl, doneAt: new Map(Object.entries(v.doneAt ?? {})), from: new Map(Object.entries(v.from ?? {}) as Array<[string, GanttZone]>), rec: new Map(Object.entries(v.rec ?? {}) as Array<[string, { d: string; z: GanttZone }]>), auto: new Set(v.auto ?? []), ...(v.autoRec && v.autoRec.at > 0 ? { autoRec: { at: v.autoRec.at, n: v.autoRec.n ?? 0, ...(v.autoRec.z ? { z: v.autoRec.z } : {}) } } : {}) })
         /* v110：执行 / 暂停是落盘状态（服务端 panels[day].pst）；v121 加 wait = 等外部进展 */
         for (const [key, stv] of Object.entries(v.pst ?? {})) if (stv === 'run' || stv === 'pause' || stv === 'wait') PST.set(k + '\n' + key, stv)
       } }
       for (const c of cardsById.values()) pActualAdd(c)
+      autoRecToast()
       // v98：项目组时间显隐（在途保存期间不被旧快照覆盖）
       if (!self.gtimeBusy) state.gtime = d.ui.gtime === true
       host.uiChanged?.(d.ui)
       if (!state.anchor) state.anchor = TODAY
       if (!state.day) state.day = TODAY
       if (state.lastZoom === '') syncChips()
+      /* v176：整页重画只给「看得见的东西真的变了」用。
+         以前任何一份快照差异都 render() —— 实测两种高频假变更都在这里挨刀：
+         ① 点星：star 之外 rev / 组 upd 也会变 → 一次点击换来两轮整页重建（100–180ms）；
+         ② 活跃会话（就是当前正在跑的那个）版本每轮都变 → 自动执行日「空 ↔ 有」跳一次 → 每 5s 冻 180ms。
+         现在按渲染模型算指纹：模型没变就只补星标，其它一律不碰 DOM。 */
+      const mNo = modelSig()
+      const mYes = modelSig(true)
+      if (self.lastModel && mNo === self.lastModel) {
+        if (mYes !== self.lastModelYes) paintStars()
+        self.lastModel = mNo; self.lastModelYes = mYes
+        return
+      }
+      self.lastModel = mNo; self.lastModelYes = mYes
       render()
       renderNote(d)
       syncGtime()
@@ -565,6 +598,8 @@ export class SchedView {
       const t = new Date(c.s + f * (c.e - c.s))
       return new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime()
     }
+    /* v170：今天竖线的 x —— 页头「今天」药丸、背景里那条 .now 竖线、截止虚线的兜底起点共用这一个数 */
+    const nowX = (): number => at(TODAY) + Math.max(2, at(TODAY + D) - at(TODAY)) / 2
     function getLw(): number {
       if (state.lw) return state.lw
       const w = root.clientWidth
@@ -700,7 +735,6 @@ export class SchedView {
 
     function renderHead(): void {
       const seg = st2.seg as { fine: Array<{ s: number; e: number; x: number; w: number; a?: string; b?: string; we?: boolean }>; coarse: Array<{ x: number; w: number; label?: string }> }
-      const nowX = at(TODAY) + Math.max(2, at(TODAY + D) - at(TODAY)) / 2
       const fineHtml = seg.fine.map((c) => {
         const isNow = NOW >= c.s && NOW < c.e
         const isSel = state.day >= c.s && state.day < c.e
@@ -711,7 +745,7 @@ export class SchedView {
       }).join('')
       const coarseHtml = seg.coarse.map((c) => '<div class="sc-cell" style="left:' + c.x + 'px;width:' + c.w + 'px">' + esc(c.label as string) + '</div>').join('')
       $('#headT')!.innerHTML = '<div class="sc-tier c1">' + coarseHtml + '</div><div class="sc-tier c2">' + fineHtml + '</div>' +
-        '<button type="button" class="now-pill" style="left:' + nowX + 'px" title="今天 · 点它打开今天的任务面板" aria-label="今天，打开今天的任务面板">今天</button>'
+        '<button type="button" class="now-pill" style="left:' + nowX() + 'px" title="今天 · 点它打开今天的任务面板" aria-label="今天，打开今天的任务面板">今天</button>'
       // v90：页头这个数 = 日程列表里实际列出的组数 / 项目行数（折叠的组仍算：行还在列表里；
       // 归档一律不列、没有记录的 pending 由「显示 pending 项目」决定），随搜索与筛选变。侧栏徽标吃同一次广播，两处永远同一帧同一个数。
       const list = visibleGroups()
@@ -743,7 +777,7 @@ export class SchedView {
       for (const c of seg.coarse) html += '<i class="gl strong" style="left:' + c.x + 'px"></i>'
       if (state.zoom === 'day') for (const c of seg.fine) if (c.we) html += '<i class="wk" style="left:' + c.x + 'px;width:' + c.w + 'px"></i>'
       $('#bg')!.innerHTML = html
-      $('#ov')!.innerHTML = '<i class="now" style="left:' + (at(TODAY) + Math.max(2, at(TODAY + D) - at(TODAY)) / 2) + 'px"></i>'
+      $('#ov')!.innerHTML = '<i class="now" style="left:' + nowX() + 'px"></i>'
     }
 
     const clipX = (s: number, e: number): null | { left: number; width: number; cutL: boolean; cutR: boolean } => {
@@ -792,7 +826,11 @@ export class SchedView {
           for (const r0 of runs) if (r0.e <= ms && r0.e > win.start) edge = Math.max(edge == null ? -1 : edge, at(r0.e))
           for (const run of runsOfDays(days)) if (run.e <= ms && run.e > win.start) edge = Math.max(edge == null ? -1 : edge, at(run.e))
           if (prevFlagCx != null) edge = Math.max(edge == null ? -1 : edge, prevFlagCx + 8)
-          if (edge != null && cx - 10 - edge > 2) ddl += '<i class="ddllead ' + (hardN ? 'hard' : 'soft') + '" data-lead="' + dayTxt + '" style="left:' + edge + 'px;width:' + (cx - 10 - edge) + 'px"></i>'
+          /* v170：这条行上没有任何「计划 / 执行」落在截止之前 → 虚线起点改从「今天」竖线拉起（旗子不再孤零零）。
+             有安排 / 执行的行 edge 非空，起点仍是条子右端 —— 一行都不动。 */
+          let fromToday = false
+          if (edge == null) { edge = nowX(); fromToday = true }
+          if (cx - 10 - edge > 2) ddl += '<i class="ddllead ' + (hardN ? 'hard' : 'soft') + '"' + (fromToday ? ' data-from="today"' : '') + ' data-lead="' + dayTxt + '" style="left:' + edge + 'px;width:' + (cx - 10 - edge) + 'px"></i>'
         }
         prevFlagCx = cx
         const lines = list.map((d) => (d.task ? '任务' : ddlKind(d) === 'soft' ? '软性' : '硬性') + (d.label ? ' · ' + d.label : '') + (d.task && d.done ? '（已完成）' : ''))
@@ -839,7 +877,10 @@ export class SchedView {
           for (const sp of plan) if (sp.e <= ms && sp.e > win.start) edge = Math.max(edge == null ? -1 : edge, at(sp.e))
           for (const run of runsOfDays(days)) if (run.e <= ms && run.e > win.start) edge = Math.max(edge == null ? -1 : edge, at(run.e))
           if (prevFlagCx != null) edge = Math.max(edge == null ? -1 : edge, prevFlagCx + 8)
-          if (edge != null && cx - 10 - edge > 2) dots += '<i class="ddllead ' + (hardN ? 'hard' : 'soft') + '" data-lead="' + ymd(ms) + '" style="left:' + edge + 'px;width:' + (cx - 10 - edge) + 'px"></i>'
+          /* v170：组内没有任何「计划 / 执行」落在截止之前 → 组行的截止点也从「今天」拉起 */
+          let fromToday = false
+          if (edge == null) { edge = nowX(); fromToday = true }
+          if (cx - 10 - edge > 2) dots += '<i class="ddllead ' + (hardN ? 'hard' : 'soft') + '"' + (fromToday ? ' data-from="today"' : '') + ' data-lead="' + ymd(ms) + '" style="left:' + edge + 'px;width:' + (cx - 10 - edge) + 'px"></i>'
         }
         prevFlagCx = cx
         dots += '<i class="gddl2" style="left:' + cx + 'px" title="' + esc('组内截止 ' + ymd(ms) + (list.length > 1 ? '（' + list.length + ' 个）' : '') + '：硬性 ' + hardN + ' / 软性 ' + softN) + '">'
@@ -868,10 +909,17 @@ export class SchedView {
           const runs = planRuns(c)
           const planStart = runs.length ? Math.min(...runs.map((r) => r.s)) : null
           const ddlN = c.ddlList.length
-          /* v127（2）：目录格第二行 = 彩色圆角标签（阶段 / 任务 x/y / 实际 N 天 / pending） */
-          const sub = '<span class="v7tg stg">' + esc(c.stage) + '</span><span class="v7tg tsk' + (c.total && c.done === c.total ? ' all' : '') + '"><u>任务</u> ' + (c.total ? c.done + '/' + c.total : '—') + '</span><span class="v7tg act' + (c.actualSet.size ? '' : ' z') + '"><u>实际</u> ' + c.actualSet.size + ' 天</span>' + (c.pending ? '<span class="v7tg pnd">pending</span>' : '')
-          html += '<div class="sc-row ind' + (state.sel === c.id ? ' sel' : '') + (c.pending ? ' pend' : '') + '" data-g="' + esc(g.id) + '" data-c="' + esc(c.id) + '">' +
-            '<div class="sc-name ind-cell" role="button" tabindex="0" data-open-card-cell="' + esc(c.id) + '" aria-label="打开「' + esc(c.t) + '」的卡片详情"><span class="nm-line"><button type="button" class="nm sc-open" tabindex="-1" title="' + esc(c.t) + '，打开卡片详情">' + esc(c.t) + '</button>' + (c.pending ? '<span class="pchip pend">pending</span>' : '') + '</span><span class="sub v7tags" title="计划开始 ' + (planStart != null ? ymd(planStart) : '—') + '">' + sub + '</span>' +
+          /* v127（2）：目录格第二行 = 彩色圆角标签
+             v174：降噪 —— 只留一颗阶段胶囊，「任务 x/y」「实际 N 天」改成静音统计（数字 tabular）；
+             pending 胶囊只留在标题行一颗（第二行不再重复） */
+          const sub = '<span class="v7tg stg">' + esc(c.stage) + '</span>' +
+            '<span class="v7mt tsk' + (c.total && c.done === c.total ? ' all' : '') + '"><i>任务</i><b>' + (c.total ? c.done + '/' + c.total : '—') + '</b></span>' +
+            '<span class="v7mt act' + (c.actualSet.size ? '' : ' z') + '"><i>实际</i><b>' + c.actualSet.size + ' 天</b></span>'
+          html += '<div class="sc-row ind' + (state.sel === c.id ? ' sel' : '') + (c.pending ? ' pend' : '') + (c.star ? ' star' : '') + '" data-g="' + esc(g.id) + '" data-c="' + esc(c.id) + '">' +
+            '<div class="sc-name ind-cell' + (c.star ? ' starred' : '') + '" role="button" tabindex="0" data-open-card-cell="' + esc(c.id) + '" aria-label="打开「' + esc(c.t) + '」的卡片详情">' +
+            /* v172：目录格最左 38px = 星标槽（点它只切星，不打开详情、不改选中） */
+            '<button type="button" class="pstar-btn pstar-cell' + (c.star ? ' on' : '') + '" data-card-star="' + esc(c.id) + '" aria-pressed="' + (c.star ? 'true' : 'false') + '" aria-label="' + esc(starLabel(c)) + '" title="' + esc(starTitle(c)) + '">' + ic('star') + '</button>' +
+            '<span class="nm-line"><button type="button" class="nm sc-open" tabindex="-1" title="' + esc(c.t) + '，打开卡片详情">' + esc(c.t) + '</button>' + (c.pending ? '<span class="pchip pend">pending</span>' : '') + '</span><span class="sub v7tags" title="计划开始 ' + (planStart != null ? ymd(planStart) : '—') + '">' + sub + '</span>' +
             '<button type="button" class="ddlbtn' + (ddlN ? ' on' : '') + '" data-ddl="' + esc(c.id) + '" title="截止时间（' + ddlN + ' 个）"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6.4 21V3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/><path d="M7 4.2h9.4l-1.9 3.9 1.9 3.9H7z" fill="currentColor"/></svg><span>' + (ddlN ? ddlN : '') + '</span></button>' +
             '</div>' +
             '<div class="sc-track" data-card="' + esc(c.id) + '">' + cardTrack(c) + '</div></div>'
@@ -900,7 +948,7 @@ export class SchedView {
     const pstKey = (k: string): string => ymd(state.day) + '\n' + k
     const pday = (key: string): PanelDayM => {
       let u = PDAY.get(key)
-      if (!u) { u = { done: new Set(), sel: new Set(), lanes: null, zl: { pause: [], wait: [], run: [], un: [] }, doneAt: new Map(), from: new Map() }; PDAY.set(key, u) }
+      if (!u) { u = { done: new Set(), sel: new Set(), lanes: null, zl: { pause: [], wait: [], run: [], un: [] }, doneAt: new Map(), from: new Map(), rec: new Map(), auto: new Set() }; PDAY.set(key, u) }
       return u
     }
 
@@ -1025,6 +1073,25 @@ export class SchedView {
       return '<button type="button" class="eck' + (st === true ? ' on' : st === 'mixed' ? ' mix' : '') + '" role="checkbox" aria-checked="' + v + '" ' + attr + ' data-fk="' + esc(fk) + '" aria-label="' + esc(label) + '" title="' + esc(label) + '"' + (dis ? ' disabled' : '') + '><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg><i aria-hidden="true"></i></button>'
     }
     function pTag(level: 'p' | 't' | 's'): string { return level === 'p' ? '<span class="lvt p">项目</span>' : level === 't' ? '<span class="lvt t">任务</span>' : '<span class="lvt s">子任务</span>' }
+    /* v169：卡片第二行的「项目组 › 项目」= 设计稿那条双色色带（左段项目组 #F0F4FC / 右段项目 #FEF1CD / 1px 深色描边 + 文字 #22262C，
+       chevron 箭头、整条右端收尖）。项目卡（没拆任务）只有项目组一段，面板里不会出现子任务卡（叶子只到任务层）。
+       纯展示：aria-hidden，点它 = 点卡片；文字超长各自省略号收尾（几何 / 颜色见 style.css 的 v169 段）。 */
+    function crumbRibbon(l: LeafL): string {
+      const seg = (k: string, txt: string): string => '<span class="excr-s ' + k + '"><i>' + esc(txt) + '</i></span>'
+      let h = '<span class="excr" data-lv="' + l.level + '" aria-hidden="true">' + seg('g', l.g.name)
+      if (l.level !== 'p') h += seg('p', l.c.t)
+      return h + '</span>'
+    }
+    /* v183（1.2）：已经排过的行在 tooltip 里点名它落在「已安排」第几行（原型的「已安排 · 第 N 行」），
+       数据只从今天的 lanes 取（缺省行 / 已挪去执行中 → 不写）。 */
+    function laneTag(u: PanelDayM, ...keys: string[]): string {
+      const ls = (u.lanes ?? []) as string[][]
+      for (const k of keys) {
+        const i = ls.findIndex((l) => l.includes(k))
+        if (i >= 0) return '（已安排 · 第 ' + (i + 1) + ' 行）'
+      }
+      return ''
+    }
     function pSelChip(st: boolean | 'mixed', fk: string, label: string, dis = false): string {
       const s = st === true ? 'on' : st === 'mixed' ? 'mixed' : 'off'
       const txt = s === 'on' ? '已排' : s === 'mixed' ? '部分' : '排今天'
@@ -1136,28 +1203,31 @@ export class SchedView {
       return n === 0 ? false : n === ks.length ? true : 'mixed'
     }
     /* v122（1.4）：「记录当日执行」按钮 —— 未执行 = 虚线日历；已执行 = 实心绿底 + 勾；部分下级记过 = 绿框「部分执行」 */
-    function pRecBtn(k: string, st: boolean | 'mixed', l: { level: 'p' | 't' | 's'; title: string; subsN?: number }, dis: boolean, back: string, lock = false): string {
+    function pRecBtn(k: string, st: boolean | 'mixed', l: { level: 'p' | 't' | 's'; title: string; subsN?: number }, dis: boolean, back: string, lock = false, auto = false): string {
       const on = st === true, mix = st === 'mixed'
       const scope = l.level === 'p' ? '这个项目和它全部的任务 / 子任务' : l.level === 't' ? (l.subsN ? '这个任务和它的 ' + l.subsN + ' 个子任务' : '这个任务') : '这个子任务'
-      const lab = lock ? '已勾选完成「' + l.title + '」：今天的执行记录已锁定（先把勾选去掉才能撤销）' : on ? '今天已完成执行：' + l.title + '（点一下撤销记录' + (back ? '，回到「' + EXZ_T[back] + '」' : '') + '）' : (mix ? '今天部分执行了：' : '记录今天已完成执行：') + l.title + '（记录' + scope + '；甘特图今天的格子会标成「实际执行」）'
-      return '<button type="button" class="exrec' + (on ? ' on' : mix ? ' mix' : '') + (lock ? ' lock' : '') + '"' + (back ? ' data-back="' + back + '"' : '') + ' data-x-rec="' + esc(k) + '" data-fk="' + esc('rec:' + k) + '" aria-pressed="' + (on ? 'true' : mix ? 'mixed' : 'false') + '" title="' + esc(lab) + '" aria-label="' + esc(lab) + '"' + (dis ? ' disabled' : '') + '>' + PV_ICON.rec + '<span class="rt">' + (on ? '已执行' : mix ? '部分执行' : '记录执行') + '</span></button>'
+      const autoLab = '过 00:00 自动记录执行：' + l.title + '（记录' + scope + (back ? '；这张卡当时在「' + EXZ_T[back] + '」' : '') + '；点一下撤销记录，回到那个分区）'
+      const lab = lock ? '已勾选完成「' + l.title + '」：今天的执行记录已锁定（先把勾选去掉才能撤销）' : on ? (auto ? autoLab : '今天已完成执行：' + l.title + '（点一下撤销记录' + (back ? '，回到「' + EXZ_T[back] + '」' : '') + '）') : (mix ? '今天部分执行了：' : '记录今天已完成执行：') + l.title + '（记录' + scope + '；甘特图今天的格子会标成「实际执行」）'
+      return '<button type="button" class="exrec' + (on ? ' on' : mix ? ' mix' : '') + (lock ? ' lock' : '') + (auto ? ' auto' : '') + '"' + (auto ? ' data-auto="1"' : '') + (back ? ' data-back="' + back + '"' : '') + ' data-x-rec="' + esc(k) + '" data-fk="' + esc('rec:' + k) + '" aria-pressed="' + (on ? 'true' : mix ? 'mixed' : 'false') + '" title="' + esc(lab) + '" aria-label="' + esc(lab) + '"' + (dis ? ' disabled' : '') + '>' + PV_ICON.rec + '<span class="rt">' + (on ? (auto ? '自动' : '已执行') : mix ? '部分执行' : '记录执行') + '</span></button>'
     }
     /* v122（1.3/1.4）+ v123 + v126：任务项卡片 = grid：[勾选圆圈（完成；项目卡没有）] [标签 + 标题 / 层级路径] [记录执行]；
        悬停按钮浮在右上角（按分区给出，颜色 = 目标分区的卡片色）；不显示状态标签（分区本身就是状态）；不带原生 title（悬停走对话气泡）。 */
     function pItemHtml(l: LeafL, u: PanelDayM, key: string, future: boolean): string {
       const rec = u.done.has(l.key)
       const st = rec ? '' : (PST.get(key + '\n' + l.key) ?? '')
+      const recZ = recLive(u, l.key, key)
       const crumb = l.level === 'p' ? l.g.name : l.level === 't' ? l.g.name + ' › ' + l.c.t : l.g.name + ' › ' + l.c.t + ' › ' + (l.t?.text ?? '')
       const cd = l.level === 's' ? !!l.s?.done : l.level === 't' ? !!l.t?.done : false
       const zone = pZoneOf(u, l.key, key)
       let acts = ''
       if (zone === 'run') acts = pActBtn('pause', l.key, '个人暂停「' + l.title + '」→ 个人暂停', PV_ICON.pause, 'pause', false, 'pause') + pActBtn('wait', l.key, '等外部进展「' + l.title + '」→ 等外部进展', PV_ICON.wait, 'wait', false, 'wait') + pActBtn('cancel', l.key, '取消执行「' + l.title + '」→ 回到已安排', PV_ICON.stop, 'stop', false, 'arr')
       else if (zone === 'pause' || zone === 'wait') acts = pActBtn('run', l.key, '继续执行「' + l.title + '」→ 执行中', PV_ICON.play, 'run', false, 'run') + (zone === 'pause' ? pActBtn('wait', l.key, '改成等外部进展 → 等外部进展', PV_ICON.wait, 'wait', false, 'wait') : pActBtn('pause', l.key, '改成个人暂停 → 个人暂停', PV_ICON.pause, 'pause', false, 'pause')) + pActBtn('cancel', l.key, '取消暂停「' + l.title + '」→ 回到已安排', PV_ICON.stop, 'stop', false, 'arr')
-      else if (zone === 'arr') acts = pActBtn('run', l.key, future ? '未来的日子不能执行' : '开始执行「' + l.title + '」→ 执行中', PV_ICON.play, 'run', future, 'run') + pActBtn('pause', l.key, '个人暂停「' + l.title + '」→ 个人暂停', PV_ICON.pause, 'pause', future, 'pause') + pActBtn('wait', l.key, '等外部进展「' + l.title + '」→ 等外部进展', PV_ICON.wait, 'wait', future, 'wait')
+      else if (zone === 'arr') acts = pActBtn('run', l.key, future ? '未来的日子不能执行' : '开始执行「' + l.title + '」→ 执行中', PV_ICON.play, 'run', future, 'run') + pActBtn('pause', l.key, '个人暂停「' + l.title + '」→ 个人暂停', PV_ICON.pause, 'pause', future, 'pause') + pActBtn('wait', l.key, '等外部进展「' + l.title + '」→ 等外部进展', PV_ICON.wait, 'wait', future, 'wait') + pActBtn('unsel', l.key, '当日不安排「' + l.title + '」：从已安排移除，本日计划清单变回「排今天」', PV_ICON.stop, 'unsel')
       /* v127（3）：未安排悬停 = 「当日不安排」（从未安排移除，计划清单变回「排今天」） */
-      else if (zone === 'un') acts = pActBtn('unsel', l.key, '当日不安排「' + l.title + '」：从未安排移除，本日计划清单变回「排今天」', PV_ICON.stop, 'unsel')
-      const ck = l.level === 'p' ? '' : pCk('data-ex-ck="' + esc(l.key) + '"', 'exck:' + l.key, cd, (cd ? '取消完成' : '完成') + (l.level === 's' ? '子任务' : '任务') + '「' + l.title + '」' + (l.level === 't' && l.t?.subs?.length ? '（连同它的子任务）' : '') + '；和卡片详情里的勾选是同一个状态', false)
-      const stateTxt = (cd ? '已完成；' : '') + EXZ_T[zone]
+      else if (zone === 'un') acts = pActBtn('run', l.key, future ? '未来的日子不能执行' : '执行「' + l.title + '」→ 执行中（排到最后一行，和同一行的一起做）', PV_ICON.play, 'run', future, 'run') + pActBtn('arr', l.key, future ? '未来的日子不能安排' : '安排「' + l.title + '」→ 已安排（排到最后一行，上下 = 先后）', PV_ICON.cal, 'arr', future, 'arr') + pActBtn('unsel', l.key, '当日不安排「' + l.title + '」：从未安排移除，本日计划清单变回「排今天」', PV_ICON.stop, 'unsel')
+      /* v183（1.4）：项目卡不再留空 —— 用一格不可见的勾选圈占位，和执行安排里的任务卡同一列 */
+      const ck = l.level === 'p' ? '<span class="eck ph" aria-hidden="true"></span>' : pCk('data-ex-ck="' + esc(l.key) + '"', 'exck:' + l.key, cd, (cd ? '取消完成' : '完成') + (l.level === 's' ? '子任务' : '任务') + '「' + l.title + '」' + (l.level === 't' && l.t?.subs?.length ? '（连同它的子任务）' : '') + '；和卡片详情里的勾选是同一个状态', false)
+      const stateTxt = (l.c.star === true ? '已加星标；' : '') + (cd ? '已完成；' : '') + (u.auto.has(l.key) ? '自动记录执行；' : '') + EXZ_T[zone]
       const flag = (l.c.arch ? ' arc' : '') + (l.c.pending && !l.c.arch ? ' pend' : '')
       /* v140（2.5）/ v141（1.4）：会话状态标签 = 第二行右边；以此任务创建会话 = 悬停按钮组最右（黑底）。v142（3.1）：路径小字在同一行左边 */
       const sid = l.level !== 'p' && l.t?.sess ? l.t.sess : ''
@@ -1175,17 +1245,22 @@ export class SchedView {
           + pCk('data-ex-ck="' + esc(sk) + '"', 'exck:' + sk, !!x.done, (x.done ? '取消完成' : '完成') + '子任务「' + x.text + '」；和卡片详情 / 本日计划清单同一个状态', false)
           + '<span class="v41st">' + esc(x.text) + '</span><span class="v41cs">' + (x.sess ? chipHtml(x.sess) : '') + '</span>'
           + (l.c.arch || sessLive(x.sess) ? '' : newBtnHtml(l.c.id, x.id, '子任务', 'v42nb'))
-          + '<button type="button" class="v41rec' + (srec ? ' on' : '') + '" data-x-rec="' + esc(sk) + '" aria-pressed="' + srec + '" title="' + esc(srec ? '今天已记录执行：' + x.text + '（点一下撤销）' : '记录今天已执行：' + x.text) + '" aria-label="' + esc((srec ? '撤销记录执行：' : '记录执行：') + x.text) + '"' + (future ? ' disabled' : '') + '>' + PV_ICON.rec + '</button></div>'
+          + '<button type="button" class="v41rec' + (srec ? ' on' : '') + (u.auto.has(sk) ? ' auto' : '') + '"' + (u.auto.has(sk) ? ' data-auto="1"' : '') + ' data-x-rec="' + esc(sk) + '" aria-pressed="' + srec + '" title="' + esc(srec ? (u.auto.has(sk) ? '过 00:00 自动记录执行：' + x.text + '（点一下撤销）' : '今天已记录执行：' + x.text + '（点一下撤销）') : '记录今天已执行：' + x.text) + '" aria-label="' + esc((srec ? '撤销记录执行：' : '记录执行：') + x.text) + '"' + (future ? ' disabled' : '') + '>' + PV_ICON.rec + '</button></div>'
       }).join('')
       const sb = subs.length ? '<div class="v41subs" role="list" aria-label="' + esc('子任务 ' + subs.filter((x) => x.done).length + '/' + subs.length) + '">' + subRows + '</div>' : ''
-      return '<div class="exi' + (ck ? '' : ' nock') + (zone === 'un' ? ' norec' : '') + (acts ? ' hasa' : '') + (st ? ' st-' + st : '') + (rec ? ' done' : '') + (cd ? ' cdone' : '') + (chip ? ' v40has' : '') + (subs.length ? ' v41grp' : '') + flag + '" data-k="' + esc(l.key) + '" data-lv="' + l.level + '" data-st="' + st + '" data-done="' + (rec ? '1' : '0') + '" tabindex="0" aria-label="' + esc(l.title + '；' + crumb + '；' + stateTxt + '；点击打开卡片详情') + '">'
+      /* v172：执行安排只显示星标（星的状态由卡片根的 starred 类驱动）
+         v174：显示位置 = 卡片左上角的金角签（PSTAR_TAB），不再挤在勾选圈旁边 */
+      const pstar = l.c.star === true
+      return '<div class="exi' + (l.level === 'p' ? ' nock' : '') + (pstar ? ' starred' : '') + (zone === 'un' ? ' norec' : '') + (acts ? ' hasa' : '') + (st ? ' st-' + st : '') + (rec ? ' done' : '') + (cd ? ' cdone' : '') + (chip ? ' v40has' : '') + (subs.length ? ' v41grp' : '') + flag + '" data-k="' + esc(l.key) + '" data-c="' + esc(l.c.id) + '" data-lv="' + l.level + '" data-st="' + st + '"' + (recZ ? ' data-rec="' + recZ.z + '"' : '') + (u.auto.has(l.key) ? ' data-auto="1"' : '') + ' data-done="' + (rec ? '1' : '0') + '" tabindex="0" aria-label="' + esc(l.title + '；' + crumb + '；' + stateTxt + '；点击打开卡片详情') + '">'
         + '<span class="exgrip" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="1.2"/><circle cx="15" cy="7" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="17" r="1.2"/><circle cx="15" cy="17" r="1.2"/></svg></span>'
-        + (ck ? '<span class="exck">' + ck + '</span>' : '')
-        + '<span class="exi-m"><span class="exi-r1">' + pTag(l.level) + '<span class="exi-t"><span class="mq-t">' + esc(l.title) + '</span></span></span><span class="exi-s"><span class="mq-s">' + carryTag(l.key) + (l.level === 's' ? dueChip(l.s?.due, !!l.s?.done) : l.level === 't' ? dueChip(l.t?.due, !!l.t?.done) : '') + esc(crumb) + '</span></span></span>'
+        + PSTAR_TAB
+        + '<span class="exck">' + ck + '</span>'
+        + '<span class="exi-m"><span class="exi-r1">' + pTag(l.level) + '<span class="exi-t"><span class="mq-t">' + esc(l.title) + '</span></span></span><span class="exi-s">' + crumbRibbon(l) + '<span class="mq-s">' + (l.level === 's' ? dueChip(l.s?.due, !!l.s?.done) : l.level === 't' ? dueChip(l.t?.due, !!l.t?.done) : '') + '</span></span></span>'
         + '<span class="exslot">' + (acts ? '<span class="exacts">' + acts + '</span>' : '') + '</span>'
-        + (zone === 'un' ? '' : pRecBtn(l.key, rec, { level: l.level, title: l.title, subsN: l.t?.subs?.length }, future || (rec && cd), rec ? (u.from.get(l.key) ?? 'arr') : '', rec && cd))
+        + (zone === 'un' ? '' : pRecBtn(l.key, rec, { level: l.level, title: l.title, subsN: l.t?.subs?.length }, future || (rec && cd), rec ? (u.from.get(l.key) ?? 'arr') : '', rec && cd, u.auto.has(l.key)))
         + (chip ? '<span class="v40ex">' + chip + '</span>' : '')
         + sb
+        + (pstar ? PSTAR_SHEEN : '')
         + '</div>'
     }
     /** 子任务在这一天的执行卡里要不要列：未完成 / 这天完成 / 这天记过执行。 */
@@ -1273,8 +1348,8 @@ export class SchedView {
             + (totalN ? '<span class="plp" title="' + esc('当天已执行 ' + doneN + ' / ' + totalN + ' 个任务项') + '">' + doneN + '/' + totalN + '</span>' : '')
             + ddc
             + '<span class="v40pl">' + pchipHtml(c.id) + '</span>'
-            + pRecBtn(pk, pRecSt(u, pk), { level: 'p', title: c.t }, future, '')
-            + pSelChip(selSt, pk, selLab)
+            + pRecBtn(pk, pRecSt(u, pk), { level: 'p', title: c.t }, future, '', false, u.auto.has(pk))
+            + pSelChip(selSt, pk, selLab + (selSt === true ? laneTag(u, pk) : ''))
             + '</div>'
           if (!hasKids) { html += pRow; continue }
           let kin = ''
@@ -1300,8 +1375,8 @@ export class SchedView {
               + '<button type="button" class="nmt nmtb" data-pl-open="' + esc(c.id) + '" title="' + esc('打开卡片详情：' + c.t) + '">' + esc(it.t.text) + '</button>' + dueChip(it.t.due, !!it.t.done)
               + (it.t.sess ? '<span class="v40pl">' + chipHtml(it.t.sess) + '</span>' : '')
               + recBadge(tk)
-              + pRecBtn(tk, tRec, { level: 't', title: it.t.text, subsN: it.subs.length }, future, '')
-              + pSelChip(tSel, tk, selLabT, tDis)
+              + pRecBtn(tk, tRec, { level: 't', title: it.t.text, subsN: it.subs.length }, future, '', false, u.auto.has(tk))
+              + pSelChip(tSel, tk, selLabT + (tSel === true ? laneTag(u, tk, ...tKeys) : ''), tDis)
               + '</div>'
             if (tHas) kin += '<div class="plsub' + (tOpen ? ' open' : '') + '" data-pl-sub="' + esc(tk) + '"><div class="plc-in">'
             for (const x of subsShown) {
@@ -1314,8 +1389,8 @@ export class SchedView {
                 + '<button type="button" class="nmt nmtb" data-pl-open="' + esc(c.id) + '" title="' + esc('打开卡片详情：' + c.t) + '">' + esc(x.s.text) + '</button>' + dueChip(x.s.due, !!x.s.done)
                 + (x.s.sess ? '<span class="v40pl">' + chipHtml(x.s.sess) + '</span>' : '')
                 + recBadge(sk)
-                + pRecBtn(sk, on, { level: 's', title: x.s.text }, future, '')
-                + pSelChip(sel, sk, scd && !sel ? '「' + x.s.text + '」已经完成，不用再排今天' : (sel ? '取消' : '选中') + '「' + x.s.text + '」排今天执行；选中的任务项会出现在上面的任务执行安排里', sDis)
+                + pRecBtn(sk, on, { level: 's', title: x.s.text }, future, '', false, u.auto.has(sk))
+                + pSelChip(sel, sk, (scd && !sel ? '「' + x.s.text + '」已经完成，不用再排今天' : (sel ? '取消' : '选中') + '「' + x.s.text + '」排今天执行；选中的任务项会出现在上面的任务执行安排里') + (sel ? laneTag(u, sk, tk) : ''), sDis)
                 + '</div>'
             }
             if (tHas) kin += '</div></div></div>'
@@ -1457,7 +1532,9 @@ export class SchedView {
       const keys = hits.map((h) => h.key)
       if (!keys.length) return
       if (EXZ_CLOSED.delete('run')) void postGantt('ui', { exz: [...EXZ_CLOSED] }).catch(() => undefined)
-      void self.load(true).then(() => {
+      /* v183（1.1）真机发现：这里原来 load(true) 不带 full → getGantt 带旧 rev 被服务端判 same 直接 return，
+         会话刚挪进「执行中」的那一屏不重画（服务端已写、界面还停在旧分区）。必须 full 拉一次再摆卡。 */
+      void self.load(true, true).then(() => {
         const body = $('#exBody')
         if (!body || !root.classList.contains('tp-on') || !body.offsetParent) return
         const find = (): HTMLElement[] => keys.map((k) => body.querySelector<HTMLElement>('.exi[data-k="' + CSS.escape(k) + '"]')).filter((x): x is HTMLElement => !!x)
@@ -1546,18 +1623,37 @@ export class SchedView {
       }
     }
     /* v126（1.3）：不悬停不跑马灯 —— 标题放不下就显示省略号；悬停时卡片展开把标题显示全，也不跑。
-       这里只量两块尺寸给 CSS 用：记录执行按钮宽（悬停按钮贴它左边）和悬停按钮条宽（宽排时标题第一行给它留位）。 */
+       这里只量两块尺寸给 CSS 用：记录执行按钮宽（悬停按钮贴它左边）和悬停按钮条宽（宽排时标题第一行给它留位）。
+       v160（用户反馈：「记录执行」按钮没有字）：文字该不该画，不再交给面板 / 容器的宽度去猜 ——
+       按这一行实际剩多少算：勾选 + 标签 + 悬停按钮 + 按钮自然宽全都算，标题至少留 MIN_REC_T；
+       放不下就打 .recicon，CSS 把按钮整体收成 22×22 图标方（不留空胶囊），--recw 用收完的宽度量。 */
+    const MIN_REC_T = 96 /* 标题最少留这么多才放「记录执行」四个字 */
+    let exRO: ResizeObserver | null = null
     function syncExMarquee(): void {
       const body = $('#exBody')
       if (!body) return
       for (const e of $$('.exi', body)) {
         const el = e as HTMLElement
-        const r = el.querySelector(':scope > .exrec')
-        if (r) el.style.setProperty('--recw', Math.round(r.getBoundingClientRect().width) + 'px')
         const n = el.querySelectorAll('.exacts .exa').length
         if (n) el.style.setProperty('--actw', (n * 22 + (n - 1) * 4 + 8) + 'px')
+        const r = el.querySelector(':scope > .exrec')
+        if (r) {
+          /* v160：先按「有字」摆一次，量标题真正拿到多少 —— 被挤到不足 MIN_REC_T 才收成图标方。
+             判据是标题自己的宽度，不是面板 / 容器的宽度；量的时候先去掉 .recicon，所以不会因为上一帧的形态反复横跳。
+             面板刚打开 / 正在拖宽度时量不到（宽 0）→ 不动它，等 ResizeObserver 再量，避免按 0 宽误判。 */
+          if (el.clientWidth > 0) {
+            el.classList.remove('recicon')
+            const t = el.querySelector(':scope > .exi-m > .exi-r1 > .exi-t')
+            const tw = t ? t.getBoundingClientRect().width : Infinity
+            if (tw < MIN_REC_T) el.classList.add('recicon')
+            el.style.setProperty('--recw', Math.round(r.getBoundingClientRect().width) + 'px')
+          }
+        }
       }
       for (const t of $$('.exi-t', body)) (t as HTMLElement).classList.remove('mq')
+      /* v160：拖面板宽度 / 开合详情时卡片宽度会变 —— 量一次决定「记录执行」放不放得下字（observer 只建一次） */
+      if (!exRO) { const b = $('#exBody'); if (b && typeof ResizeObserver !== 'undefined') exRO = new ResizeObserver(() => syncExMarquee()) }
+      if (exRO) exRO.observe(body)
     }
     function pEmptyHtml(kind: 'arr' | 'plan'): string {
       if (kind === 'arr') return '<div class="tp-empty2"><span class="eic" aria-hidden="true">' + PV_ICON.playBig + '</span><b>这一天还没有选中要执行的任务</b><span>在下面「本日计划清单」里点「排今天」，选中的任务项会立刻出现在这里。勾选只表示当天完成，不会自动选中。</span></div>'
@@ -1589,6 +1685,7 @@ export class SchedView {
       if (root.classList.contains('tp-on')) carryRunIfNeeded()
       $('#tpDay')!.textContent = md(day)
       setH($('#tpSub')!, DAYS[dt.getDay()] + ' · ' + dt.getFullYear() + (day === TODAY ? ' <span class="today">今天</span>' : future ? ' <span class="today" style="background:var(--pm-select);color:var(--dsw-alias-label-primary)">未来</span>' : ''))
+      syncAutoChip()
       const model = pBuild(day), leaves = pLeaves(model), u = pday(key)
       /* v113（4.2）：层级变化（任务 ↔ 子任务）只改「任务项卡片」的内容，不动位置 ——
          同一个 id 的 key 前缀会从 t| 变成 s|（或反过来），这里把 sel / lanes / done 里的旧 key 迁移到新 key，
@@ -1640,11 +1737,28 @@ export class SchedView {
             const list = byZ[Z.z]
             const shut = EXZ_CLOSED.has(Z.z)
             let body = ''
-            if (Z.z !== 'done') { const rows = rowsFor(Z.z); body = rows.length ? rows.map((r) => '<div class="exlane' + (r.lane.length > 1 ? ' multi' : '') + '" data-ln="' + r.i + '">' + r.lane.map((k) => { const l = leaves.get(k); return l ? pItemHtml(l, u, key, future) : '' }).join('') + '</div>').join('') : '<div class="exz-empty">' + EXZ_EMPTY[Z.z] + '</div>' }
+            const autoN = Z.z !== 'done' ? Number((u.autoRec?.z as Record<string, number> | undefined)?.[Z.z] ?? 0) : 0
+            if (Z.z !== 'done') {
+              const rows = rowsFor(Z.z)
+              body = rows.length
+                ? rows.map((r) => '<div class="exlane' + (r.lane.length > 1 ? ' multi' : '') + '" data-ln="' + r.i + '">' + r.lane.map((k) => { const l = leaves.get(k); return l ? pItemHtml(l, u, key, future) : '' }).join('') + '</div>').join('')
+                : '<div class="exz-empty">' + EXZ_EMPTY[Z.z] + '</div>'
+            }
             else body = list.length ? '<div class="exdone-col">' + list.map((l) => pItemHtml(l, u, key, future)).join('') + '</div>' : '<div class="exz-empty">' + EXZ_EMPTY.done + '</div>'
+            /* v184：分区被 00:00 收口清空后，说明放在分区头下面（折叠也看得见，和原型一致） */
+            const autoNote = (Z.z !== 'done' && autoN && !list.length)
+              ? '<button type="button" class="exz-auto" data-exz-auto-go="1" title="这 ' + autoN + ' 项已过 00:00 自动记录执行（只记执行，不勾完成）—— 点一下看「本日已执行」"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.6V12l3.1 1.9"/></svg><span>这 ' + autoN + ' 项已过 00:00 <b>自动记录执行</b> → 「本日已执行」</span><em>去看看</em></button>'
+              : ''
+            const recN = recCount(u, key, list.map((l) => l.key))
+            const autoDoneN = Z.z === 'done' ? list.filter((l) => u.auto.has(l.key)).length : 0
             return '<section class="exz' + (shut ? ' shut' : '') + (list.length ? ' hasi' : '') + '" data-zone="' + Z.z + '" aria-label="' + Z.t + '（' + list.length + ' 项）">'
               + '<header class="exz-h" data-exz-tg="' + Z.z + '" role="button" tabindex="-1" title="' + (shut ? '展开' : '收起') + '「' + Z.t + '」（点整条标题栏）"><button type="button" class="exz-tg" data-exz-tg="' + Z.z + '" aria-expanded="' + !shut + '" title="' + (shut ? '展开' : '收起') + '「' + Z.t + '」"><svg class="pfchev" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button>'
-              + '<span class="zi" aria-hidden="true"><svg viewBox="0 0 24 24">' + (ZI[Z.z] ?? ZI.un) + '</svg></span><b class="zt">' + Z.t + '</b><span class="zn">' + list.length + '</span><span class="zs">' + Z.s + '</span></header>'
+              + '<span class="zi" aria-hidden="true"><svg viewBox="0 0 24 24">' + (ZI[Z.z] ?? ZI.un) + '</svg></span><b class="zt">' + Z.t + '</b><span class="zn">' + list.length + '</span>'
+              + (autoDoneN ? '<span class="zauto" title="这 ' + autoDoneN + ' 项是过 00:00 自动记录执行（' + (u.autoRec?.z ? '等外部 ' + (u.autoRec.z.wait ?? 0) + ' · 个人暂停 ' + (u.autoRec.z.pause ?? 0) + ' · 执行中 ' + (u.autoRec.z.run ?? 0) : '只记执行') + '；不是勾选完成）">自动 ' + autoDoneN + '</span>' : '')
+              + (recN ? '<span class="zrec" title="这一区有 ' + recN + ' 项是过了 00:00 自动从昨天接过来的推荐项">推荐 ' + recN + '</span>' : '')
+              + (Z.z === 'un' && recN ? '<button type="button" class="zacc" data-ex-rec-all="1" title="一次采纳「未安排」里所有推荐项：去掉推荐标记，卡片留在今天（想不做某一张，点它悬停的「当日不安排」）">全部采纳</button>' : '')
+              + '<span class="zs">' + Z.s + '</span></header>'
+              + autoNote
               + '<div class="exz-w"><div class="exz-in"' + (shut ? ' inert' : '') + '><div class="exz-b">' + body + '</div></div></div></section>'
           }).join(''))
         } else exCh = put(exBody, pEmptyHtml('arr'))
@@ -1654,7 +1768,7 @@ export class SchedView {
         /* v133 R2：计划清单和执行安排一样，HTML 没变就不重建 */
         plCh = put(plEl, model.length ? pPlanHtml(day, model, u) : pEmptyHtml('plan'))
       }
-      if (exCh) syncExMarquee()
+      if (exCh) { syncExMarquee(); landRec(u, key) }
       /* v125：重画后按同一套规则恢复悬停展开（不带动画、不闪） */
       if (HV.key && !HV.el?.isConnected) { const k = HV.key; HV.el = null; HV.key = ''; const c = $('#exBody .exi[data-k="' + CSS.escape(k) + '"]'); if (c && c.matches(':hover')) hvOn(c) }
       if (exCh || plCh) exStuck()
@@ -1721,32 +1835,38 @@ export class SchedView {
       const keys = pRecKeys(f)
       const on = !keys.every((x) => u.done.has(x))
       if (!on && f.cdone) { toast('已勾选完成：不能撤销今天的执行记录（先把勾选去掉）'); return }
+      /* v184：撤销「自动」只摘掉这一批自动写入的 key —— 同卡上之前手动 / 会话记的执行保留 */
+      const wasAuto = keys.some((x) => u.auto.has(x))
+      const del = on ? [] : (wasAuto ? keys.filter((x) => u.auto.has(x)) : keys)
       let back: GanttZone | '' = ''
       if (on) { for (const x of keys) if (!u.done.has(x)) { u.from.set(x, pZoneOf(u, x, key)); u.done.add(x); PST.delete(key + '\n' + x); u.doneAt.set(x, Date.now()) } }
-      else for (const x of keys) { if (!u.done.has(x)) continue; u.done.delete(x); u.doneAt.delete(x); const z = pRestoreFrom(u, x, key); if (x === k) back = z }
+      else for (const x of del) { if (!u.done.has(x)) continue; u.done.delete(x); u.doneAt.delete(x); u.auto.delete(x); const z = pRestoreFrom(u, x, key); if (x === k) back = z }
       /* v141（1.2）：子任务全部记录执行 = 任务卡整体进本日已执行；撤销其中一个 = 回原分区（保存前就合好，别等下一次载入） */
       v41Norm(u, key)
       savePanel(key, panelPatch(key, u))
       pSyncActual(f.c, u, key)
       pPulse(keys.concat([f.p.key]))
       const what = f.level === 'p' ? '项目及其全部任务 / 子任务' : f.level === 't' ? (f.it?.subs.length ? '任务及其 ' + f.it.subs.length + ' 个子任务' : '任务') : '子任务'
-      toast(on ? '已记录今天执行完成：「' + pTitleOf(f) + '」（' + what + '）· 甘特图今天的格子已标记' : '已撤销今天的执行记录：「' + pTitleOf(f) + '」· 回到「' + EXZ_T[back || 'un'] + '」')
+      toast(on ? '已记录今天执行完成：「' + pTitleOf(f) + '」（' + what + '）· 甘特图今天的格子已标记' : (wasAuto ? '已撤销跨天自动记录：「' + pTitleOf(f) + '」· 回到「' + EXZ_T[back || 'un'] + '」（这一天不会再自动补记）' : '已撤销今天的执行记录：「' + pTitleOf(f) + '」· 回到「' + EXZ_T[back || 'un'] + '」'))
       render()
     }
     /** 一天的整份执行安排状态（写回服务端用）。 */
     function panelPatch(key: string, u: PanelDayM): Record<string, unknown> {
       /* v141：选中只认任务键 —— 记过执行的子任务键映射到它的任务（直接并进去会被 v41Norm 再剥掉 → 每次重画都写盘，几笔在途保存互相覆盖，子任务执行记录丢失） */
-      return { sel: [...new Set([...u.sel, ...[...u.done].map(v41K)])], done: [...u.done], lanes: u.lanes ?? [], zl: u.zl, pst: dayPst(key), doneAt: Object.fromEntries(u.doneAt), from: Object.fromEntries(u.from) }
+      const rec: Record<string, { d: string; z: GanttZone }> = {}
+      for (const [k, r] of u.rec) { if (!u.sel.has(k) || u.done.has(k)) continue; if (pZoneOf(u, k, key) !== (r.z === 'run' ? 'run' : 'un')) continue; rec[k] = r }
+      return { sel: [...new Set([...u.sel, ...[...u.done].map(v41K)])], done: [...u.done], lanes: u.lanes ?? [], zl: u.zl, pst: dayPst(key), doneAt: Object.fromEntries(u.doneAt), from: Object.fromEntries(u.from), rec, auto: [...u.auto] }
     }
     /* v123：按钮 = 把卡片挪到哪个分区 —— 开始执行 → 执行中；个人暂停 / 等外部 → 对应分区；取消执行 / 取消暂停 → 已安排 */
     function pAct(k: string, act: string): void {
       const day = state.day, key = ymd(day), u = pday(key), f = pFind(k)
       if (!f) return
       if (act === 'unsel') {
+        const v183src = pZoneOf(u, k, key)
         u.sel.delete(k); PST.delete(key + '\n' + k); pZlDrop(u, k); pLaneDrop(u, k)
         savePanel(key, { sel: [...u.sel], pst: dayPst(key), lanes: u.lanes ?? [], zl: u.zl })
         pPulse([f.p.key])
-        toast('当日不安排「' + pTitleOf(f) + '」：已从未安排移除，本日计划清单里变回「排今天」')
+        toast('当日不安排「' + pTitleOf(f) + '」：已从' + (EXZ_T[v183src] || '今天') + '移除，本日计划清单里变回「排今天」')
         render()
         return
       }
@@ -1757,7 +1877,7 @@ export class SchedView {
       pLaneDrop(u, k); pZlDrop(u, k)
       if (to === 'arr') { PST.delete(key + '\n' + k); (u.lanes = u.lanes ?? []).push([k]) }
       else { PST.set(key + '\n' + k, to as 'run' | 'pause' | 'wait'); const zr = u.zl[to as ZlKey]; if (to === 'run' && zr.length) zr[zr.length - 1].push(k); else zr.push([k]) }  /* v127（3）：执行中一行任意多张 */
-      const verb = act === 'run' ? (from === 'pause' || from === 'wait' ? '继续执行' : '开始执行') : act === 'pause' ? '个人暂停' : act === 'wait' ? '等外部进展' : from === 'run' ? '取消执行' : '取消暂停'
+      const verb = act === 'run' ? (from === 'pause' || from === 'wait' ? '继续执行' : '开始执行') : act === 'pause' ? '个人暂停' : act === 'wait' ? '等外部进展' : act === 'arr' ? '安排' : from === 'run' ? '取消执行' : '取消暂停'
       savePanel(key, panelPatch(key, u))
       pPulse([k, f.p.key])
       toast(verb + '「' + pTitleOf(f) + '」· 移到「' + EXZ_T[to] + '」')
@@ -1819,7 +1939,35 @@ export class SchedView {
       }
       return null
     }
-    /** 打开今天的面板时：把之前「执行中 / 暂停」的项复制进今天的执行安排（一天只跑一次）。 */
+    /* ── v161：跨天推荐（取代 v111 的「续排」） ──────────────────────────────
+       过了 00:00 第一次打开今天的面板时跑一次（panels[day].carry）：
+       · 昨天「等外部进展 / 个人暂停 / 已安排 / 未安排」→ 今天「未安排」推荐项，
+         顺序 = 等外部 → 个人暂停 → 已安排 → 未安排，组内保持昨天的行 / 顺序；
+       · 昨天「执行中」→ 今天「执行中」，行 / 顺序 / 并行分组完全照抄；
+       · 昨天「本日已执行」不跨天；卡片里已完成 / 今天已排 / 已记录执行的项跳过；
+       · 被接过来的卡片今天自动「排今天」，卡片今天没有计划条就补上。
+       推荐来源写进 panels[day].rec；标记只在这项还待在「被接进的分区」时显示。 */
+    const REC_ZT: Record<string, string> = { wait: '等外部进展', pause: '个人暂停', arr: '已安排', un: '未安排', run: '执行中' }
+    function recLive(u: PanelDayM, k: string, key: string): { d: string; z: GanttZone } | null {
+      const r = u.rec.get(k)
+      if (!r || !u.sel.has(k) || u.done.has(k)) return null
+      const z = pZoneOf(u, k, key)
+      return z === (r.z === 'run' ? 'run' : 'un') ? r : null
+    }
+    /* v169：「推荐 · 来源」胶囊下线（口径 = 无效的、占地方的信息）。
+       推荐语义与计数全保留 —— 分区标题「推荐 N」/「全部采纳」/ 面板头「跨天 N」/ 落卡动效；来源明细在「跨天 N」的悬停提示里。
+       卡片本体只在有推荐时带 data-rec="来源分区"（landRec / jumpCross 读它，不再依赖 DOM 里的胶囊）。 */
+    function recCount(u: PanelDayM, key: string, keys: string[]): number { let n = 0; for (const k of keys) if (recLive(u, k, key)) n++; return n }
+    /** v161：第一次接过来时卡片轻轻落下（320ms，只一次）。 */
+    const REC_LANDED = new Set<string>()
+    function landRec(u: PanelDayM, key: string): void {
+      if (REC_LANDED.has(key)) return
+      const cards = $$('#exBody .exi[data-rec]')
+      if (!cards.length) return
+      REC_LANDED.add(key)
+      requestAnimationFrame(() => { for (const c of cards) { c.classList.add('v161land'); window.setTimeout(() => c.classList.remove('v161land'), 780) } })
+    }
+    /** 打开今天的面板时：把「前一天」的安排接过来（一天只跑一次；昨天没有面板 = 只写 carry）。 */
     function carryRunIfNeeded(): void {
       const dayKey = ymd(state.day)
       if (dayKey !== ymd(TODAY) || CARRY_BUSY) return
@@ -1829,24 +1977,66 @@ export class SchedView {
       u.carry = true
       CARRY_DONE.add(dayKey)
       try {
-        const hist = histStateMap(dayKey)
-        const names: string[] = []
+        const prevKey = ymd(dayMs(dayKey) - D)
+        const pu = PDAY.get(prevKey)
+        if (!pu) { savePanel(dayKey, { carry: true }); return }
+        const added: Array<{ k: string; z: GanttZone }> = []
         const planCards = new Map<string, CardM>()
-        for (const [k, h] of hist) {
+        const take = (rawKey: string, z: GanttZone): string | null => {
+          const k = v41K(rawKey)
+          if (!k || k.startsWith('s|')) return null          /* v141：执行安排只认任务键 */
           const leaf = leafOfKey(k)
-          if (!leaf || leaf.done) continue
-          if (!u.sel.has(k)) u.sel.add(k)
-          if (!PST.has(dayKey + '\n' + k)) { PST.set(dayKey + '\n' + k, h.st); if (!u.zl[h.st].some((l) => l.includes(k))) u.zl[h.st].push([k]) }
-          names.push((h.st === 'run' ? '执行中 · ' : h.st === 'wait' ? '等外部 · ' : '已暂停 · ') + leaf.text)
+          if (!leaf || leaf.done) return null
+          if (u.done.has(k) || u.sel.has(k)) return null     /* 今天已经排了 / 已记录执行 → 不覆盖 */
+          u.sel.add(k)
+          u.rec.set(k, { d: prevKey, z })
           if (!leaf.card.planSet.has(dayKey)) { leaf.card.planSet.add(dayKey); planCards.set(leaf.card.id, leaf.card) }
+          added.push({ k, z })
+          return k
+        }
+        /* ① 等外部进展 → ② 个人暂停 → ③ 已安排 → ④ 未安排：按这个顺序进「未安排」，组内保持昨天的行 */
+        for (const z of ['wait', 'pause', 'arr', 'un'] as const) {
+          const rows = z === 'arr' ? (pu.lanes ?? []) : (pu.zl[z] ?? [])
+          for (const row of rows) {
+            const keep: string[] = []
+            for (const raw of row) { const k = take(raw, z); if (k && !keep.includes(k)) keep.push(k) }
+            if (keep.length) u.zl.un.push(keep)
+          }
+          /* 兜底：昨天在这一区、但还没有行位置（例如刚点「排今天」还没重画）→ 单张一行接在后面 */
+          for (const raw of pu.sel) {
+            const k = v41K(raw)
+            if (k.startsWith('s|') || u.rec.has(k)) continue
+            if (pZoneOf(pu, raw, prevKey) !== z) continue
+            const got = take(raw, z)
+            if (got) u.zl.un.push([got])
+          }
+        }
+        /* 执行中：行 / 顺序 / 并行分组完全照抄昨天 */
+        for (const row of (pu.zl.run ?? [])) {
+          const keep: string[] = []
+          for (const raw of row) { const k = take(raw, 'run'); if (k && !keep.includes(k)) { keep.push(k); PST.set(dayKey + '\n' + k, 'run') } }
+          if (keep.length) u.zl.run.push(keep)
+        }
+        for (const raw of pu.sel) {
+          const k = v41K(raw)
+          if (k.startsWith('s|') || u.rec.has(k)) continue
+          if (pZoneOf(pu, raw, prevKey) !== 'run') continue
+          const got = take(raw, 'run')
+          if (got) { u.zl.run.push([got]); PST.set(dayKey + '\n' + got, 'run') }
         }
         for (const c of planCards.values()) void self.mutate('plan', { card: c.id, day: dayKey, on: true })
-        if (names.length || planCards.size) {
-          savePanel(dayKey, { sel: [...u.sel], pst: dayPst(dayKey), zl: u.zl, carry: true })
-          for (const k of hist.keys()) PANEL_PULSE.add(k)
-          const a = names.length ? '已续排 ' + names.length + ' 项（执行中 / 已暂停）：' + names.join('、') : ''
-          const b = planCards.size ? planCards.size + ' 个项目今天自动显示计划条：' + [...planCards.values()].map((c) => c.t).join('、') : ''
-          window.setTimeout(() => toast([a, b].filter(Boolean).join(' ｜ ')), 360)
+        if (added.length || planCards.size) {
+          savePanel(dayKey, { sel: [...u.sel], pst: dayPst(dayKey), zl: u.zl, rec: Object.fromEntries(u.rec), carry: true })
+          for (const x of added) PANEL_PULSE.add(x.k)
+          window.setTimeout(() => {
+            const n = (z: GanttZone): number => added.filter((x) => x.z === z).length
+            const seg = (['wait', 'pause', 'arr', 'un'] as const).map((z) => n(z) ? REC_ZT[z] + ' ' + n(z) : '').filter(Boolean).join(' · ')
+            const runN = n('run')
+            toast('已从 ' + prevKey + ' 的「任务执行安排」带过来 ' + added.length + ' 项'
+              + (seg ? '：未安排 ' + (n('wait') + n('pause') + n('arr') + n('un')) + ' 项（' + seg + '）' : '')
+              + (runN ? '；执行中 ' + runN + ' 项按昨天的排布继续' : '')
+              + (planCards.size ? '；' + planCards.size + ' 个项目今天补上计划条' : ''))
+          }, 360)
         } else {
           savePanel(dayKey, { carry: true })
         }
@@ -1854,52 +2044,135 @@ export class SchedView {
         CARRY_BUSY = false
       }
     }
-    /** 本日计划清单的「推荐安排」：之前排过、没在跑、还没完成、今天有计划条、今天还没排。 */
-    function recSet(dayKey: string): Set<string> {
-      const out = new Set<string>()
-      if (dayKey !== ymd(TODAY)) return out
-      const u = pday(dayKey)
-      const running = histStateMap(dayKey)
-      for (const k of histSelKeys(dayKey)) {
-        if (running.has(k) || u.sel.has(k) || u.done.has(k)) continue
-        const leaf = leafOfKey(k)
-        if (!leaf || leaf.done) continue
-        if (!leaf.card.planSet.has(dayKey)) continue
-        out.add(k)
-      }
-      return out
-    }
+    /** v161：v111 的「本日计划清单推荐安排」退场 —— 之前排过的项已经作为推荐项直接接进今天的「未安排」。 */
+    function recSet(_dayKey: string): Set<string> { return new Set() }
     function recBadge(k: string): string {
       if (!REC_SET.has(k)) return ''
       return '<button type="button" class="plrec" data-pl-rec="' + esc(k) + '" title="之前在「任务执行安排」里排过、还没完成：点一下直接排进今天的执行安排" aria-label="推荐安排：点一下排进今天">'
         + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5v10M8.2 10.8 12 14.6l3.8-3.8M5.5 19.5h13"/></svg>推荐安排</button>'
     }
-    function carryTag(k: string): string {
-      const h = histStateMap(ymd(state.day)).get(k)
-      if (!h) return ''
-      return '<b class="excar" title="从 ' + esc(h.day) + ' 的「任务执行安排」续排过来">续排 ' + esc(md(dayMs(h.day))) + '</b>'
-    }
-    function syncCarryChips(leaves: Map<string, LeafL>, u: PanelDayM): void {
-      const ec = $('#exCarryChip'), rc = $('#plRecChip')
-      const hist = histStateMap(ymd(state.day))
-      let carried = 0
-      const names: string[] = []
-      for (const k of leaves.keys()) {
-        if (!u.sel.has(k) || !hist.has(k)) continue
-        carried++
-        names.push(leaves.get(k)!.title)
+    /** v161：面板头「跨天 N」+ 隐藏旧的「推荐安排」chip。 */
+    function syncCarryChips(_leaves: Map<string, LeafL>, u: PanelDayM): void {
+      const ec = $('#exCarryChip') as HTMLButtonElement | null
+      const key = ymd(state.day)
+      let n = 0
+      /* v161：title 按来源分区写明细（未安排 N（等外部 x · 个人暂停 y · 已安排 z · 未安排 w）+ 执行中 m） */
+      const cz: Record<string, number> = { wait: 0, pause: 0, arr: 0, un: 0, run: 0 }
+      let src = ''
+      if (key === ymd(TODAY)) for (const [k, r] of u.rec) {
+        if (!recLive(u, k, key)) continue
+        n++
+        cz[r.z] = (cz[r.z] ?? 0) + 1
+        src = src || r.d
       }
       if (ec) {
-        ec.hidden = carried === 0
-        ec.textContent = carried ? '续排 ' + carried : ''
-        ec.title = carried ? '今天自动续排：' + names.join('、') : ''
+        ec.hidden = n === 0
+        ec.textContent = n ? '跨天 ' + n : ''
+        const unN = cz.wait + cz.pause + cz.arr + cz.un
+        ec.title = n
+          ? '今天从 ' + (src || '昨天') + ' 的「任务执行安排」带过来 ' + n + ' 项'
+            + (unN ? '：未安排 ' + unN + ' 项（等外部 ' + cz.wait + ' · 个人暂停 ' + cz.pause + ' · 已安排 ' + cz.arr + ' · 未安排 ' + cz.un + '）' : '')
+            + (cz.run ? '；执行中 ' + cz.run + ' 项按昨天的排布继续' : '')
+            + '。点一下跳到第一个推荐项'
+          : ''
       }
-      if (rc) {
-        const n = REC_SET.size
-        rc.hidden = n === 0
-        rc.textContent = n ? '推荐安排 ' + n : ''
-        rc.title = n ? '本日计划清单一共 ' + n + ' 项是之前排过、还没完成的：点这里跳到它们' : ''
+      const rc = $('#plRecChip') as HTMLButtonElement | null
+      if (rc) rc.hidden = true
+    }
+    /* v184：今天日期行的「昨日自动 N」胶囊 + 三个分区清空后的说明（点一下看「本日已执行」） */
+    function autoRecOf(dayKey: string): { at: number; n: number; z?: { wait?: number; pause?: number; run?: number } } | null {
+      const r = PDAY.get(dayKey)?.autoRec
+      return r && r.n > 0 ? r : null
+    }
+    function autoBreakdown(r: { z?: { wait?: number; pause?: number; run?: number } }): string {
+      const z = r.z ?? {}, parts: string[] = []
+      if (z.wait) parts.push('等外部 ' + z.wait)
+      if (z.pause) parts.push('个人暂停 ' + z.pause)
+      if (z.run) parts.push('执行中 ' + z.run)
+      return parts.join(' · ')
+    }
+    function syncAutoChip(): void {
+      const chip = $('#exAutoChip') as HTMLButtonElement | null
+      if (!chip) return
+      const key = ymd(state.day), prev = ymd(dayMs(key) - D)
+      const r = key === ymd(TODAY) ? autoRecOf(prev) : null
+      if (!r) { chip.hidden = true; chip.textContent = ''; chip.title = ''; return }
+      const tp = $('#tp') as HTMLElement | null
+      const narrow = ((tp && tp.clientWidth) || 999) < 340
+      chip.hidden = false
+      chip.textContent = (narrow ? '昨日 ' : '昨日自动 ') + r.n
+      chip.title = prev + ' 过了 00:00：' + (autoBreakdown(r) || '三个分区') + ' 自动记录为当日执行（只记执行，不勾完成）· 点一下看昨天'
+    }
+    function scrollAutoFirst(): void {
+      const el = $('#exBody .exi[data-auto="1"]') as HTMLElement | null
+      if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      for (const c of $$('#exBody .exi[data-auto="1"]')) { c.classList.add('pulse'); window.setTimeout(() => c.classList.remove('pulse'), 900) }
+    }
+    function jumpAuto(): void {
+      const prev = ymd(dayMs(ymd(state.day)) - D)
+      if (!autoRecOf(prev)) { toast('昨天没有自动记录执行的项目'); return }
+      openTp(dayMs(prev))
+      window.setTimeout(() => {
+        if (EXZ_CLOSED.delete('done')) void postGantt('ui', { exz: [...EXZ_CLOSED] }).catch(() => undefined)
+        renderPanel()
+        window.setTimeout(scrollAutoFirst, 120)
+      }, 320)
+    }
+    function jumpDoneAuto(): void {
+      if (EXZ_CLOSED.delete('done')) void postGantt('ui', { exz: [...EXZ_CLOSED] }).catch(() => undefined)
+      renderPanel()
+      window.setTimeout(scrollAutoFirst, 80)
+    }
+    /** v184：结算后第一次看到 autoRec → toast 一次（localStorage 记已提醒；36h 内才提醒）。 */
+    function autoRecToast(): void {
+      let seen: Record<string, number> = {}
+      try { seen = JSON.parse(localStorage.getItem('dpm.autoRec.seen.v1') || '{}') as Record<string, number> } catch { seen = {} }
+      const now = Date.now()
+      let hit: { day: string; n: number; z?: { wait?: number; pause?: number; run?: number } } | null = null
+      for (const [day, u] of PDAY) {
+        const r = u.autoRec
+        if (!r || !r.n) continue
+        if (now - r.at > 36 * 3600_000) continue
+        const kk = day + ':' + r.at
+        if (seen[kk]) continue
+        seen[kk] = 1
+        if (!hit) hit = { day, n: r.n, z: r.z }
       }
+      try { localStorage.setItem('dpm.autoRec.seen.v1', JSON.stringify(seen)) } catch { /* ignore */ }
+      if (hit) toast('过 00:00 · ' + hit.day + ' 自动记录执行 ' + hit.n + ' 项' + (hit.z ? '（' + autoBreakdown(hit) + '）' : '') + ' · 只记执行，不勾完成')
+    }
+    /** v161：点「跨天 N」跳到第一个推荐项（分区收着就展开）。 */
+    function jumpCross(): void {
+      const first = $('#exBody .exi[data-rec]') as HTMLElement | null
+      if (!first) { toast('今天没有推荐项'); return }
+      /* v161（设计卡 6.3）：先把「未安排」展开（它可能有推荐项但被收起），再滚到第一个推荐项 */
+      let need = false
+      const shut = first.closest('.exz.shut') as HTMLElement | null
+      if (shut) { EXZ_CLOSED.delete(shut.dataset.zone as string); need = true }
+      const unz = $('#exBody .exz[data-zone="un"]') as HTMLElement | null
+      if (unz && unz.classList.contains('shut') && unz.querySelector('.exi[data-rec]')) { EXZ_CLOSED.delete('un'); need = true }
+      if (need) render()
+      window.setTimeout(() => {
+        const el = $('#exBody .exi[data-rec]') as HTMLElement | null
+        el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        for (const c of $$('#exBody .exi[data-rec]')) { c.classList.add('pulse'); window.setTimeout(() => c.classList.remove('pulse'), 900) }
+        toast('推荐项 = 昨天带过来、还待在「未安排 / 执行中」的卡片：卡片第二行不再挂「推荐 · 来源」标签，分区标题有「推荐 N」/「全部采纳」、面板头有「跨天 N」；悬停卡片可以直接「执行 / 安排」')
+      }, 80)
+    }
+    /** v161：一次采纳「未安排」里所有推荐项（只清标记，卡片留在今天、顺序不动）。 */
+    function acceptAllRec(): void {
+      const key = ymd(state.day), u = pday(key)
+      let n = 0
+      for (const [k, r] of [...u.rec]) {
+        if (!u.sel.has(k) || u.done.has(k)) { u.rec.delete(k); continue }
+        if (r.z === 'run') continue
+        if (pZoneOf(u, k, key) !== 'un') continue
+        u.rec.delete(k); n++
+      }
+      if (!n) { toast('「未安排」里没有可采纳的推荐项'); return }
+      savePanel(key, panelPatch(key, u))
+      render()
+      toast('已采纳 ' + n + ' 项：推荐标记收起来，卡片留在今天的「未安排」里（想不做某一张，点它悬停的「当日不安排」）')
     }
     function jumpRec(): void {
       const el = $('#tpList .plrec') as HTMLElement | null
@@ -2775,6 +3048,7 @@ export class SchedView {
       el.className = 'dmenu daypop'
       const has = (): boolean => c.actualSet.has(key)
       const autoOn = (): boolean => c.actualAuto.has(key) && !c.autoOff.has(key)
+      const autoRec = (): { at: number; n: number; z?: { wait?: number; pause?: number; run?: number } } | null => { const r = PDAY.get(key)?.autoRec; return r && r.n > 0 ? r : null }
       const planned = (): boolean => c.planSet.has(key)
       const ddlHere = (): DdlM[] => c.ddlList.filter((d) => (d.at || ymd(d.ms)) === key).sort((a, b) => Number(ddlKind(a) === 'soft') - Number(ddlKind(b) === 'soft') || a.id.localeCompare(b.id))
       let newKind: 'hard' | 'soft' = 'hard'
@@ -2801,7 +3075,7 @@ export class SchedView {
           (planned() ? '取消此日计划' : '计划此日执行') + '<span class="st">' + (planned() ? '这天不显示计划条' : '这天显示计划条（计划条只认手动）') + '</span></button>' +
           '<button type="button" data-act="actual" class="' + (has() ? 'on' : '') + (day > TODAY ? ' dis' : '') + '"' + (day > TODAY ? ' disabled' : '') + '>' +
           '<svg class="i sm" viewBox="0 0 24 24">' + (has() ? '<path d="m5 12 5 5 9-10"/>' : '<rect x="4" y="4" width="16" height="16" rx="4"/>') + '</svg>' +
-          (has() ? '取消此日记录' : '记录此日执行') + '<span class="st">' + (day > TODAY ? '未来日期' : (has() ? (autoOn() ? '来自会话 · 取消后不再自动' : '手动记录') : (c.autoOff.has(key) ? '这天的会话自动已关闭' : '未记录'))) + '</span></button>' +
+          (has() ? '取消此日记录' : '记录此日执行') + '<span class="st">' + (day > TODAY ? '未来日期' : (has() ? (autoRec() ? '跨天自动记录（过 00:00）' : autoOn() ? '来自会话 · 取消后不再自动' : '手动记录') : (c.autoOff.has(key) ? '这天的会话自动已关闭' : '未记录'))) + '</span></button>' +
           '<div class="ddlsec"><div class="ddlh"><span class="flag">' + FLAG + '</span>截止时间<span class="n">' + (list.length ? list.length + ' 个 · 硬 ' + hardN + ' / 软 ' + softN : '还没设') + '</span></div>' +
           (list.length ? '<div class="ddlist">' + rows + '</div>' : '') +
           '<div class="ddadd"><input class="ddlnote" id="dNewNote" placeholder="' + (list.length ? '再加一个的备注（可空）' : '备注（可空，如：客户要求这天交）') + '" aria-label="新截止时间的备注" value="' + esc(newNote) + '"></div>' +
@@ -2812,7 +3086,7 @@ export class SchedView {
           (list.length ? '' : '<p class="ddtip">硬性 = 外部严格的截止（红旗 + 红虚线）；软性 = 内部计划（蓝旗 + 蓝虚线，与实际时间条同色）。同一天可以加多个。</p>') +
           '</div>' +
           '<div class="dnote">三项互相独立：计划条 / 实际条 / 截止时间谁都不影响谁；这里只改这一天。</div>' +
-          '<div class="dsrc">' + (day > TODAY ? '未来的日子只能计划，不能记录执行。' : (autoOn() ? '这天的执行来自会话记录。在这里手动一次（勾上或取消）后，这天的「会话自动」就关掉，之后只按手动结果画。' : '实际条来自会话记录或手动补记；这天已经被手动改过，所以会话自动不再生效。')) + '</div>'
+          '<div class="dsrc">' + (day > TODAY ? '未来的日子只能计划，不能记录执行。' : (autoRec() ? '这天的执行来自「过 00:00 自动记录」：等外部进展 / 个人暂停 / 执行中的卡片自动记了这一天（不是勾选完成）；要撤销请点面板里那张卡的「自动」按钮。' : autoOn() ? '这天的执行来自会话记录。在这里手动一次（勾上或取消）后，这天的「会话自动」就关掉，之后只按手动结果画。' : '实际条来自会话记录或手动补记；这天已经被手动改过，所以会话自动不再生效。')) + '</div>'
         placeDay(el, dayAnchor as { card: string; day: number; fx: number; fy: number })
       }
       bodyAppend(el)
@@ -3257,6 +3531,14 @@ export class SchedView {
           return
         }
       }
+      // v172：目录格星标（先于目录格 / 组行，点星不打开详情、不改选中）
+      const sbtn = t.closest('[data-card-star]') as HTMLElement | null
+      if (sbtn && inR(sbtn)) {
+        const id = sbtn.dataset.cardStar as string
+        const c = findCard(id)
+        if (c) { void toggleStar(c) }
+        return
+      }
       // v86：整个「项目组」目录格子都是按钮（不只小三角 / 名字）
       const gcell = t.closest('.sc-name[data-toggle]') as HTMLElement | null
       if (gcell && inR(gcell)) { toggleGroup(gcell.dataset.toggle as string); return }
@@ -3352,6 +3634,78 @@ export class SchedView {
       nf?.focus()
       toast('截止时间 = ' + ymd(ms))
     })
+    /* v172：项目星标（目录格那一颗） */
+    /* v176：点星只改这一颗按钮 —— 原来走 render() 整页重画（28 行 × 时间条 + 页头 + 背景全重建），
+       回包后 self.load(true) 再整页重画一次，中间还夹着一次旧快照轮询 → 用户看到的就是「卡顿 + 闪动」。
+       星标在甘特里只影响这一颗按钮（v174 起连悬停 / 选中都不改它），所以按字段局部上色，零重画。 */
+    /** 渲染模型指纹：只收「画在屏幕上」的字段（时间戳 rev / upd、快照版本这类噪声不进）。
+     *  withStar=false 时不含 star（判断「除了星标还变了什么」），true 时含 star（判断要不要补星标）。 */
+    function modelSig(withStar = false): string {
+      /* v183（1.1）真机发现：卡片在「执行中 / 已安排 / 未安排」之间换分区只由面板按天状态决定（PDAY / zl / PST），
+         v176 的指纹没收这一维 → 会话把卡片挪进「执行中」时 modelSig 没变 → applyData 直接 return，
+         屏幕就停在旧分区（服务端已写）。分区 / 勾选 / 排布 / 执行状态都是「画在屏幕上」的字段，必须进指纹。 */
+      const out: string[] = []
+      const panelSig = (k: string): string => {
+        const u = PDAY.get(k)
+        if (!u) return ''
+        return [[...u.done].sort().join(','), [...u.sel].sort().join(','), JSON.stringify(u.lanes ?? null),
+          ZL_KEYS.map((z) => (u.zl?.[z] ?? []).map((l) => l.join('+')).join('/')).join('|'), u.carry ? 'c' : '',
+          [...u.auto].sort().join(','), u.autoRec ? u.autoRec.at + ':' + u.autoRec.n + ':' + [u.autoRec.z?.wait ?? 0, u.autoRec.z?.pause ?? 0, u.autoRec.z?.run ?? 0].join('/') : ''].join('~')
+      }
+      /* v184：胶囊 / 说明看「所看那天 + 前一天 + 今天」的自动结算 —— 必须进指纹，否则宿主结算后屏幕不重画 */
+      const sigDay = ymd(state.day)
+      out.push('U' + [sigDay, ymd(dayMs(sigDay) - D), ymd(TODAY)].map(panelSig).join('#'))
+      out.push('V' + [...PST.entries()].sort().map(([k, v]) => k + '=' + v).join(','))
+      out.push(state.zoom, ymd(state.anchor), ymd(state.day), state.sel ?? '', String(state.lw), String(state.tpw), state.tpm, String(state.plFold), String(state.plOnly), String(state.plDone), String(state.showPending), String(state.gtime))
+      for (const g of GROUPS) {
+        out.push('G' + g.id + '|' + g.name + '|' + (state.closed.has(g.id) ? 1 : 0))
+        for (const c of g.cards) {
+          out.push('C' + c.id + '|' + c.t + '|' + c.stage + '|' + c.done + '/' + c.total + '|' + (c.pending ? 1 : 0) + (c.arch ?? '')
+            + '|' + [...c.planSet].sort().join(',') + '|' + [...c.actualSet].sort().join(',') + '|' + [...c.actualManual].sort().join(',')
+            + '|' + c.ddlList.map((x) => x.id + x.at + x.kind + (x.label ?? '') + (x.sid ? 'r' : '') + (x.task ? 't' + (x.done ? 'd' : '') : '')).join(',')
+            + '|' + c.tasks.map((t) => t.id + (t.done ? '1' : '0') + (t.due ?? '') + (t.sess ?? '') + t.subs.map((s) => s.id + (s.done ? '1' : '0') + (s.due ?? '') + (s.sess ?? '')).join('')).join('')
+            + '|' + c.seq + (withStar && c.star ? '|*' : ''))
+        }
+      }
+      return out.join('\n')
+    }
+    function paintStars(): void { for (const g of GROUPS) for (const c of g.cards) paintStar(c) }
+    function starLabel(c: CardM): string { return (c.star ? '取消星标「' : '加星标「') + c.t + '」' }
+    function starTitle(c: CardM): string {
+      return c.star ? '取消星标：四处一起回落成未加星' : '加星标：看板卡金徽标 / 详情整窗金框 / 甘特图目录格金徽标 / 执行安排左上角金角签'
+    }
+    /** 局部上色（等价于 render 后那一行的样子）：按钮 .on + 读屏文案，行上的 star / starred 两个类一起对齐。 */
+    function paintStar(c: CardM): void {
+      const b = $('[data-card-star="' + CSS.escape(c.id) + '"]') as HTMLElement | null
+      if (!b) return
+      b.classList.toggle('on', c.star === true)
+      b.setAttribute('aria-pressed', c.star ? 'true' : 'false')
+      b.setAttribute('aria-label', starLabel(c))
+      b.title = starTitle(c)
+      b.parentElement?.classList.toggle('starred', c.star === true)
+      b.closest('.sc-row')?.classList.toggle('star', c.star === true)
+      /* 执行安排面板里这张卡的每一行（项目卡 / 任务 / 子任务）—— 角签只认 .starred，跟着一起翻 */
+      for (const el of $$('#exBody .exi[data-c="' + CSS.escape(c.id) + '"]')) el.classList.toggle('starred', c.star === true)
+    }
+    function toggleStar(c: CardM): void {
+      const on = c.star !== true
+      c.star = on
+      paintStar(c)
+      const seq = ++self.sseq
+      self.pendStar.set(c.id, { on, seq })
+      void postBoard('card/star', { id: c.id, on }).then(() => {
+        const p = self.pendStar.get(c.id)
+        if (p && p.seq === seq) p.done = true
+        toast(on ? '已加星标「' + c.t + '」：看板卡与甘特图目录格亮起金徽标、详情整窗镶金边，任务执行安排里的卡片带上左上角金角签' : '已取消星标「' + c.t + '」')
+        host.tasksChanged?.(c.id)
+      }).catch((e) => {
+        self.pendStar.delete(c.id)
+        c.star = !on
+        paintStar(c)
+        toast('星标没保存上：' + (e instanceof Error ? e.message : String(e)), 'err')
+        void self.load()
+      })
+    }
     function toggleGroup(id: string): void {
       // v86 修：原来写反了（展开时 delete，等于点不动）→ 现在真的是「有就删、没有就加」
       const open = !state.closed.has(id)
@@ -3591,7 +3945,12 @@ export class SchedView {
       const rec = t.closest('[data-pl-rec]') as HTMLElement | null
       if (rec) { e.preventDefault(); e.stopPropagation(); pSelToggle(rec.dataset.plRec as string); return }
       if (t.closest('#plRecChip')) { e.preventDefault(); jumpRec(); return }
-      if (t.closest('#exCarryChip')) { const chip = $('#exCarryChip'); toast(chip && chip.title ? chip.title : '今天没有需要续排的任务项'); return }
+      if (t.closest('#exCarryChip')) { e.preventDefault(); e.stopPropagation(); jumpCross(); return }
+      if (t.closest('#exAutoChip')) { e.preventDefault(); e.stopPropagation(); jumpAuto(); return }
+      const autoGo = t.closest('[data-exz-auto-go]') as HTMLElement | null
+      if (autoGo) { e.preventDefault(); e.stopPropagation(); jumpDoneAuto(); return }
+      const accRec = t.closest('[data-ex-rec-all]') as HTMLElement | null
+      if (accRec) { e.preventDefault(); e.stopPropagation(); acceptAllRec(); return }
       /* v123（1.2）+ v124（1.3）：分区整条标题栏开合（grid 过渡），落盘 ui.exz */
       const zTg = t.closest('[data-exz-tg]') as HTMLElement | null
       if (zTg) {

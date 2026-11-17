@@ -56,7 +56,9 @@ test('v133 2.2/3/4: meta three rows, no carry chip, subtask css', () => {
   const gt = src('client/goaltask.ts'), css = src('client/style.css'), gantt = src('client/gantt.ts')
   assert.match(gt, /<span id="dpmGtSt"><\/span><i class="gt-br"/)
   assert.match(gt, /function fitMeta\(\)/)
-  assert.doesNotMatch(gantt, /id="exCarryChip"/)
+  /* v161：exCarryChip 重新启用，但语义是「跨天 N」（v133 时是「续排 N」的旧 chip） */
+  assert.doesNotMatch(gantt, /'续排 '/)
+  assert.match(gantt, /id="exCarryChip"[^>]*title="今天从昨天/)
   assert.match(css, /\.gt-meta\.two > \.gt-br \{ display: block; flex: 0 0 100%/)
   assert.match(css, /\.task\.child > \.tkhead, :is\(\.dpm \.detail, \.dpm-global-detail\) \.tilebody \.task > \.tkhead \{ z-index: auto !important; \}/)
   assert.match(css, /\.v10q:focus-within \{[^}]*box-shadow: none/)

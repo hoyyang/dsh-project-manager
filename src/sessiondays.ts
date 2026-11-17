@@ -63,7 +63,14 @@ export class SessionDaysCache {
       if (hit && this.fresh(hit, ver)) {
         if (hit.error) degraded.push(id.slice(0, 14) + '…：' + hit.error)
         out[id] = hit.days
-      } else { pending++; out[id] = [] }
+      } else {
+        pending++
+        /* v176：主实例实测 —— 活跃会话（就是当前正在跑的那个）每次写盘 mtime / size 都变 → 版本必变 →
+           peek 每轮都 miss，于是「自动执行日」在 [] 与 [今天] 之间来回跳：甘特里那条实际条一隐一现，
+           整页每 5s 重画一次（180ms）。改成 stale-while-revalidate：先拿上次算出来的天数顶上，
+           后台 warm 完成后下一轮自然换新；只有真没算过（没有 hit）才给空。 */
+        out[id] = hit?.days ?? []
+      }
     }
     if (pending) degraded.push('会话自动执行日正在统计（' + pending + ' 个会话），画好计划条后自动补上')
     return { days: out, degraded: degraded.slice(0, 8) }

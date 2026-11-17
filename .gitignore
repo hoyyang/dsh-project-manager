@@ -6,3 +6,4 @@ src/client/style.gen.ts
 prototype/
 .sanitize-allow.json
 __pycache__/
+locales/.loc-meta.json

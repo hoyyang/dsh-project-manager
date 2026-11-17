@@ -716,7 +716,7 @@ export class SessionCard {
     const d = t.dataset
     const i = this.info
     if (d.tgl !== undefined) return this.toggle()
-    if (d.qopen !== undefined) { this.quote.launch(); return }
+    if (d.qopen !== undefined) { this.quote.launch(t); return }
     if (d.ncOpen !== undefined) { this.ncOpen(); return }
     if (d.board !== undefined && i?.card) {
       this.host.openDetail(i.card.id)
