@@ -1,7 +1,7 @@
 {
   "name": "dsh-project-manager",
   "version": "0.80.0",
-  "description": "Project board, task schedule (gantt) and project memory for DeepSeek Harness: sessions opened from a card auto-load it.",
+  "description": "DeepSeek Harness (DSH) project manager with project board, gantt task schedule, project memory, and sessions.",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
