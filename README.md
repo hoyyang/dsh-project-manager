@@ -12,7 +12,7 @@
 <a href="https://github.com/hoyyang/dsh-project-manager/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/hoyyang/dsh-project-manager?style=flat"></a>
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/hoyyang/dsh-project-manager"></a>
 
-**简体中文** · [English](README.en.md) · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [更新日志](CHANGELOG.md) · [问题反馈](https://github.com/hoyyang/dsh-project-manager/issues)
+**简体中文** · [English](README.en.md) · [Русский](README.ru.md) · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [更新日志](CHANGELOG.md) · [问题反馈](https://github.com/hoyyang/dsh-project-manager/issues)
 
 </div>
 
@@ -27,6 +27,8 @@ dsh plugin add dsh-project-manager
 > 需要 dsh web 界面（`dsh web` 或 DSH Desktop）。已在 dsh `0.2.0-rc.2` 实测。项目记忆功能需要 `python3`（Windows 上仅该部分关闭）。
 
 ## 亮点
+
+<p align="center"><img src="assets/demo-30s-zh-captioned.gif" alt="dsh-project-manager 30 秒演示（中文字幕）" width="880"></p>
 
 | | 特性 | 说明 |
 |---|---|---|

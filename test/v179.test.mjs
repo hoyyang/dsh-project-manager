@@ -129,5 +129,5 @@ test('设计卡 §四：点整行仍是全文（pick 一路没改），点一段
 })
 
 test('版本 0.74.0', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
 })

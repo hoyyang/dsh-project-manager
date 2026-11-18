@@ -123,6 +123,6 @@ test('v181：客户端 / 样式 / 版本都接上了（筛选、胶囊、提示�
   assert.match(css, /\.dpm-cl-rsn\.tdone/)
   assert.match(css, /\.dpm-cl-fhint/)
   assert.match(css, /max-height: min\(560px, calc\(100% - 92px\)\)/)
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.match(log, /0\.76\.0/)
 })

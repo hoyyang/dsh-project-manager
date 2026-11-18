@@ -115,7 +115,7 @@ test('v177 行为细节：60ms 去重（宿主双回调）/ 内容刷新 / 复�
 })
 
 test('v177 版本 / 变更日志', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.match(log, /## 0\.72\.0 — 2026-11-14/)
   assert.match(log, /详情说明统一成一个气泡/)
 })

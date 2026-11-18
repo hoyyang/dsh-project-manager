@@ -4,6 +4,7 @@
  * 只靠 index.ts 注入的 deps 读写数据；所有监听挂在 install() 返回的 dispose 上（卸载即净）。
  */
 import { esc } from './icons.js'
+import { tr } from './i18n.js'
 import type { Card, Task } from './api.js'
 import { ringEl } from './gtextra.js'
 
@@ -105,7 +106,7 @@ export function aggOf(cid: string): Agg {
 function aggTip(name: string, a: Agg): string {
   if (!a.total) return '项目「' + name + '」还没有会话 · 在卡片详情里「以此卡片新建会话」'
   const lines = ['项目「' + name + '」' + (a.total === 1 ? '有 1 个会话' : '有 ' + a.total + ' 个会话')]
-  if (a.total > 1) lines.push(AGG_ORDER.filter((x) => (a.dist[x] ?? 0) > 0).map((x) => LB[x] + ' ' + a.dist[x]).join(' · '))
+  if (a.total > 1) lines.push(AGG_ORDER.filter((x) => (a.dist[x] ?? 0) > 0).map((x) => tr(LB[x]) + ' ' + a.dist[x]).join(' · '))
   if (a.also) lines.push('其中 ' + a.also + ' 个在别的状态（标签只显示最需要你的那一个）')
   lines.push(!a.live ? '全部会话都已归档：先在卡片详情「已归档会话」里恢复活跃'
     : a.total === 1 ? '点一下立即打开这个会话'

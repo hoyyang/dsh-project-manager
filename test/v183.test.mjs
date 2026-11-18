@@ -74,7 +74,7 @@ test('v183 3：关联会话一行复用 .dpm-sst 胶囊，不再用大按钮/折
 })
 
 test('v183 版本 0.78.0 + CHANGELOG', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.ok(log.includes('0.79.0'), 'CHANGELOG 没有 0.78.0')
 })
 test('v183 1.1 真机回归：分区变化必须进 modelSig（否则服务端已挪、屏幕停在旧分区）', () => {

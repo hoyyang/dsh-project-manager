@@ -43,8 +43,8 @@ export interface WebLink { id?: string; text: string; type: string; url: string;
 export interface Task { id?: string; text: string; done: boolean; note?: string; type?: string; links?: string[]; files?: string[]; subs?: Task[]; created?: string; updated?: string; /** v127：截止日期 YYYY-MM-DD */ due?: string; /** v140：关联的会话 id（v175 起 = 代表会话） */ sess?: string; /** v175：其余关联的会话 id（[sess, ...sessArch] 里未归档的最多 1 个） */ sessArch?: string[] }
 /** 0.26 相关文件：id 稳定（子任务按 id 绑定）；title 空 = 显示文件名。 */
 export interface FileRef { id: string; path: string; title?: string; off?: boolean; prev?: string[] }
-/** v182：界面语言三档（auto = 跟随 DSH）；存 host 侧看板文档 prefs.lang。 */
-export type LangMode = 'auto' | 'zh' | 'en'
+/** v182 三档 → v185 四档（auto = 跟随 DSH；zh / en / ru 固定）；存 host 侧看板文档 prefs.lang。 */
+export type LangMode = 'auto' | 'zh' | 'en' | 'ru'
 export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean; lang?: LangMode }
 export interface NoteItem { t: string; v: string; pin?: boolean; off?: boolean }
 export interface TypeGroup { id: string; name: string; types: string[] }
@@ -98,7 +98,7 @@ export const getSession = (id: string, cwd = ''): Promise<SessionInfo> => call<S
 })
 export const getRaw = (id: string): Promise<RawInfo> => call('/session/raw?id=' + encodeURIComponent(id))
 /** v182：界面语言词典（host 的 lib/i18n/en.json；v = 词典版本，客户端按它缓存）。 */
-export const getI18n = (): Promise<{ v: string; dict: Record<string, string> }> => call('/i18n')
+export const getI18n = (lang: 'en' | 'ru' = 'en'): Promise<{ v: string; dict: Record<string, string>; total?: number }> => call('/i18n?lang=' + encodeURIComponent(lang))
 /** v93/v94：某个会话里用户自己发过的消息（从新到旧；host 读 sessionQuery，不受界面虚拟列表影响）。 */
 export interface HistoryMsg { seq: number; at: string; text: string }
 /** v94：一页历史 + 总数 + 还有没有更早的（before = 下一页游标）。 */

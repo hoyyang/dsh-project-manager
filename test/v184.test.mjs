@@ -141,6 +141,6 @@ test('v184 7：源码挂钩（宿主结算 / 客户端 UI / 指纹 / 甘特小�
 })
 
 test('v184 8：版本 0.79.0 + CHANGELOG', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.ok(log.includes('0.79.0'), 'CHANGELOG 没有 0.79.0')
 })

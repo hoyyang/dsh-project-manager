@@ -5,6 +5,7 @@
  */
 import { ApiError, GanttCard, GanttData, GanttZone, getGantt, getState, poll, post as postBoard, postGantt } from './api.js'
 import { esc, ic } from './icons.js'
+import { tr } from './i18n.js'
 import { cardLive, chipHtml, followSession, newBtnHtml, pchipHtml, sessLive, wsHighlight } from './sess.js'
 import { dueChip, pickZone, recInFlight, ringEl, setPanelCache, setPanelToday, setXS, type XSched } from './gtextra.js'
 
@@ -1227,7 +1228,8 @@ export class SchedView {
       else if (zone === 'un') acts = pActBtn('run', l.key, future ? '未来的日子不能执行' : '执行「' + l.title + '」→ 执行中（排到最后一行，和同一行的一起做）', PV_ICON.play, 'run', future, 'run') + pActBtn('arr', l.key, future ? '未来的日子不能安排' : '安排「' + l.title + '」→ 已安排（排到最后一行，上下 = 先后）', PV_ICON.cal, 'arr', future, 'arr') + pActBtn('unsel', l.key, '当日不安排「' + l.title + '」：从未安排移除，本日计划清单变回「排今天」', PV_ICON.stop, 'unsel')
       /* v183（1.4）：项目卡不再留空 —— 用一格不可见的勾选圈占位，和执行安排里的任务卡同一列 */
       const ck = l.level === 'p' ? '<span class="eck ph" aria-hidden="true"></span>' : pCk('data-ex-ck="' + esc(l.key) + '"', 'exck:' + l.key, cd, (cd ? '取消完成' : '完成') + (l.level === 's' ? '子任务' : '任务') + '「' + l.title + '」' + (l.level === 't' && l.t?.subs?.length ? '（连同它的子任务）' : '') + '；和卡片详情里的勾选是同一个状态', false)
-      const stateTxt = (l.c.star === true ? '已加星标；' : '') + (cd ? '已完成；' : '') + (u.auto.has(l.key) ? '自动记录执行；' : '') + EXZ_T[zone]
+      /* v185：逐段翻译再拼（整串 tr 拼不上时会把中文留在 aria 里） */
+      const stateTxt = (l.c.star === true ? tr('已加星标') + '; ' : '') + (cd ? tr('已完成') + '; ' : '') + (u.auto.has(l.key) ? tr('自动记录执行') + '; ' : '') + tr(EXZ_T[zone])
       const flag = (l.c.arch ? ' arc' : '') + (l.c.pending && !l.c.arch ? ' pend' : '')
       /* v140（2.5）/ v141（1.4）：会话状态标签 = 第二行右边；以此任务创建会话 = 悬停按钮组最右（黑底）。v142（3.1）：路径小字在同一行左边 */
       const sid = l.level !== 'p' && l.t?.sess ? l.t.sess : ''
@@ -1251,7 +1253,7 @@ export class SchedView {
       /* v172：执行安排只显示星标（星的状态由卡片根的 starred 类驱动）
          v174：显示位置 = 卡片左上角的金角签（PSTAR_TAB），不再挤在勾选圈旁边 */
       const pstar = l.c.star === true
-      return '<div class="exi' + (l.level === 'p' ? ' nock' : '') + (pstar ? ' starred' : '') + (zone === 'un' ? ' norec' : '') + (acts ? ' hasa' : '') + (st ? ' st-' + st : '') + (rec ? ' done' : '') + (cd ? ' cdone' : '') + (chip ? ' v40has' : '') + (subs.length ? ' v41grp' : '') + flag + '" data-k="' + esc(l.key) + '" data-c="' + esc(l.c.id) + '" data-lv="' + l.level + '" data-st="' + st + '"' + (recZ ? ' data-rec="' + recZ.z + '"' : '') + (u.auto.has(l.key) ? ' data-auto="1"' : '') + ' data-done="' + (rec ? '1' : '0') + '" tabindex="0" aria-label="' + esc(l.title + '；' + crumb + '；' + stateTxt + '；点击打开卡片详情') + '">'
+      return '<div class="exi' + (l.level === 'p' ? ' nock' : '') + (pstar ? ' starred' : '') + (zone === 'un' ? ' norec' : '') + (acts ? ' hasa' : '') + (st ? ' st-' + st : '') + (rec ? ' done' : '') + (cd ? ' cdone' : '') + (chip ? ' v40has' : '') + (subs.length ? ' v41grp' : '') + flag + '" data-k="' + esc(l.key) + '" data-c="' + esc(l.c.id) + '" data-lv="' + l.level + '" data-st="' + st + '"' + (recZ ? ' data-rec="' + recZ.z + '"' : '') + (u.auto.has(l.key) ? ' data-auto="1"' : '') + ' data-done="' + (rec ? '1' : '0') + '" tabindex="0" aria-label="' + esc(l.title + '; ' + crumb + '; ' + tr(stateTxt) + '; ' + tr('点击打开卡片详情')) + '">'
         + '<span class="exgrip" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="1.2"/><circle cx="15" cy="7" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="17" r="1.2"/><circle cx="15" cy="17" r="1.2"/></svg></span>'
         + PSTAR_TAB
         + '<span class="exck">' + ck + '</span>'

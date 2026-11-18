@@ -1,3 +1,23 @@
+## 0.80.0 — 2026-11-17
+
+**俄语（Русский）本地化 + 界面语言四档：设置 → 项目看板 里多一档 Русский，整个插件界面切俄语（不刷新、布局不动）；词典走 /localize 管线产出，俄语三形复数 / 词间空格 / 整句覆盖三套机制保证不是"中文逐词替换"**
+
+### 新增
+- **界面语言四档**（src/client/i18n.ts / settings.ts / src/model.ts / src/client/api.ts）：`auto | zh | en | ru`；`auto` 读 `<html lang>`（`ru` 前缀 → ru，`en` 前缀 → en，其余 zh）；偏好仍存 host 侧 `prefs.lang`，localStorage 只是首屏镜像。
+- **多语言词典通道**（src/i18n.ts / src/routes.ts / src/index.ts）：`GET /api/i18n?lang=en|ru`（缺省 en，旧客户端不受影响；非法值 400 `BAD_ARG`）；`lib/i18n/<lang>.json` 为 `{v, dict, total}`；**缺词典一律回退中文**（不回退英文），设置页点名原因。
+- **俄语词典**（scripts/gen-i18n.mjs --lang=ru + locales/ru.json + scripts/i18n-overrides.ru.json）：`lib/i18n/ru.json` **4,271 条 / 键空间 4,278 条（99.8%）· v=02d22b19f451**；外部 PR #3 的 1,229 条译文按 0.79.0 字符串集重对，**932 条**可精确对齐的作为清洗底稿导入（scripts/import-pr3-ru.mjs + 对账报告），其余逐批走 /localize 管线补齐。
+- **词典只收「匹配得到的字符串」**（scripts/gen-i18n.mjs）：语言引擎只匹配文本节点与属性值，以 `<` 开头的整段 HTML 模板 / 样式表永远匹配不到 → 生成器直接剔除（俄语 673 条、英语 673 条），覆盖分母同步收窄：`ru.json` 628 KB → 442 KB、`en.json` 487 KB → 317 KB，覆盖率不再被死条目拉低。
+- **俄语三形复数**（src/client/i18n.ts `pl()` + `plural()`）：1 карточка / 2 карточки / 5 карточек；计数碎片（数字在 `<b>` 里、量词在下一个节点）靠 `countFixRu()` 跨节点取数。
+- **俄语模板规则**（scripts/i18n-rules.ru.json 251 条 → src/client/i18n.rules.ru.ts）：日期 / 周几 / 硬性·软性截止 / 计划条与实际条 tooltip / 任务 3/6 / 命中 N 项 / 推荐 N / 跨天 N；模板支持 `~N{a|b|c}` 复数编译。
+- **词间空格补齐**（spacingRu）与**整句覆盖**（scripts/i18n-sentences.ru.json → src/client/i18n.sentences.ru.ts）：中文把「把 + 任务 + 拖到…」拆成多个节点，俄语语序 / 格变化不允许逐段替换。
+- **保护清单**（scripts/i18n-protect.json 68 条）：正则体 / STATE 格式标记 / `[必读]` `[参考]` / 工具名永不翻译；生成器排除 + 单测断言。
+- **设置页「译文状态」**（src/client/settings.ts + style.css `.dpm-set-cov`）：语言 · 已译 / 总数 · 百分比 · 缺失数 · 词典 v · 「如何改进译文」链接；只读信息块，让覆盖缺口可见。
+- **俄语排版兜底**（style.css `[data-dpm-lang="ru"]`）：标题栏容器查询阈值 772 → 1000（俄语比中文长 15–25%，说明文字换行而不是被挤成竖条）、设置行间距放宽。
+- 测试 test/v185.test.mjs；版本 0.80.0。
+
+### 修复
+- **英文界面下相对时间仍是中文**（src/client/board.ts / sess.ts / search.ts 的 `ago()` 输出「6分钟 / 2 小时前」）：补齐英文与俄语模板规则（just now / 6 min / 6 min ago / только что / 6 мин назад）。
+
 ## 0.79.0 — 2026-11-16
 
 **任务执行安排：过 00:00 自动记录执行 —— 刚结束那天「等外部进展 / 个人暂停 / 执行中」三个分区的卡片，自动点一次「记录执行」（不是勾选完成）；只记那一天、一天只跑一次、撤销不补**

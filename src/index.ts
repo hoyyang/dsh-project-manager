@@ -893,7 +893,7 @@ export function apply(ctx: HostCtx, config: Config): void {
       store,
       states,
       kb,
-      i18n: () => loadDict(),
+      i18n: (lang) => loadDict(lang === 'ru' ? 'ru' : 'en'),
       hub: () => {
         const ws = hubWs ? ctx.workspaceRegistry.get(hubWs.id) : undefined
         const groups: Record<string, string> = {}

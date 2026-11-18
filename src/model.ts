@@ -44,8 +44,8 @@ export interface RepoSeen extends Repo { at: string }
 export interface TypeGroup { id: string; name: string; types: string[] }
 /** taskTypes（0.24）= 子任务类型（全局共用，顺序 = 展示顺序；不分组）；缺省 = DEFAULT_TASK_TYPES。 */
 /** prefs（0.26）= 全局开关（所有卡片共用）：lf = 添加文件时放到落盘项目；delAdd / delTolf = 添加文件 / 一键放到落盘项目时删除原文件。缺省都开。 */
-/** v182：界面语言三档 —— auto = 跟随 DSH；zh / en = 固定（只影响这个插件的界面文案）。 */
-export type LangMode = 'auto' | 'zh' | 'en'
+/** v182 三档 → v185 四档：auto = 跟随 DSH；zh / en / ru = 固定（只影响这个插件的界面文案）。 */
+export type LangMode = 'auto' | 'zh' | 'en' | 'ru'
 export interface Prefs { lf: boolean; delAdd: boolean; delTolf: boolean; lang?: LangMode }
 /** v140/v141：linkTypeDomains = 类型 → 网址（只留 origin，带结尾 /；同一网址只能属于一个类型）；linkTypeTags = 类型 → 类型标签（全局，≤20 字，同类型不重名）。 */
 export interface Board { version: 1; groups: Group[]; cards: Card[]; sessions: SessionRef[]; linkTypes?: string[]; linkTypeGroups?: TypeGroup[]; repoHistory?: RepoSeen[]; taskTypes?: string[]; prefs?: Partial<Prefs>; linkTypeDomains?: Record<string, string[]>; linkTypeTags?: Record<string, string[]> }
@@ -814,13 +814,13 @@ export function bulkCollapse(b: Board, mode: unknown, liveGroups?: string[]): { 
   }
   return { opened, folded }
 }
-export const prefsOf = (b: Board): Prefs => ({ lf: b.prefs?.lf !== false, delAdd: b.prefs?.delAdd !== false, delTolf: b.prefs?.delTolf !== false, ...(b.prefs?.lang === 'auto' || b.prefs?.lang === 'zh' || b.prefs?.lang === 'en' ? { lang: b.prefs.lang } : {}) })
+export const prefsOf = (b: Board): Prefs => ({ lf: b.prefs?.lf !== false, delAdd: b.prefs?.delAdd !== false, delTolf: b.prefs?.delTolf !== false, ...(b.prefs?.lang === 'auto' || b.prefs?.lang === 'zh' || b.prefs?.lang === 'en' || b.prefs?.lang === 'ru' ? { lang: b.prefs.lang } : {}) })
 export function setPrefs(b: Board, patch: unknown): Prefs {
   const o = (patch ?? {}) as Record<string, unknown>
   const next = prefsOf(b)
   for (const k of ['lf', 'delAdd', 'delTolf'] as const) if (o[k] !== undefined) { if (typeof o[k] !== 'boolean') throw new BoardError('BAD_ARG', k + ' 必须是 true / false'); next[k] = o[k] as boolean }
   // v182：界面语言存 host 侧看板文档（多个浏览器共享）；客户端 localStorage 只是首屏镜像
-  if (o.lang !== undefined) { if (o.lang !== 'auto' && o.lang !== 'zh' && o.lang !== 'en') throw new BoardError('BAD_ARG', 'lang 必须是 auto / zh / en'); next.lang = o.lang }
+  if (o.lang !== undefined) { if (o.lang !== 'auto' && o.lang !== 'zh' && o.lang !== 'en' && o.lang !== 'ru') throw new BoardError('BAD_ARG', 'lang 必须是 auto / zh / en / ru'); next.lang = o.lang }
   b.prefs = next
   return next
 }

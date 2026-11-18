@@ -616,5 +616,9 @@
  "跨天自动记录（过 00:00）": "Auto-recorded at 00:00",
  "这天的执行来自「过 00:00 自动记录」：等外部进展 / 个人暂停 / 执行中的卡片自动记了这一天（不是勾选完成）；要撤销请点面板里那张卡的「自动」按钮。": "This day's execution came from the 00:00 auto-record: cards in Waiting on others / Personally paused / In progress were recorded automatically (not completed). To undo, click the “Auto” button on that card in the panel.",
  "昨天没有自动记录执行的项目": "No auto-recorded items yesterday",
- "→ 「本日已执行」": "→ "
+ "→ 「本日已执行」": "→ ",
+ "源语言 · 无需译文": "Source language · nothing to translate",
+ "如何改进译文": "How to improve translations",
+ "缺": "missing",
+ "这门语言的词典还没加载：宿主在跑旧代码（重启 DSH 后可用），或包内缺 lib/i18n/ 词典。界面暂时按中文显示。": "This language's dictionary is not loaded yet: the host runs old code (available after restarting DSH), or the package lacks the lib/i18n/ dictionary. The interface is shown in Chinese for now."
 }

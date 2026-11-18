@@ -1,24 +1,82 @@
 /**
- * v182：设置 → 项目看板（settings.section 贡献）。
+ * v182：设置 → 项目看板（settings.section 贡献）；v185：界面语言四档 + 「译文状态」一行。
  *
- * 页面就是原型 prototype/dsh-web-v182.html 那一页：标题 + 一行版本 + 一行「界面语言」三档下拉 + 一句说明。
- * 三档 = 跟随 DSH（默认）/ 中文 / English；切换立刻生效、不刷新、不重建 DOM（见 client/i18n.ts）。
- * 宿主在跑旧代码（没有 i18n 路由 / 不认 prefs.lang）→ 页面点名「重启后可用」，不静默回退。
+ * 页面 = 原型 prototype/dsh-web-v185.html 那一页：标题 + 一行版本 + 一行「界面语言」四档下拉
+ *        + 一块「译文状态」（语言 · 覆盖 / 总数 · 缺失 · 词典 v · 如何改进译文）+ 一句说明。
+ * 四档 = 跟随 DSH（默认）/ 中文 / English / Русский；切换立刻生效、不刷新、不重建 DOM（见 client/i18n.ts）。
+ * 页面文案自己按语言渲染（不等引擎）：它是「语言开关的宿主」，它自己必须立刻正确。
+ * 宿主在跑旧代码（没有 i18n 路由 / 不认 prefs.lang / 没有该语言词典）→ 页面点名原因，不静默回退。
  */
 import { createElement as h, useEffect, useRef, useState } from 'react'
 import { ApiError } from './api.js'
-import { getDictState, getLang, getMode, setMode, subscribe, tr, type LangMode } from './i18n.js'
+import { dictSize, dictTotalSize, getDictErr, getDictState, getDictVersion, getLang, getMode, setMode, subscribe, tr, type Lang, type LangMode } from './i18n.js'
 
-/** 页面上一行版本号（与 package.json 同步，test/v182 断言）。 */
-export const VERSION = '0.79.0'
+/** 页面上一行版本号（与 package.json 同步，test/v185 断言）。 */
+export const VERSION = '0.80.0'
 
-const OPTS: ReadonlyArray<{ id: LangMode; label: string; desc: string }> = [
-  { id: 'auto', label: '跟随 DSH', desc: '' },
-  { id: 'zh', label: '中文', desc: '固定中文' },
-  { id: 'en', label: 'English', desc: '固定英文' },
-]
+interface Copy {
+  title: string
+  lang: string
+  desc: string
+  auto: string
+  zh: string
+  en: string
+  ru: string
+  pinZh: string
+  pinEn: string
+  pinRu: string
+  now: string
+  moves: string
+  covTitle: string
+  covOf: string
+  /** 源语言（中文）时的状态文案：没有译文这回事 */
+  covSrc: string
+  miss: string
+  howto: string
+  plain: string
+  dead: string
+}
+
+/** 页面自渲染文案（zh / en / ru 三份）。俄语是本次新增，只影响这一页自己。 */
+const COPY: Record<Lang, Copy> = {
+  zh: {
+    title: '项目看板', lang: '界面语言',
+    desc: '这个插件的界面语言。默认跟随 DSH；也可以固定成中文、English 或 Русский —— 只影响这个插件：DSH 本身、其它插件、你的卡片和任务内容都不变。',
+    auto: '跟随 DSH', zh: '中文', en: 'English', ru: 'Русский',
+    pinZh: '固定中文', pinEn: '固定英文', pinRu: '固定俄语',
+    now: '现在是 ', moves: ' · 跟着 DSH 语言走',
+    covTitle: '译文状态', covOf: '条已译', covSrc: '源语言 · 无需译文', miss: '缺', howto: '如何改进译文',
+    plain: '切了立刻生效，不用刷新；DSH 自己的语言设置照常对其它界面生效。',
+    dead: '这门语言的词典还没加载：宿主在跑旧代码（重启 DSH 后可用），或包内缺 lib/i18n/ 词典。界面暂时按中文显示。',
+  },
+  en: {
+    title: 'Project Board', lang: 'Interface language',
+    desc: 'The interface language of this plugin. Default is “Follow DSH”; you can pin it to 中文, English or Русский. It only affects this plugin — the DSH shell, other plugins, and your cards, tasks and notes stay as they are.',
+    auto: 'Follow DSH', zh: '中文', en: 'English', ru: 'Русский',
+    pinZh: 'Pin to Chinese', pinEn: 'Pin to English', pinRu: 'Pin to Russian',
+    now: 'now: ', moves: ' · moves with the DSH language',
+    covTitle: 'Translation status', covOf: 'translated', covSrc: 'source language · no translation needed', miss: 'missing', howto: 'How to improve',
+    plain: 'Nothing else changes: no reload, and the DSH language setting keeps working for everything outside this plugin.',
+    dead: 'This language has no dictionary yet: the host is running old code (available after restarting DSH) or the package is missing lib/i18n/. The interface stays in Chinese for now.',
+  },
+  ru: {
+    title: 'Доска проекта', lang: 'Язык интерфейса',
+    desc: 'Язык интерфейса этого плагина. По умолчанию — как в DSH; можно закрепить 中文, English или Русский. Влияет только на этот плагин: сам DSH, другие плагины, ваши карточки и задачи не меняются.',
+    auto: 'Следовать за DSH', zh: '中文', en: 'English', ru: 'Русский',
+    pinZh: 'Закрепить 中文', pinEn: 'Закрепить English', pinRu: 'Закрепить Русский',
+    now: 'сейчас: ', moves: ' · меняется вместе с языком DSH',
+    covTitle: 'Словарь перевода', covOf: 'переведено', covSrc: 'исходный язык · перевод не нужен', miss: 'без перевода', howto: 'Как улучшить перевод',
+    plain: 'Переключение действует сразу, без перезагрузки; язык DSH по-прежнему управляет остальным интерфейсом.',
+    dead: 'Для этого языка ещё нет словаря: хост работает на старом коде (заработает после перезапуска DSH) или в пакете нет lib/i18n/. Пока интерфейс на китайском.',
+  },
+}
+
+const OPTS: ReadonlyArray<{ id: LangMode }> = [{ id: 'auto' }, { id: 'zh' }, { id: 'en' }, { id: 'ru' }]
 
 const CARET = 'M7 10l5 5 5-5'
+
+/** 千分位（"4 612"）—— 覆盖率那一行要与原型一致。 */
+const fmtNum = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
 
 type Slots = {
   inject(name: string, fn: () => () => void): () => void
@@ -45,12 +103,18 @@ export function SettingsSection(): unknown {
   }, [open])
 
   const mode = getMode()
-  const en = getLang() === 'en'
-  const dshName = /^en/i.test(document.documentElement.lang || '') ? 'English' : '中文'
-  // 旧宿主（没有 i18n 接口）：只有「真的想要英文」时才点名 —— 跟随 DSH + DSH 中文的用户不该被打扰
-  const wantEn = mode === 'en' || (mode === 'auto' && /^en/i.test(document.documentElement.lang || ''))
-  const dictDead = getDictState() === 'dead' && wantEn
-  const cur = mode === 'auto' ? tr('跟随 DSH') : mode === 'en' ? 'English' : '中文'
+  const lang = getLang()
+  const C = COPY[lang] ?? COPY.zh
+  const dshLang: Lang = /^ru/i.test(document.documentElement.lang || '') ? 'ru' : /^en/i.test(document.documentElement.lang || '') ? 'en' : 'zh'
+  const dshName = dshLang === 'ru' ? 'Русский' : dshLang === 'en' ? 'English' : '中文'
+  const optName = (id: LangMode | Lang): string => (id === 'auto' ? C.auto : id === 'zh' ? C.zh : id === 'en' ? C.en : C.ru)
+  const cur = optName(mode)
+  // 旧宿主 / 缺词典：只有真的想要非中文时才点名 —— 跟随 DSH + DSH 中文的用户不该被打扰
+  const wantDict = (mode !== 'auto' ? mode : dshLang) !== 'zh'
+  const dictDead = getDictState() === 'dead' && wantDict
+  const have = dictSize()
+  const total = dictTotalSize()
+  const pct = total > 0 ? Math.round((100 * have) / total) : 0
 
   const choose = (m: LangMode): void => {
     setOpen(false)
@@ -62,10 +126,10 @@ export function SettingsSection(): unknown {
     h('h2', { className: 'dpm-set-h' }, tr('项目看板')),
     h('p', { className: 'dpm-set-lead' }, 'dsh-project-manager · ' + VERSION),
     h('div', { className: 'dpm-set-row' },
-      h('div', { className: 'dpm-set-lb' }, tr('界面语言')),
-      h('div', { className: 'dpm-set-ds' }, tr('这个插件的界面语言。默认跟随 DSH；也可以固定成中文或 English —— 只影响这个插件：DSH 本身、其它插件、你的卡片和任务内容都不变。')),
+      h('div', { className: 'dpm-set-lb' }, C.lang),
+      h('div', { className: 'dpm-set-ds' }, C.desc),
       h('div', { className: 'dpm-set-ct' },
-        h('div', { className: 'dpm-set-selbox' },
+        h('div', { className: 'dpm-set-selbox', ref: box },
           h('button', {
             type: 'button',
             className: 'dpm-set-sel',
@@ -75,10 +139,10 @@ export function SettingsSection(): unknown {
           }, h('span', null, cur), h('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true', className: 'dpm-set-caret' }, h('path', { d: CARET }))),
           open ? h('div', { className: 'dpm-set-menu', role: 'listbox' },
             OPTS.map((o) => {
-              const label = o.id === 'auto' ? tr('跟随 DSH') : o.label
+              const label = optName(o.id)
               const desc = o.id === 'auto'
-                ? (en ? 'now: ' + dshName + ' · moves with the DSH language' : '现在是 ' + dshName + ' · 跟着 DSH 语言走')
-                : tr(o.desc)
+                ? C.now + dshName + C.moves
+                : o.id === 'zh' ? C.pinZh : o.id === 'en' ? C.pinEn : C.pinRu
               return h('button', {
                 type: 'button',
                 role: 'option',
@@ -94,8 +158,22 @@ export function SettingsSection(): unknown {
         )
       )
     ),
-    h('p', { className: 'dpm-set-plain' }, tr('切了立刻生效，不用刷新；DSH 自己的语言设置照常对其它界面生效。')),
-    dictDead ? h('p', { className: 'dpm-set-warn' }, tr('英文词典要重启 DSH 才有：宿主还在跑旧代码，没加载 i18n 接口。重启后再回这一页选一次即可。')) : null,
+    // v185：译文状态（只读信息块 —— 让「缺 N 条」可见：用户能报，维护者能查）
+    h('div', { className: 'dpm-set-cov', 'data-dpm-cov': lang },
+      h('div', { className: 'dpm-set-cov-h' },
+        h('b', null, C.covTitle),
+        h('span', null, lang === 'zh'
+          ? optName('zh') + ' · ' + C.covSrc
+          : optName(lang) + ' · ' + fmtNum(have) + ' / ' + fmtNum(total) + ' ' + C.covOf + ' · ' + pct + '%')
+      ),
+      h('div', { className: 'dpm-set-cov-b' },
+        lang === 'zh' ? null : h('span', null, C.miss + ': ' + fmtNum(Math.max(0, total - have))),
+        lang === 'zh' ? null : h('span', { className: 'dpm-set-cov-v' }, 'v=' + (getDictVersion() || '—')),
+        h('a', { className: 'dpm-set-cov-a', href: 'https://github.com/hoyyang/dsh-project-manager#translations', target: '_blank', rel: 'noreferrer' }, C.howto)
+      )
+    ),
+    h('p', { className: 'dpm-set-plain' }, C.plain),
+    dictDead ? h('p', { className: 'dpm-set-warn' }, C.dead + (getDictErr() ? ' (' + getDictErr() + ')' : '')) : null,
     err ? h('p', { className: 'dpm-set-warn' }, err) : null
   )
 }

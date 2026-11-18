@@ -13,10 +13,11 @@ export interface Services {
     states: StateCatalog;
     /** v163 S4：知识卡目录（知识库 v1，<dataDir>/kb/）。 */
     kb: KbStore;
-    /** v182：英文词典（lib/i18n/en.json）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
-    i18n?(): {
+    /** v185：界面词典（lib/i18n/<lang>.json，en / ru）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
+    i18n?(lang?: 'en' | 'ru'): {
         v: string;
         dict: Record<string, string>;
+        total?: number;
     } | null;
     /** groups = 卡片组 id → 它的子工作区 id（侧栏按 data-row-key 找组行用）。 */
     hub(): {

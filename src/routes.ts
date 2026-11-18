@@ -24,8 +24,8 @@ export interface Services {
   states: StateCatalog
   /** v163 S4：知识卡目录（知识库 v1，<dataDir>/kb/）。 */
   kb: KbStore
-  /** v182：英文词典（lib/i18n/en.json）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
-  i18n?(): { v: string; dict: Record<string, string> } | null
+  /** v185：界面词典（lib/i18n/<lang>.json，en / ru）；旧包没有就返回 null → 路由 404，界面回退中文并点名原因。 */
+  i18n?(lang?: 'en' | 'ru'): { v: string; dict: Record<string, string>; total?: number } | null
   /** groups = 卡片组 id → 它的子工作区 id（侧栏按 data-row-key 找组行用）。 */
   hub(): { workspaceId: string | null; path: string; title: string; groups: Record<string, string> }
   prepareSession(cardId: string): Promise<{ workspaceId: string; workspaceTitle: string }>
@@ -450,9 +450,12 @@ export function mountRoutes(
             return send(res, 200, { ok: true, card: { ...c, summary: s.kb.summaryOf(c) }, attachedBy, errors: s.kb.errors })
           }
           if (sub === '/i18n') {
-            // v182：界面语言词典（4,454 条）。GET + rev，客户端按 v 缓存在 localStorage；不内联进 client.js。
-            const d = s.i18n?.() ?? null
-            if (!d) return fail(res, 404, 'NOT_FOUND', '当前宿主还没有英文词典：宿主在跑旧代码（重启 DSH 后可用），或包内缺 lib/i18n/en.json')
+            // v182 起：界面语言词典（en 4,598 条）；v185 起多语言：GET /i18n?lang=en|ru（缺省 en，旧客户端不受影响）。
+            const raw = (u.searchParams.get('lang') ?? 'en').toLowerCase()
+            const lang = raw === 'en' || raw === 'ru' ? raw : null
+            if (!lang) return fail(res, 400, 'BAD_ARG', 'lang 必须是 en / ru（缺省 en）')
+            const d = s.i18n?.(lang) ?? null
+            if (!d) return fail(res, 404, 'NOT_FOUND', '当前宿主还没有 ' + lang + ' 词典：宿主在跑旧代码（重启 DSH 后可用），或包内缺 lib/i18n/' + lang + '.json')
             return send(res, 200, { ok: true, ...d })
           }
           if (sub === '/kb/search') {

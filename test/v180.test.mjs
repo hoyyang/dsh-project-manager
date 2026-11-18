@@ -170,6 +170,6 @@ test('看板入口：按钮挂在标题区（导入落盘项目之前）+ 徽标
 })
 
 test('版本 0.78.0 + CHANGELOG 有 0.78.0', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.match(log, /0\.76\.0/)
 })

@@ -12,7 +12,7 @@
 <a href="https://github.com/hoyyang/dsh-project-manager/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/hoyyang/dsh-project-manager?style=flat"></a>
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/hoyyang/dsh-project-manager"></a>
 
-[简体中文](README.md) · **English** · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/hoyyang/dsh-project-manager/issues)
+[简体中文](README.md) · **English** · [Русский](README.ru.md) · [Releases](https://github.com/hoyyang/dsh-project-manager/releases) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/hoyyang/dsh-project-manager/issues)
 
 </div>
 
@@ -27,6 +27,8 @@ Alternative: `dsh plugin add github:hoyyang/dsh-project-manager`. Restart dsh af
 > Requires the dsh web UI (`dsh web` or DSH Desktop). Tested on dsh `0.2.0-rc.2`. Project memory requires `python3` (on Windows, only project memory is disabled).
 
 ## Highlights
+
+<p align="center"><img src="assets/demo-30s-captioned.gif" alt="30-second demo (captioned)" width="880"></p>
 
 | | Feature | Summary |
 |---|---|---|

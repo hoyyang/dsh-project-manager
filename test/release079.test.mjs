@@ -8,7 +8,7 @@ const read = (p) => readFileSync(new URL('../' + p, import.meta.url), 'utf8')
 test('词典首次到手要重挂侧栏入口（否则英文首屏入口停在中文）', () => {
   const src = read('src/client/i18n.ts')
   const body = src.slice(src.indexOf('export async function loadDict'), src.indexOf('// ── 语言生效'))
-  assert.match(body, /const fresh = !dict \|\| r\.v !== dictV/)
+  assert.match(body, /const fresh = !dicts\.has\(lang\) \|\| dicts\.get\(lang\)!\.v !== r\.v/)
   assert.match(body, /if \(fresh\) notifyLang\(\)/)
 })
 

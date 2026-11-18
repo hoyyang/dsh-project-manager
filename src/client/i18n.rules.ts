@@ -1,13 +1,26 @@
 /**
- * v182：带动态值的界面文案模板（词典只命中整句，拼出来的句子走这里）。
+ * v182 起：带动态值的界面文案模板（词典只命中整句，拼出来的句子走这里）；v185 起支持俄语（复数模板由生成器编译）。
  *
  * 由 scripts/gen-i18n-rules.mjs 生成，别手改；要加规则改 scripts/i18n-rules.json。
- * 前 86 条来自原型 prototype/dsh-web-v182.html（中英两态逐条比对过），
- * 后面是产品 DOM 与原型不同之处补的（数字在独立 <b> 里、aria-label / title 带变量）。
  */
+const SUB = (tpl: string, m: RegExpMatchArray): string => tpl.replace(/\$(\d)/g, (_: string, d: string) => m[Number(d)] ?? '')
+/** 俄语三形复数（与 client/i18n.ts 的 pl() 同一份规则；生成物不 import 业务模块，所以算法在这里写一遍）。 */
+const PLF = (n: number, forms: string): string => {
+  const f = forms.split('|')
+  const a = Math.abs(n) % 100
+  const l = a % 10
+  if (a > 10 && a < 20) return f[2] ?? f[0]
+  if (l > 1 && l < 5) return f[1] ?? f[0]
+  if (l === 1) return f[0]
+  return f[2] ?? f[0]
+}
 const R = (pattern: string, out: string, flags?: string): readonly [RegExp, string] => [new RegExp(pattern, flags), out]
+const Rp = (pattern: string, out: string, flags?: string): readonly [RegExp, (m: RegExpMatchArray) => string] => [
+  new RegExp(pattern, flags),
+  (m: RegExpMatchArray): string => SUB(out, m).replace(/~(\d)\{([^}]+)\}/g, (_: string, gi: string, forms: string) => PLF(Number(SUB('$' + gi, m)) || 0, forms)),
+]
 
-export const RULES: ReadonlyArray<readonly [RegExp, string]> = [
+export const RULES: ReadonlyArray<readonly [RegExp, string | ((m: RegExpMatchArray) => string)]> = [
   R("^复制卡片「(.+)」$", "Copy card — $1"),
   R("^加星标「(.+)」$", "Star — $1"),
   R("^把「(.+)」设为 pending$", "Set pending — $1"),
@@ -165,4 +178,13 @@ export const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   R("^这 (\\d+) 项是过 00:00 自动记录执行（(.+)；不是勾选完成）$", "$1 item(s) auto-recorded past 00:00 (not completion)"),
   R("^这 (\\d+) 项已过 00:00 自动记录执行（只记执行，不勾完成）—— 点一下看「本日已执行」$", "$1 item(s) auto-recorded past 00:00 (execution only, not completion) - click to view Executed today"),
   R("^(\\d{1,2}-\\d{1,2}) 截止$", "Due $1"),
+  R("^刚刚$", "just now"),
+  R("^(\\d+)分钟$", "$1 min"),
+  R("^(\\d+) 分钟前$", "$1 min ago"),
+  R("^(\\d+)小时$", "$1 h"),
+  R("^(\\d+) 小时前$", "$1 h ago"),
+  R("^(\\d+)天前$", "$1 d ago"),
+  R("^(\\d+) 天前$", "$1 d ago"),
+  R("^较早$", "earlier"),
+  R("^之前$", "before"),
 ]

@@ -82,12 +82,12 @@ test('v174 执行安排加星卡的「金色镶边 + 扫光」保留（角签只
 test('v174 没动的两处：看板 20px / 详情 26px；星按钮 aria 带「已加星标」', () => {
   assert.match(css, /\.pstar-btn\.pstar-board \{ width: 20px; height: 20px;/)
   assert.match(css, /\.pstar-btn\.pstar-detail \{ width: 26px; height: 26px;/)
-  assert.match(ganttSrc, /已加星标；/)
+  assert.match(ganttSrc, /tr\('已加星标'\)/)
   assert.match(boardSrc, /加星标：看板卡金徽标 \/ 详情整窗金框 \/ 甘特图目录格金徽标 \/ 执行安排左上角金角签/)
 })
 
 test('v174 版本 0.70.0 + CHANGELOG', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.match(log, /0\.70\.0/)
   assert.match(log, /金角签/)
   assert.match(log, /18px 金徽标/)

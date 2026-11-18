@@ -7231,3 +7231,33 @@ body[data-ds-dark-theme] .dpm .sched #exAutoChip { border-color: rgba(123, 224, 
 .dpm .sched .exz-auto em { flex: none; margin-left: auto; font-style: normal; font-weight: 650; white-space: nowrap; }
 body[data-ds-dark-theme] .dpm .sched .exz-auto { border-color: rgba(123, 224, 164, .34); background: rgba(123, 224, 164, .08); color: #7be0a4; }
 body[data-ds-dark-theme] .dpm .sched .exz-auto:hover { background: rgba(123, 224, 164, .14); }
+
+/* ══════════════════════════════════════════════════════════════
+   v185 · 0.80.0 · 俄语本地化（Русский）
+   ① 设置页「译文状态」块（只读信息：语言 · 覆盖 · 缺失 · 词典 v · 如何改进译文）
+   ② 俄语排版兜底：俄语比中文/英文长 15–25%，只放宽阈值、不缩字号
+   ══════════════════════════════════════════════════════════════ */
+.dpm-set-cov { margin: 2px 0 0; padding: 12px 14px 13px; border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, .12)); border-radius: 14px; background: var(--dsw-alias-bg-layer-1, #fff); }
+body[data-ds-dark-theme] .dpm-set-cov { background: #1b1d22; border-color: rgba(255, 255, 255, .14); }
+.dpm-set-cov-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 12.5px; color: var(--dsw-alias-label-primary, #0f1115); }
+.dpm-set-cov-h b { font-weight: 600; white-space: nowrap; }
+.dpm-set-cov-h span { color: var(--dsw-alias-label-secondary, #61666b); font-variant-numeric: tabular-nums; text-align: right; }
+.dpm-set-cov-b { display: flex; align-items: center; gap: 12px; margin-top: 7px; font-size: 11.5px; color: var(--dsw-alias-label-secondary, #61666b); }
+.dpm-set-cov-v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: .8; }
+.dpm-set-cov-a { margin-left: auto; color: var(--pm-brand, #2f5fcc); text-decoration: none; white-space: nowrap; }
+.dpm-set-cov-a:hover { text-decoration: underline; }
+/* 深色：次要文字用更亮的灰，保证 11.5px 小字也过 WCAG AA（实测 #81858c 只有 2.9:1） */
+body[data-ds-dark-theme] .dpm-set-cov-h span,
+body[data-ds-dark-theme] .dpm-set-cov-b { color: #b9bec6; }
+body[data-ds-dark-theme] .dpm-set-cov-v { opacity: 1; }
+/* 设置页不在 .dpm 子树上，--pm-brand 拿不到深色值（#2f5fcc 在深色上只有 2.9:1）→ 这里显式给深色品牌色 */
+body[data-ds-dark-theme] .dpm-set-cov-a { color: #8fb0ff; }
+
+/* 俄语：标题栏提前折行（中文/英文 772 够，俄语要 1000）—— 说明文字换行，而不是被按钮挤成一条窄柱 */
+@container (max-width: 1000px) {
+  [data-dpm-lang="ru"] .pm-top .ttl { flex: 1 1 100%; }
+  [data-dpm-lang="ru"] .pm-top .ttl p { white-space: normal; overflow: visible; }
+}
+/* 俄语：设置行左右留白多一点（标签更长，别贴边） */
+[data-dpm-lang="ru"] .dpm-set-row { gap: 2px 20px; }
+[data-dpm-lang="ru"] .dpm-set-cov-h span { text-align: right; }

@@ -113,7 +113,7 @@ test('v172 CSS：灰星令牌 / 金框 / 扫光 8.6s / 目录格车位与渐隐'
 })
 
 test('v172 版本 0.69.0 + CHANGELOG 有项目星标', () => {
-  assert.equal(pkg.version, '0.79.0')
+  assert.equal(pkg.version, '0.80.0')
   assert.match(log, /0\.69\.0/)
   assert.match(log, /星标/)
 })

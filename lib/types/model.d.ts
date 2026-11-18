@@ -130,8 +130,8 @@ export interface TypeGroup {
 }
 /** taskTypes（0.24）= 子任务类型（全局共用，顺序 = 展示顺序；不分组）；缺省 = DEFAULT_TASK_TYPES。 */
 /** prefs（0.26）= 全局开关（所有卡片共用）：lf = 添加文件时放到落盘项目；delAdd / delTolf = 添加文件 / 一键放到落盘项目时删除原文件。缺省都开。 */
-/** v182：界面语言三档 —— auto = 跟随 DSH；zh / en = 固定（只影响这个插件的界面文案）。 */
-export type LangMode = 'auto' | 'zh' | 'en';
+/** v182 三档 → v185 四档：auto = 跟随 DSH；zh / en / ru = 固定（只影响这个插件的界面文案）。 */
+export type LangMode = 'auto' | 'zh' | 'en' | 'ru';
 export interface Prefs {
     lf: boolean;
     delAdd: boolean;
