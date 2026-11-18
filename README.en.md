@@ -93,6 +93,14 @@ Alternative: `dsh plugin add github:hoyyang/dsh-project-manager`. Restart dsh af
 3. Click **New session from this card**.
 4. Open **Task Schedule** → **Today** and drag tasks into zones.
 5. At a milestone, type `落盘项目` in the session to persist.
+6. Open the Knowledge Base panel, create a knowledge card and attach it to the project from the card details.
+7. Click "Quote card content" above the session input box to insert selected notes or knowledge card sections straight into your prompt.
+8. Type a keyword in the board search box and click a matched snippet to jump to that item inside the card.
+9. Click the star on a card to mark it with a gold badge across the board, the schedule timeline and the Today panel.
+10. Open the file cleanup panel, filter by "Unused" or "All tasks done", select the files and move them to the trash — undo stays available.
+11. Mount or remove repositories in the card details and toggle session injection for each item.
+12. Drag cards across stages to advance progress, or rename and reorder stages in a card group.
+13. Open Settings → Project Board → Interface language to switch between 中文 / English / Русский instantly.
 
 | Action | Result |
 |---|---|
@@ -101,6 +109,9 @@ Alternative: `dsh plugin add github:hoyyang/dsh-project-manager`. Restart dsh af
 | Another CLI updates `STATE.md` | The next turn in your active session automatically receives the new version |
 | A session linked to a task starts running | The task moves to **In progress** in the Today panel |
 | The clock passes `00:00` | Yesterday's in-flight tasks are logged as run; a badge next to today links to them |
+| Click "Quote card content" in the session info bar and pick a knowledge card section | The section is inserted straight into the chat input box |
+| Type a query in the board search box and click a matched snippet | The card details open and scroll to the matched task, subtask, note or knowledge card |
+| Select linked files of archived projects in the cleanup panel and delete them | Files move to the OS trash instead of being erased, and an Undo button appears |
 
 Inside a project session, the agent can drive the board (no `card` = this session's card):
 
@@ -112,6 +123,16 @@ landfill    {"op":"recall"}
 
 `card_manage` and `kb_manage` are also available.
 
+```text
+card_manage {"op":"update","star":true}
+```
+```text
+kb_manage   {"op":"list","tag":"prompt"}
+```
+```text
+task_manage {"op":"check","num":"2.1","done":true}
+```
+
 ## Use cases
 
 - **Long-running projects**: persist today, open a new session tomorrow and pick up where you left off.
@@ -122,6 +143,11 @@ landfill    {"op":"recall"}
 - **Handover**: the card's memory, notes, links and sessions are the handover list.
 - **Tidy scattered memory**: several copies of the same project merge into one; old names become aliases.
 - **Let the agent drive**: ask the agent to move stages or add tasks; the board updates live.
+
+- **Reusing prompts and runbooks**: keep coding standards or troubleshooting SOPs as knowledge cards and attach them to several cards, so every session shares the same rules.
+- **Cleaning up stale artifacts**: after a project wraps up, filter linked files by "All tasks done" or "Archived" and move the old ones to the trash in one batch.
+
+- **Spot priority projects with stars**: star key cards so they stand out with a gold badge on the board, the schedule timeline and the Today panel.
 
 ## Good fit / not a fit
 
@@ -136,6 +162,9 @@ landfill    {"op":"recall"}
 - The sidebar **Project area** groups project sessions by card group, with live counts.
 - After 00:00, yesterday's in-flight tasks show up in **Done today** with an **Auto** tag.
 - Merged folders go to `inbox/retired/` and can be restored.
+
+- Knowledge cards attached to a card are injected into new sessions automatically; switching one item off stops sending it on the next turn.
+- Switching the interface language in Settings → Project Board (Follow DSH / 中文 / English / Русский) updates board and panel labels instantly, without reloading.
 
 ## Comparison
 
@@ -165,6 +194,8 @@ landfill    {"op":"recall"}
 - **Degrades quietly**: if a dsh update changes the page structure, sidebar add-ons hide themselves; data is untouched.
 - **Undoable**: file deletes go to the Trash; merges and the 00:00 auto-log can be undone.
 - **Known limits**: data stays on this machine (no multi-user sync); persisting is unavailable on Windows (needs `python3`).
+
+- **Inspectable context injection**: the session info bar shows the exact text the AI received, and each card item can be toggled on or off.
 
 ## FAQ
 
