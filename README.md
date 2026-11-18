@@ -28,7 +28,7 @@ dsh plugin add dsh-project-manager
 
 ## 亮点
 
-<p align="center"><img src="assets/demo-30s-zh-captioned.gif" alt="dsh-project-manager 30 秒演示（中文字幕）" width="880"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/hoyyang/dsh-project-manager/main/assets/demo-30s-zh-captioned.gif" alt="dsh-project-manager 30 秒演示（中文字幕）" width="880"></p>
 
 | | 特性 | 说明 |
 |---|---|---|

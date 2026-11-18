@@ -28,7 +28,7 @@ Alternative: `dsh plugin add github:hoyyang/dsh-project-manager`. Restart dsh af
 
 ## Highlights
 
-<p align="center"><img src="assets/demo-30s-captioned.gif" alt="30-second demo (captioned)" width="880"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/hoyyang/dsh-project-manager/main/assets/demo-30s-captioned.gif" alt="30-second demo (captioned)" width="880"></p>
 
 | | Feature | Summary |
 |---|---|---|
